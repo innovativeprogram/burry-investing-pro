@@ -4,3 +4,4 @@ numpy
 pandas-ta
 plotly
 scikit-learn
+pandas
