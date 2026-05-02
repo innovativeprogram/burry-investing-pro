@@ -5,3 +5,4 @@ numpy
 pandas-ta
 scikit-learn
 plotly
+matplotlib
