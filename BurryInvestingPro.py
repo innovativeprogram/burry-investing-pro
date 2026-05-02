@@ -15,6 +15,23 @@ from sklearn.linear_model import LinearRegression
 st.set_page_config(page_title="Burry Investing Pro", layout="wide")
 st.markdown('<link rel="manifest" href="./manifest.json">', unsafe_allow_html=True)
 
+st.markdown(
+    """
+    <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/sw.js').then(function(registration) {
+          console.log('ServiceWorker registration successful');
+        }, function(err) {
+          console.log('ServiceWorker registration failed: ', err);
+        });
+      });
+    }
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 hide_st_style = """
             <style>
