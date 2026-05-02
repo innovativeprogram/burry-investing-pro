@@ -12,6 +12,18 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 
+st.set_page_config(page_title="Burry Investing Pro", layout="wide")
+st.markdown(f'<link rel="manifest" href="manifest.json">', unsafe_allow_name=True)
+
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 
 # ==========================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
