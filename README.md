@@ -1,1 +1,2 @@
 # burry-investing-pro
+Copyright (c) 2026 InnovativeProgram - All Rights Reserved.
