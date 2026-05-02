@@ -1,0 +1,15 @@
+{
+  "short_name": "BurryPro",
+  "name": "Burry Investing Pro",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2621/2621590.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0e1117",
+  "background_color": "#0e1117"
+}
