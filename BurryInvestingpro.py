@@ -18,7 +18,7 @@ import streamlit as st
 # 1. Configurazione Pagina (Deve essere la prima istruzione)
 st.set_page_config(
     page_title="Burry Investing Pro",
-    page_icon="ðŸ“ˆ",
+    page_icon="🐂“ˆ",
     layout="wide"
 )
 
