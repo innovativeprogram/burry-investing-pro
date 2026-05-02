@@ -14,51 +14,34 @@ from sklearn.linear_model import LinearRegression
 
 import streamlit as st
 
-st.set_page_config(page_title="Burry Investing Pro", page_icon="📈", layout="wide")
+# 1. Configurazione della pagina (Titolo della scheda del browser e Icona)
+st.set_page_config(
+    page_title="Burry Investing Pro",
+    page_icon="📈",
+    layout="wide"
+)
 
-# Questo carica il manifesto per Android
-st.markdown('<link rel="manifest" href="./manifest.json">', unsafe_allow_html=True)
+# 2. Collegamento al file Manifest per Android (PWA)
+# Usiamo un trucco (?v=2) per forzare il telefono a scaricare la nuova versione del logo
+st.markdown('<link rel="manifest" href="./manifest.json?v=2">', unsafe_allow_html=True)
 
-# Questo nasconde l'interfaccia standard di Streamlit per farla sembrare un'app
+# 3. CSS per rendere l'interfaccia simile a un'app nativa
+# Nascondiamo l'header, il footer e il menu di Streamlit
 hide_style = """
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
+    /* Rimuove lo spazio bianco in alto */
+    .block-container {
+        padding-top: 2rem;
+    }
     </style>
     """
 st.markdown(hide_style, unsafe_allow_html=True)
 
-
-st.markdown(
-    """
-    <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', function() {
-        navigator.serviceWorker.register('/sw.js').then(function(registration) {
-          console.log('ServiceWorker registration successful');
-        }, function(err) {
-          console.log('ServiceWorker registration failed: ', err);
-        });
-      });
-    }
-    </script>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_st_style, unsafe_allow_html=True)
-
-
-# ==========================================
+# Da qui in poi prosegue il tuo codice originale (main, grafici, ecc.)
+ ==========================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
