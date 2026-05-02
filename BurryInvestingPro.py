@@ -13,7 +13,8 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 
 st.set_page_config(page_title="Burry Investing Pro", layout="wide")
-st.markdown(f'<link rel="manifest" href="manifest.json">', unsafe_allow_name=True)
+st.markdown('<link rel="manifest" href="./manifest.json">', unsafe_allow_html=True)
+
 
 hide_st_style = """
             <style>
