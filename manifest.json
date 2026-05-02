@@ -3,12 +3,13 @@
   "name": "Burry Investing Pro",
   "icons": [
     {
-      "src": "https://share.google/TZFZyquwGsU4TYdwm",
+      "src": "logo.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     }
   ],
-  "start_url": "/",
+  "start_url": ".",
   "display": "standalone",
   "theme_color": "#0e1117",
   "background_color": "#0e1117"
