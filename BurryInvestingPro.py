@@ -22,7 +22,7 @@ st.set_page_config(
 )
 
 # Caricamento Manifesto e CSS (tutto allineato a sinistra)
-st.markdown('<link rel="manifest" href="./manifest.json?v=2">', unsafe_allow_html=True)
+st.markdown('<link rel="manifest" href="./manifest.json?v=3">', unsafe_allow_html=True)
 
 hide_style = """
 <style>
