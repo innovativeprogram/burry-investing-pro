@@ -12,19 +12,20 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 
+
 import streamlit as st
 
-# 1. Configurazione Pagina
+# 1. Configurazione Pagina (Deve essere la prima istruzione)
 st.set_page_config(
     page_title="Burry Investing Pro",
     page_icon="📈",
     layout="wide"
 )
 
-# 2. Link al Manifesto (TUTTO SU UNA RIGA)
+# 2. Link al Manifesto PWA (Tutto su una riga per evitare errori)
 st.markdown('<link rel="manifest" href="https://raw.githubusercontent.com/Innovativeprogram/burry-investing-pro/main/manifest.json">', unsafe_allow_html=True)
 
-# 3. CSS per nascondere menu
+# 3. CSS per nascondere l'interfaccia Streamlit
 hide_style = """
 <style>
 #MainMenu {visibility: hidden;}
@@ -34,7 +35,11 @@ header {visibility: hidden;}
 </style>
 """
 st.markdown(hide_style, unsafe_allow_html=True)
-">', )
+
+# =================================================================
+# DA QUI INIZIA IL TUO CODICE ORIGINALE
+# =================================================================
+
 
 
 # ==========================================
