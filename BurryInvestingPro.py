@@ -18,7 +18,7 @@ import streamlit as st
 # 1. Configurazione Pagina (Deve essere la prima istruzione)
 st.set_page_config(
     page_title="Burry Investing Pro",
-    page_icon="📈",
+    page_icon="ðŸ“ˆ",
     layout="wide"
 )
 
@@ -72,16 +72,11 @@ RISK_FREE_RATE = 0.04
 # ==========================================
 # CONFIGURAZIONE PAGINA UI
 # ==========================================
-# NOTA:
-# Questo blocco era già presente nel tuo codice. Lasciarlo così può generare
-# errore Streamlit perché set_page_config può essere chiamato una sola volta.
-# Per rispettare la tua richiesta di non cancellare nulla, NON lo rimuovo.
-# Lo lascio commentato.
-# st.set_page_config(
-#     page_title="BurryInvestingPro",
-#     page_icon="💎",
-#     layout="wide"
-# )
+st.set_page_config(
+    page_title="BurryInvestingPro",
+    page_icon="ðŸ’Ž",
+    layout="wide"
+)
 
 
 # ==========================================
@@ -122,7 +117,7 @@ class FundamentalMetrics:
 # ==========================================
 def sanitize_ticker(ticker: str) -> str:
     clean = str(ticker).strip().upper()
-    if not re.match(r"^[A-Z0-9-.]+$", clean):
+    if not re.match(r"^[A-Z0-9\-\.]+$", clean):
         raise ValueError(f"Ticker contiene caratteri non validi: {clean}")
     return clean
 
@@ -132,47 +127,11 @@ def normalize_ticker(ticker: str, suffix: str) -> str:
     if "-" in clean_ticker:
         return clean_ticker
     clean_suffix = str(suffix).strip().upper()
-    if clean_suffix and not re.match(r"^.[A-Z]+$", clean_suffix):
+    if clean_suffix and not re.match(r"^\.[A-Z]+$", clean_suffix):
         clean_suffix = ""
     if clean_suffix and not clean_ticker.endswith(clean_suffix):
         return f"{clean_ticker}{clean_suffix}"
     return clean_ticker
-
-
-# ==========================================
-# 2.B HELPER AGGIUNTIVI PORTAFOGLIO
-# ==========================================
-@st.cache_data(ttl=900, show_spinner=False)
-def get_last_price_fast(symbol: str) -> Optional[float]:
-    try:
-        tk = yf.Ticker(symbol)
-        info = tk.info if tk is not None else {}
-        p = info.get("currentPrice") or info.get("regularMarketPrice")
-        if p is not None:
-            return float(p)
-    except Exception:
-        pass
-
-    try:
-        hist = yf.download(symbol, period="5d", interval="1d", progress=False, auto_adjust=False)
-        if hist is not None and not hist.empty:
-            if isinstance(hist.columns, pd.MultiIndex):
-                hist.columns = hist.columns.get_level_values(0)
-            close_col = "Close" if "Close" in hist.columns else hist.columns[-1]
-            return float(hist[close_col].dropna().iloc[-1])
-    except Exception:
-        pass
-
-    return None
-
-
-def safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except Exception:
-        return default
 
 
 # ==========================================
@@ -298,22 +257,22 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     last_row = data.iloc[-1]
     if current_price > last_row['SMA_200']:
         score += 30
-        reasons.append("✅ Trend Rialzista (Sopra SMA 200)")
+        reasons.append("âœ… Trend Rialzista (Sopra SMA 200)")
     else:
-        reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
+        reasons.append("âš ï¸ Trend Ribassista (Sotto SMA 200)")
 
     rsi = last_row['RSI']
     if pd.notna(rsi):
         if rsi < 30:
             score += 30
-            reasons.append("✅ Ipervenduto (RSI < 30)")
+            reasons.append("âœ… Ipervenduto (RSI < 30)")
         elif rsi > 70:
             score -= 10
-            reasons.append("🛑 Ipercomprato (RSI > 70)")
+            reasons.append("ðŸ›‘ Ipercomprato (RSI > 70)")
 
     if current_price <= last_row.get('BB_Lower', 0) * 1.02:
         score += 20
-        reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
+        reasons.append("âœ… Prezzo su Banda Bollinger Inferiore")
 
     return score, reasons
 
@@ -582,7 +541,7 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 # ==========================================
 def setup_sidebar() -> Dict[str, Any]:
     st.sidebar.header("1. Selezione Asset")
-    input_mode = st.sidebar.radio("Modalità:", ["Manuale", "Batch (CSV)"], horizontal=True)
+    input_mode = st.sidebar.radio("ModalitÃ :", ["Manuale", "Batch (CSV)"], horizontal=True)
     file, manual = None, None
     if input_mode == "Batch (CSV)":
         file = st.sidebar.file_uploader("Carica CSV", type=["csv"])
@@ -591,33 +550,27 @@ def setup_sidebar() -> Dict[str, Any]:
 
     st.sidebar.header("2. Mercato")
     market = st.sidebar.selectbox("Borsa:", ["USA ", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Crypto", "Custom"])
-    suffix = ".MI" if "Italia" in market else (".DE" if "Germania" in market else (".PA" if "Francia" in market else (".L" if "GB" in market else "")))
-    analyze_btn = st.sidebar.button("🚀 Avvia Analisi", use_container_width=True)
+    suffix = ".MI" if "Italia" in market else (".DE" if "Germania" in market else "")
+    analyze_btn = st.sidebar.button("ðŸš€ Avvia Analisi", use_container_width=True)
 
-    with st.sidebar.expander("⚙️ Parametri Fondamentali"):
+    with st.sidebar.expander("âš™ï¸ Parametri Fondamentali"):
         cfg = {
             "roic": st.number_input("Min ROIC %", 10.0, step=0.5),
             "fcf": st.number_input("Min FCF (Mld $)", 0.0) * 1e9,
             "peg": st.number_input("Max PEG Ratio", 1.5, step=0.1),
             "pe": st.number_input("Max P/E (Fallback)", 25.0),
             "int_cov": st.number_input("Min Int. Coverage", 3.0),
-            "perfect_only": st.checkbox("🏆 Solo 'All Green'")
+            "perfect_only": st.checkbox("ðŸ† Solo 'All Green'")
         }
 
-    with st.sidebar.expander("❓ Come cercare il ticker corretto"):
+    with st.sidebar.expander("â“ Come cercare il ticker corretto"):
         st.markdown(
-            "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).
-"
-            "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI` per Stellantis, `ENI.MI`, `ISP.MI`).
-"
-            "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).
-"
-            "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA` per Airbus, `OR.PA` per L'Oréal).
-"
-            "- Azioni UK: aggiungi `.L` (es. `ULVR.L` per Unilever).
-"
-            "- Crypto: di solito coppia con valuta, es. `BTC-USD`, `ETH-USD`.
-"
+            "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).\n"
+            "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI` per Stellantis, `ENI.MI`, `ISP.MI`).\n"
+            "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).\n"
+            "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA` per Airbus, `OR.PA` per L'OrÃ©al).\n"
+            "- Azioni UK: aggiungi `.L` (es. `ULVR.L` per Unilever).\n"
+            "- Crypto: di solito coppia con valuta, es. `BTC-USD`, `ETH-USD`.\n"
             "- Se hai dubbi, cerca prima il titolo su Yahoo Finance e copia il ticker esatto."
         )
 
@@ -628,7 +581,7 @@ def setup_sidebar() -> Dict[str, Any]:
 # 7. MAIN ORCHESTRATOR
 # ==========================================
 def main():
-    st.title("💎 BurryInvestingPro")
+    st.title("ðŸ’Ž BurryInvestingPro")
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -640,15 +593,7 @@ def main():
     if 'holdings_currency' not in st.session_state:
         st.session_state.holdings_currency = {}
 
-    # AGGIUNTE: modalità e quantità per portafoglio
-    if 'holding_mode' not in st.session_state:
-        st.session_state.holding_mode = {}
-    if 'holding_units' not in st.session_state:
-        st.session_state.holding_units = {}
-
     ui = setup_sidebar()
-    score = 0
-
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch (CSV)" and ui["file"]:
@@ -656,34 +601,29 @@ def main():
 
         if targets:
             results: List[Dict[str, Any]] = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                futures = [ex.submit(normalize_ticker, t, ui["suffix"]) for t in targets]
+                tickers = [f.result() for f in concurrent.futures.as_completed(futures)]
 
-            normalized_tickers = []
-            for t in targets:
-                try:
-                    normalized_tickers.append(normalize_ticker(t, ui["suffix"]))
-                except Exception as e:
-                    logger.warning(f"Ticker saltato {t}: {e}")
-
-            for t in normalized_tickers:
+            for t in tickers:
                 raw = get_fundamental_data(t)
                 if raw:
                     met = calculate_fundamental_metrics(raw)
                     if met:
                         results.append(met.to_ui_dict())
-
             st.session_state.batch_results = pd.DataFrame(results)
             if results:
                 st.session_state.selected_ticker = results[0]["Ticker"]
 
-    tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
+    tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["ðŸ“Š FONDAMENTALI", "ðŸ“‰ TECNICO", "âš›ï¸ QUANT", "âš–ï¸ VERDETTO", "ðŸ“ PORTAFOGLIO"])
 
     ticker = st.session_state.selected_ticker
-    if ticker and st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
+    if ticker and st.session_state.batch_results is not None:
         row = st.session_state.batch_results[st.session_state.batch_results['Ticker'] == ticker].iloc[0]
 
         # --- TAB FONDAMENTALI ---
         with tab_f:
-            st.info("💡 **Come leggere questa sezione:** Questa tabella rappresenta il motore dell'azienda. Cerca società con un ROIC (ritorno sul capitale investito) costantemente alto e un debito gestibile. Il Free Cash Flow è il vero denaro prodotto dal business. Ricorda sempre: il prezzo è quello che paghi, il valore è quello che ottieni.")
+            st.info("ðŸ’¡ **Come leggere questa sezione:** Questa tabella rappresenta il motore dell'azienda. Cerca societÃ  con un ROIC (ritorno sul capitale investito) costantemente alto e un debito gestibile. Il Free Cash Flow Ã¨ il vero denaro prodotto dal business. Ricorda sempre: il prezzo Ã¨ quello che paghi, il valore Ã¨ quello che ottieni.")
 
             st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
 
@@ -692,7 +632,7 @@ def main():
 
         # --- TAB TECNICO ---
         with tab_t:
-            st.info("💡 **Come leggere il grafico:** Anche se preferiamo studiare il business, il prezzo ci dice come si muove il mercato. La linea blu (Media Mobile a 200 giorni) indica il trend di lungo periodo: se il prezzo è sopra, la marea è a nostro favore. Il grafico in basso (RSI) segnala se c'è troppa euforia (valori sopra 70, attenzione) o troppo pessimismo (sotto 30, possibili occasioni).")
+            st.info("ðŸ’¡ **Come leggere il grafico:** Anche se preferiamo studiare il business, il prezzo ci dice come si muove il mercato. La linea blu (Media Mobile a 200 giorni) indica il trend di lungo periodo: se il prezzo Ã¨ sopra, la marea Ã¨ a nostro favore. Il grafico in basso (RSI) segnala se c'Ã¨ troppa euforia (valori sopra 70, attenzione) o troppo pessimismo (sotto 30, possibili occasioni).")
 
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
@@ -740,7 +680,7 @@ def main():
 
         # --- TAB QUANT ---
         with tab_q:
-            st.info("💡 **Come interpretare i dati:** Qui lasciamo parlare la statistica. Lo **Sharpe Ratio** ci dice quanto rendimento stiamo ottenendo per ogni unità di rischio sopportata (più è alto, meglio è). L'**Altman Z-Score** è vitale per allontanarci dalle aziende a rischio bancarotta (sopra 3 è ottimo). I grafici in basso (Monte Carlo) simulano gli scenari futuri in base alla volatilità storica, mostrandoci il rischio concreto (Drawdown) di perdite permanenti.")
+            st.info("ðŸ’¡ **Come interpretare i dati:** Qui lasciamo parlare la statistica. Lo **Sharpe Ratio** ci dice quanto rendimento stiamo ottenendo per ogni unitÃ  di rischio sopportata (piÃ¹ Ã¨ alto, meglio Ã¨). L'**Altman Z-Score** Ã¨ vitale per allontanarci dalle aziende a rischio bancarotta (sopra 3 Ã¨ ottimo). I grafici in basso (Monte Carlo) simulano gli scenari futuri in base alla volatilitÃ  storica, mostrandoci il rischio concreto (Drawdown) di perdite permanenti.")
 
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
@@ -760,7 +700,7 @@ def main():
                 smart = compute_smart_quant_score(row, score, qm, risk)
                 st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
 
-                with st.expander("📉 Distribuzione rendimenti & rischio"):
+                with st.expander("ðŸ“‰ Distribuzione rendimenti & rischio"):
                     st.write(f"CVaR 95%: {risk['CVaR_95'] * 100:.2f}%")
                     st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
 
@@ -770,7 +710,7 @@ def main():
                     fig_r.update_layout(template="plotly_dark", bargap=0.05)
                     st.plotly_chart(fig_r, use_container_width=True)
 
-                with st.expander("🎲 Simulazione Monte Carlo (rendimenti storici)"):
+                with st.expander("ðŸŽ² Simulazione Monte Carlo (rendimenti storici)"):
                     col_mc1, col_mc2 = st.columns(2)
                     horizon_days = col_mc1.slider("Orizzonte (giorni trading)", 60, 756, 252, step=21)
                     n_paths = col_mc2.slider("Numero traiettorie", 100, 3000, 1000, step=100)
@@ -785,7 +725,7 @@ def main():
                         c7, c8, c9 = st.columns(3)
                         c7.metric("Prob. perdita > 20%", f"{(final_vals < 0.8).mean() * 100:.1f}%")
                         c8.metric("Mediana esito", f"{(p50 - 1) * 100:.1f}%")
-                        c9.metric("Scenario 5° percentile", f"{(p05 - 1) * 100:.1f}%")
+                        c9.metric("Scenario 5Â° percentile", f"{(p05 - 1) * 100:.1f}%")
 
                         x = np.arange(1, horizon_days + 1)
                         fig_mc = go.Figure()
@@ -794,11 +734,11 @@ def main():
                             line=dict(color="cyan")
                         ))
                         fig_mc.add_trace(go.Scatter(
-                            x=x, y=mc["q95"], name="95° percentile",
+                            x=x, y=mc["q95"], name="95Â° percentile",
                             line=dict(color="green"), opacity=0.3
                         ))
                         fig_mc.add_trace(go.Scatter(
-                            x=x, y=mc["q05"], name="5° percentile",
+                            x=x, y=mc["q05"], name="5Â° percentile",
                             line=dict(color="red"), opacity=0.3,
                             fill="tonexty", fillcolor="rgba(255,0,0,0.1)"
                         ))
@@ -815,7 +755,7 @@ def main():
 
         # --- TAB VERDETTO ---
         with tab_v:
-            st.info("💡 **Come leggere il verdetto:** Questa è la nostra sintesi razionale. Combina la solidità del business (Fondamentali), il momento (Tecnico) e le probabilità statistiche (Quant). Richiedi sempre un margine di sicurezza: investi solo quando il verdetto ti suggerisce che il rischio di perdere capitale in modo permanente è bassissimo.")
+            st.info("ðŸ’¡ **Come leggere il verdetto:** Questa Ã¨ la nostra sintesi razionale. Combina la soliditÃ  del business (Fondamentali), il momento (Tecnico) e le probabilitÃ  statistiche (Quant). Richiedi sempre un margine di sicurezza: investi solo quando il verdetto ti suggerisce che il rischio di perdere capitale in modo permanente Ã¨ bassissimo.")
 
             df_tech = get_technical_data(ticker)
             qm = calculate_quant_metrics(df_tech, row["_raw_data"]) if df_tech is not None else {}
@@ -832,11 +772,11 @@ def main():
             )
 
             if fund_pts >= 2 and z_safe and score >= 50:
-                st.success("🟢 BUY: Fondamentali solidi e timing favorevole.")
+                st.success("ðŸŸ¢ BUY: Fondamentali solidi e timing favorevole.")
             elif fund_pts >= 1 and z_safe:
-                st.warning("🟡 HOLD: Azienda sicura ma attendere prezzi migliori.")
+                st.warning("ðŸŸ¡ HOLD: Azienda sicura ma attendere prezzi migliori.")
             else:
-                st.error("🔴 SELL: Rischio finanziario o fondamentali scarsi.")
+                st.error("ðŸ”´ SELL: Rischio finanziario o fondamentali scarsi.")
 
             if df_tech is not None and qm:
                 smart_v = compute_smart_quant_score(row, score, qm, risk)
@@ -848,46 +788,32 @@ def main():
                 )
 
                 if smart_v["SmartScore"] >= 70 and z_safe:
-                    st.success("🟢 BUY (Quant): Vantaggio statistico e rischio controllato.")
+                    st.success("ðŸŸ¢ BUY (Quant): Vantaggio statistico e rischio controllato.")
                 elif smart_v["SmartScore"] >= 50 and z_safe:
-                    st.warning("🟡 HOLD (Quant): Setup discreto ma non eccezionale.")
+                    st.warning("ðŸŸ¡ HOLD (Quant): Setup discreto ma non eccezionale.")
                 else:
-                    st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole o rischio elevato.")
+                    st.error("ðŸ”´ NO TRADE (Quant): Vantaggio quantitativo debole o rischio elevato.")
 
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
 
         # --- TAB PORTAFOGLIO ---
         with tab_p:
-            st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Qui aggreghiamo i tuoi investimenti. Il grafico ti mostra la crescita combinata, mentre la matrice di correlazione in fondo è cruciale: se le aziende che possiedi tendono a muoversi tutte nella stessa direzione contemporaneamente, non sei diversificato come pensi.")
+            st.info("ðŸ’¡ **Come usare questa sezione:** La diversificazione sensata Ã¨ la protezione per il nostro capitale. Qui aggreghiamo i tuoi investimenti. Il grafico ti mostra la crescita combinata, mentre la matrice di correlazione in fondo Ã¨ cruciale: se le aziende che possiedi tendono a muoversi tutte nella stessa direzione contemporaneamente, non sei diversificato come pensi.")
 
             st.markdown(
-                "### Portafoglio reale
-"
-                "- Qui inserisci le **posizioni effettive** che hai in portafoglio.
-"
-                "- Per ogni titolo, puoi indicare **l'importo investito** oppure il **numero di quote/azioni**.
-"
-                "- Se inserisci il numero di quote/azioni, il sistema calcola automaticamente il **controvalore** usando il prezzo corrente.
-"
+                "### Portafoglio reale\n"
+                "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
+                "- Per ogni titolo, indica il **ticker corretto per il mercato** e l'**importo investito**.\n"
                 "- Il sistema calcola automaticamente il **peso percentuale** di ogni posizione e le metriche "
-                "quantitative del portafoglio (rendimento atteso, volatilità, Sharpe, drawdown).
-
-"
-                "**Come cercare il ticker giusto:**
-"
-                "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).
-"
-                "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI` per Stellantis a Milano, `ENI.MI`, `ISP.MI`).
-"
-                "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).
-"
-                "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA` per Airbus, `OR.PA` per L'Oréal`).
-"
-                "- Azioni UK: aggiungi `.L` (es. `ULVR.L` per Unilever).
-"
-                "- Crypto: in genere coppia con valuta, es. `BTC-USD`, `ETH-USD`.
-"
+                "quantitative del portafoglio (rendimento atteso, volatilitÃ , Sharpe, drawdown).\n\n"
+                "**Come cercare il ticker giusto:**\n"
+                "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).\n"
+                "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI` per Stellantis a Milano, `ENI.MI`, `ISP.MI`).\n"
+                "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).\n"
+                "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA` per Airbus, `OR.PA` per L'OrÃ©al`).\n"
+                "- Azioni UK: aggiungi `.L` (es. `ULVR.L` per Unilever).\n"
+                "- Crypto: in genere coppia con valuta, es. `BTC-USD`, `ETH-USD`.\n"
             )
 
             all_tickers_batch: List[str] = []
@@ -911,23 +837,15 @@ def main():
             st.markdown("#### Aggiungi manualmente altri ticker")
             manual_ticker = st.text_input(
                 "Ticker (incluso suffisso mercato, es. STLAM.MI, ENI.MI, BMW.DE, AIR.PA, ULVR.L)",
-                "",
-                key="manual_portfolio_ticker"
+                ""
             )
 
-            if st.button("➕ Aggiungi ticker manuale al portafoglio"):
+            if st.button("âž• Aggiungi ticker manuale al portafoglio"):
                 if manual_ticker.strip():
-                    try:
-                        t_clean = sanitize_ticker(manual_ticker)
-                        if t_clean not in st.session_state.portfolio_tickers:
-                            st.session_state.portfolio_tickers.append(t_clean)
-                            st.session_state.holding_mode[t_clean] = "Importo investito"
-                            st.session_state.holding_units[t_clean] = 0.0
-                            st.success(f"Aggiunto {t_clean} al portafoglio.")
-                        else:
-                            st.info(f"{t_clean} è già presente nel portafoglio.")
-                    except Exception as e:
-                        st.warning(str(e))
+                    t_clean = sanitize_ticker(manual_ticker)
+                    if t_clean not in st.session_state.portfolio_tickers:
+                        st.session_state.portfolio_tickers.append(t_clean)
+                        st.success(f"Aggiunto {t_clean} al portafoglio.")
                 else:
                     st.warning("Inserisci un ticker valido prima di aggiungere.")
 
@@ -935,104 +853,55 @@ def main():
             st.session_state.portfolio_tickers = portfolio_list
 
             if portfolio_list:
-                st.markdown("#### Dati posizione per ogni titolo")
-                cols = st.columns(2)
+                st.markdown("#### Importo investito per ogni posizione")
+                cols = st.columns(3)
                 holdings: Dict[str, float] = st.session_state.holdings
 
                 for i, t in enumerate(portfolio_list):
-                    col = cols[i % 2]
+                    col = cols[i % 3]
+                    default_amt = float(holdings.get(t, 0.0))
+                    amt = col.number_input(
+                        f"{t} - Importo investito",
+                        min_value=0.0,
+                        value=default_amt,
+                        step=100.0,
+                        key=f"holding_{t}"
+                    )
+                    holdings[t] = amt
 
-                    with col:
-                        st.markdown(f"##### {t}")
+                    cur_default = st.session_state.holdings_currency.get(t, "USD")
+                    cur = col.selectbox(
+                        f"{t} - Valuta",
+                        ["USD", "EUR"],
+                        index=["USD", "EUR"].index(cur_default),
+                        key=f"currency_{t}"
+                    )
+                    st.session_state.holdings_currency[t] = cur
 
-                        default_mode = st.session_state.holding_mode.get(t, "Importo investito")
-                        mode = st.radio(
-                            f"{t} - Modalità inserimento",
-                            ["Importo investito", "Numero quote/azioni"],
-                            index=0 if default_mode == "Importo investito" else 1,
-                            key=f"mode_{t}",
-                            horizontal=True
-                        )
-                        st.session_state.holding_mode[t] = mode
-
-                        cur_default = st.session_state.holdings_currency.get(t, "USD")
-                        cur = st.selectbox(
-                            f"{t} - Valuta",
-                            ["USD", "EUR"],
-                            index=["USD", "EUR"].index(cur_default) if cur_default in ["USD", "EUR"] else 0,
-                            key=f"currency_{t}"
-                        )
-                        st.session_state.holdings_currency[t] = cur
-
-                        last_price = get_last_price_fast(t)
-
-                        if mode == "Importo investito":
-                            default_amt = float(holdings.get(t, 0.0))
-                            amt = st.number_input(
-                                f"{t} - Importo investito",
-                                min_value=0.0,
-                                value=default_amt,
-                                step=100.0,
-                                key=f"holding_{t}"
-                            )
-                            holdings[t] = amt
-
-                            units_default = safe_float(st.session_state.holding_units.get(t, 0.0), 0.0)
-                            if last_price and last_price > 0 and amt > 0:
-                                units_est = amt / last_price
-                                st.caption(f"Prezzo attuale stimato: {last_price:.2f} {cur} | Quote/azioni stimate: {units_est:.4f}")
-                            else:
-                                st.caption("Prezzo attuale non disponibile oppure importo nullo.")
-
-                        else:
-                            default_units = safe_float(st.session_state.holding_units.get(t, 0.0), 0.0)
-                            units = st.number_input(
-                                f"{t} - Numero quote/azioni",
-                                min_value=0.0,
-                                value=default_units,
-                                step=1.0,
-                                key=f"units_{t}"
-                            )
-                            st.session_state.holding_units[t] = units
-
-                            if last_price and last_price > 0:
-                                computed_amt = units * last_price
-                                holdings[t] = computed_amt
-                                st.caption(f"Prezzo attuale stimato: {last_price:.2f} {cur} | Controvalore posizione: {computed_amt:.2f} {cur}")
-                            else:
-                                holdings[t] = 0.0
-                                st.warning(f"Prezzo non disponibile per {t}: impossibile stimare il controvalore da quote/azioni.")
-
-                        if st.button("🗑 Rimuovi", key=f"remove_{t}"):
-                            if t in st.session_state.portfolio_tickers:
-                                st.session_state.portfolio_tickers = [
-                                    x for x in st.session_state.portfolio_tickers if x != t
-                                ]
-                            if t in st.session_state.holdings:
-                                del st.session_state.holdings[t]
-                            if t in st.session_state.holdings_currency:
-                                del st.session_state.holdings_currency[t]
-                            if t in st.session_state.holding_mode:
-                                del st.session_state.holding_mode[t]
-                            if t in st.session_state.holding_units:
-                                del st.session_state.holding_units[t]
-                            st.rerun()
-
-                        st.markdown("---")
+                    if col.button("ðŸ—‘ Rimuovi", key=f"remove_{t}"):
+                        if t in st.session_state.portfolio_tickers:
+                            st.session_state.portfolio_tickers = [
+                                x for x in st.session_state.portfolio_tickers if x != t
+                            ]
+                        if t in st.session_state.holdings:
+                            del st.session_state.holdings[t]
+                        if t in st.session_state.holdings_currency:
+                            del st.session_state.holdings_currency[t]
+                        st.rerun()
 
                 st.session_state.holdings = holdings
 
-                if st.button("📊 Calcola pesi e analisi del portafoglio"):
+                if st.button("ðŸ“Š Calcola pesi e analisi del portafoglio"):
                     positive_holdings = {t: a for t, a in holdings.items() if a > 0}
                     if not positive_holdings:
-                        st.error("Imposta un importo > 0 oppure un numero quote/azioni > 0 almeno per un titolo.")
+                        st.error("Imposta un importo > 0 almeno per un titolo.")
                     else:
                         tot = sum(positive_holdings.values())
                         weights_pct = {t: a / tot * 100.0 for t, a in positive_holdings.items()}
 
                         built = build_portfolio_returns(list(positive_holdings.keys()), weights_pct)
                         if built is None:
-                            st.error("Impossibile costruire la serie dei rendimenti (dati insufficienti per uno o più ticker).")
+                            st.error("Impossibile costruire la serie dei rendimenti (dati insufficienti per uno o piÃ¹ ticker).")
                         else:
                             df_rets, port_ret = built
                             pm = calculate_portfolio_metrics(port_ret)
@@ -1041,24 +910,19 @@ def main():
                             df_weights = pd.DataFrame(
                                 {
                                     "Ticker": list(weights_pct.keys()),
-                                    "Modalità": [st.session_state.holding_mode.get(t, "Importo investito") for t in weights_pct.keys()],
-                                    "Quote/Azioni": [
-                                        st.session_state.holding_units.get(t, np.nan)
-                                        if st.session_state.holding_mode.get(t) == "Numero quote/azioni"
-                                        else np.nan
-                                        for t in weights_pct.keys()
-                                    ],
                                     "Importo": [positive_holdings[t] for t in weights_pct.keys()],
-                                    "Peso %": [weights_pct[t] for t in weights_pct.keys()],
-                                    "Valuta": [st.session_state.holdings_currency.get(t, "USD") for t in weights_pct.keys()],
-                                    "Prezzo stimato": [get_last_price_fast(t) for t in weights_pct.keys()]
+                                    "Peso %": [weights_pct[t] for t in weights_pct.keys()]
                                 }
                             )
+                            df_weights["Valuta"] = [
+                                st.session_state.holdings_currency.get(t, "USD")
+                                for t in weights_pct.keys()
+                            ]
                             st.dataframe(df_weights)
 
                             cpa, cpv, cps, cpdd = st.columns(4)
                             cpa.metric("Rendimento annuo atteso", f"{pm['AnnRet'] * 100:.2f}%")
-                            cpv.metric("Volatilità annua", f"{pm['AnnVol'] * 100:.2f}%")
+                            cpv.metric("VolatilitÃ  annua", f"{pm['AnnVol'] * 100:.2f}%")
                             cps.metric("Sharpe portafoglio", f"{pm['Sharpe']:.2f}")
                             cpdd.metric("Max Drawdown portafoglio", f"{pm['MaxDD'] * 100:.1f}%")
 
@@ -1085,8 +949,543 @@ def main():
 
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
-    else:
-        st.info("Avvia un'analisi dalla sidebar per caricare un titolo o un batch.")
 
-if __name__ == "__main__":
-    main()
+
+# if __name__ == '__main__':
+#     main()
+
+
+# ==========================================
+# ESTENSIONI AGGIUNTIVE V2 - SOLO APPEND
+# ==========================================
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        if isinstance(value, str) and not value.strip():
+            return float(default)
+        v = float(value)
+        if np.isnan(v) or np.isinf(v):
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def get_last_price_from_symbol(symbol: str) -> Optional[float]:
+    try:
+        df = get_technical_data(symbol)
+        if df is not None and not df.empty and 'Close' in df.columns:
+            return _safe_float(df['Close'].dropna().iloc[-1], np.nan)
+    except Exception:
+        pass
+    try:
+        raw = get_fundamental_data(symbol)
+        if raw and 'info' in raw:
+            info = raw['info']
+            p = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+            return _safe_float(p, np.nan)
+    except Exception:
+        pass
+    return None
+
+
+def discounted_cash_flow_valuation(fund: FundamentalMetrics, years: int = 10, growth: float = 0.05, discount_rate: float = 0.10, terminal_growth: float = 0.02) -> Dict[str, float]:
+    info = fund.raw_data.get('info', {}) if isinstance(fund.raw_data, dict) else {}
+    fcf = max(_safe_float(fund.fcf, 0.0), 0.0)
+    shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding') or 0
+    shares = _safe_float(shares, 0.0)
+    if shares <= 0 or fcf <= 0:
+        return {'fair_value': np.nan, 'mos_pct': np.nan, 'fair_low': np.nan, 'fair_high': np.nan}
+
+    def _dcf_once(g: float, dr: float, tg: float) -> float:
+        cashflows = []
+        for t in range(1, years + 1):
+            fcf_t = fcf * ((1 + g) ** t)
+            cashflows.append(fcf_t / ((1 + dr) ** t))
+        spread = max(dr - tg, 0.0001)
+        terminal_fcf = fcf * ((1 + g) ** years) * (1 + tg)
+        terminal_value = terminal_fcf / spread
+        terminal_pv = terminal_value / ((1 + dr) ** years)
+        equity_value = sum(cashflows) + terminal_pv
+        return equity_value / shares
+
+    base = _dcf_once(growth, discount_rate, terminal_growth)
+    low = _dcf_once(max(growth - 0.03, 0.0), discount_rate + 0.02, max(terminal_growth - 0.01, 0.0))
+    high = _dcf_once(growth + 0.03, max(discount_rate - 0.02, terminal_growth + 0.01), terminal_growth + 0.01)
+    mos = ((base - fund.price) / base * 100.0) if base and not np.isnan(base) else np.nan
+    return {'fair_value': float(base), 'mos_pct': float(mos), 'fair_low': float(low), 'fair_high': float(high)}
+
+
+def dividend_discount_model(info: Dict[str, Any], required_return: float = 0.10, growth: float = 0.03) -> Optional[float]:
+    try:
+        div_rate = info.get('dividendRate') or 0.0
+        div_rate = _safe_float(div_rate, 0.0)
+        if div_rate <= 0 or required_return <= growth:
+            return None
+        fair = (div_rate * (1 + growth)) / (required_return - growth)
+        return float(fair)
+    except Exception:
+        return None
+
+
+def build_valuation_summary_row(fund: FundamentalMetrics, dcf_res: Dict[str, float], ddm_fair: Optional[float]) -> Dict[str, Any]:
+    return {
+        'Ticker': fund.ticker,
+        'Prezzo attuale': _safe_float(fund.price, np.nan),
+        'DCF Fair Value': dcf_res.get('fair_value', np.nan),
+        'DCF Range Low': dcf_res.get('fair_low', np.nan),
+        'DCF Range High': dcf_res.get('fair_high', np.nan),
+        'DCF MOS %': dcf_res.get('mos_pct', np.nan),
+        'DDM Fair Value': ddm_fair if ddm_fair is not None else np.nan,
+    }
+
+
+def calculate_regime_statistics(returns: pd.Series, lookback: int = 63) -> Dict[str, Any]:
+    if returns is None or returns.empty or len(returns) < lookback:
+        return {'Regime': 'N/D', 'Vol ann.': np.nan, 'Skew': np.nan, 'Kurt': np.nan}
+    w = returns.tail(lookback)
+    vol_ann = _safe_float(w.std() * np.sqrt(TRADING_DAYS_YEAR), np.nan)
+    skew = _safe_float(w.skew(), np.nan)
+    kurt = _safe_float(w.kurt(), np.nan)
+    regime = 'Normale'
+    if (not np.isnan(vol_ann) and vol_ann > 0.30) or (not np.isnan(skew) and skew < -1.0):
+        regime = 'Stress'
+    elif (not np.isnan(vol_ann) and vol_ann < 0.15) and (not np.isnan(skew) and abs(skew) < 0.5):
+        regime = 'Calmo'
+    return {'Regime': regime, 'Vol ann.': vol_ann, 'Skew': skew, 'Kurt': kurt}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_benchmark_returns(symbol: str = '^GSPC', period: str = '2y', interval: str = '1d') -> Optional[pd.Series]:
+    try:
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        rets = df['Close'].pct_change().dropna()
+        rets.name = symbol
+        return rets
+    except Exception:
+        return None
+
+
+def estimate_beta_and_alpha(asset_returns: pd.Series, benchmark_returns: pd.Series) -> Dict[str, float]:
+    try:
+        df = pd.concat([asset_returns, benchmark_returns], axis=1).dropna()
+        if df.empty:
+            return {'Beta': np.nan, 'Alpha ann.': np.nan, 'RÂ²': np.nan}
+        x = df.iloc[:, 1].values.reshape(-1, 1)
+        y = df.iloc[:, 0].values
+        model = LinearRegression().fit(x, y)
+        beta = float(model.coef_[0])
+        alpha_daily = float(model.intercept_)
+        alpha_ann = alpha_daily * TRADING_DAYS_YEAR
+        r2 = float(model.score(x, y))
+        return {'Beta': beta, 'Alpha ann.': alpha_ann, 'RÂ²': r2}
+    except Exception:
+        return {'Beta': np.nan, 'Alpha ann.': np.nan, 'RÂ²': np.nan}
+
+
+def monte_carlo_risk_bands(mc_result: Dict[str, Any]) -> Dict[str, float]:
+    final_values = None if mc_result is None else mc_result.get('final_distribution')
+    if final_values is None:
+        return {'Prob. loss >10%': np.nan, 'Prob. loss >20%': np.nan, 'Prob. loss >30%': np.nan, 'Mean return %': np.nan, 'CVaR 20% %': np.nan}
+    fv = np.asarray(final_values)
+    if fv.size == 0:
+        return {'Prob. loss >10%': np.nan, 'Prob. loss >20%': np.nan, 'Prob. loss >30%': np.nan, 'Mean return %': np.nan, 'CVaR 20% %': np.nan}
+    ret = fv - 1.0
+    tail = ret[ret <= -0.20]
+    return {
+        'Prob. loss >10%': float((ret <= -0.10).mean() * 100.0),
+        'Prob. loss >20%': float((ret <= -0.20).mean() * 100.0),
+        'Prob. loss >30%': float((ret <= -0.30).mean() * 100.0),
+        'Mean return %': float(ret.mean() * 100.0),
+        'CVaR 20% %': float(tail.mean() * 100.0) if tail.size else np.nan,
+    }
+
+
+def compute_drawdown_distribution(returns: pd.Series) -> Dict[str, Any]:
+    if returns is None or returns.empty:
+        return {'drawdowns': pd.DataFrame(columns=['start', 'end', 'depth', 'duration'])}
+    equity = (1 + returns).cumprod()
+    roll_max = equity.cummax()
+    dd = equity / roll_max - 1.0
+    episodes = []
+    in_dd = False
+    start = None
+    min_depth = 0.0
+    for idx, value in dd.items():
+        if value < 0 and not in_dd:
+            in_dd = True
+            start = idx
+            min_depth = value
+        elif value < 0 and in_dd:
+            min_depth = min(min_depth, value)
+        elif value >= 0 and in_dd:
+            end = idx
+            duration = (end - start).days if hasattr(end, 'days') else 0
+            episodes.append({'start': start, 'end': end, 'depth': float(min_depth), 'duration': duration})
+            in_dd = False
+            start = None
+            min_depth = 0.0
+    if in_dd and start is not None:
+        end = dd.index[-1]
+        duration = (end - start).days if hasattr(end, 'days') else 0
+        episodes.append({'start': start, 'end': end, 'depth': float(min_depth), 'duration': duration})
+    return {'drawdowns': pd.DataFrame(episodes)}
+
+
+def compute_risk_contribution(df_rets: pd.DataFrame, weights_pct: Dict[str, float]) -> Optional[pd.DataFrame]:
+    if df_rets is None or df_rets.empty:
+        return None
+    cols = df_rets.columns.tolist()
+    w = np.array([weights_pct.get(t, 0.0) for t in cols], dtype=float) / 100.0
+    if w.sum() <= 0:
+        return None
+    w = w / w.sum()
+    cov = df_rets.cov().values * TRADING_DAYS_YEAR
+    port_var = float(w @ cov @ w)
+    if port_var <= 0:
+        return None
+    port_vol = np.sqrt(port_var)
+    mrc = cov @ w / port_vol
+    rc = w * mrc
+    rc_pct = rc / port_vol * 100.0
+    return pd.DataFrame({'Ticker': cols, 'Peso %': w * 100.0, 'Risk Contribution %': rc_pct})
+
+
+def optimize_portfolio_min_variance(df_rets: pd.DataFrame) -> Optional[Dict[str, float]]:
+    if df_rets is None or df_rets.empty:
+        return None
+    cov = df_rets.cov().values * TRADING_DAYS_YEAR
+    n = cov.shape[0]
+    ones = np.ones(n)
+    try:
+        inv_cov = np.linalg.inv(cov + np.eye(n) * 1e-8)
+        w = inv_cov @ ones
+        w = np.clip(w, 0, None)
+        if w.sum() <= 0:
+            w = np.ones(n)
+        w = w / w.sum()
+        return {t: float(w[i] * 100.0) for i, t in enumerate(df_rets.columns)}
+    except Exception:
+        return None
+
+
+def optimize_portfolio_max_sharpe(df_rets: pd.DataFrame, risk_free: float = RISK_FREE_RATE) -> Optional[Dict[str, float]]:
+    if df_rets is None or df_rets.empty:
+        return None
+    mu = df_rets.mean().values * TRADING_DAYS_YEAR
+    cov = df_rets.cov().values * TRADING_DAYS_YEAR
+    n = len(mu)
+    ones = np.ones(n)
+    try:
+        inv_cov = np.linalg.inv(cov + np.eye(n) * 1e-8)
+        excess = mu - risk_free * ones
+        w = inv_cov @ excess
+        w = np.clip(w, 0, None)
+        if w.sum() <= 0:
+            w = np.ones(n)
+        w = w / w.sum()
+        return {t: float(w[i] * 100.0) for i, t in enumerate(df_rets.columns)}
+    except Exception:
+        return None
+
+
+def stress_test_portfolio(df_rets: pd.DataFrame, weights_pct: Dict[str, float], shocks: Dict[str, float]) -> Optional[pd.DataFrame]:
+    if df_rets is None or df_rets.empty:
+        return None
+    rows = []
+    total_impact = 0.0
+    for t in df_rets.columns:
+        w = _safe_float(weights_pct.get(t, 0.0), 0.0)
+        shock = _safe_float(shocks.get(t, shocks.get('DEFAULT', 0.0)), 0.0)
+        impact = w / 100.0 * shock / 100.0
+        total_impact += impact
+        rows.append({'Ticker': t, 'Peso %': w, 'Shock %': shock, 'Contributo impatto %': impact * 100.0})
+    rows.append({'Ticker': 'PORTAFOGLIO', 'Peso %': 100.0, 'Shock %': np.nan, 'Contributo impatto %': total_impact * 100.0})
+    return pd.DataFrame(rows)
+
+
+def rank_batch_by_smart_score(batch_df: pd.DataFrame) -> pd.DataFrame:
+    if batch_df is None or batch_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in batch_df.iterrows():
+        ticker = row.get('Ticker')
+        dftech = get_technical_data(ticker)
+        if dftech is None or dftech.empty:
+            continue
+        dfcalc = calculate_technical_indicators(dftech)
+        timing_score, reasons = calculate_timing_score(dfcalc, _safe_float(dfcalc['Close'].iloc[-1], 0.0))
+        qm = calculate_quant_metrics(dftech, row.get('raw_data', {}))
+        risk = calculate_risk_metrics(dftech)
+        smart = compute_smart_quant_score(row, timing_score, qm, risk)
+        rows.append({
+            'Ticker': ticker,
+            'Company Name': row.get('Company Name'),
+            'ROIC': row.get('ROIC'),
+            'PEG Ratio': row.get('PEG Ratio'),
+            'P/E Ratio': row.get('P/E Ratio'),
+            'Timing Score': timing_score,
+            'Sharpe Ratio': qm.get('Sharpe Ratio'),
+            'Altman Z-Score': qm.get('Altman Z-Score'),
+            'Max Drawdown': risk.get('Max Drawdown'),
+            'SmartScore': smart.get('SmartScore'),
+            'Timing Reasons': ', '.join(reasons),
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values('SmartScore', ascending=False)
+
+
+def apply_fundamental_filters(batch_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+    if batch_df is None or batch_df.empty:
+        return pd.DataFrame()
+    df = batch_df.copy()
+    min_roic = _safe_float(cfg.get('roic', 10.0), 10.0) / 100.0
+    min_fcf = _safe_float(cfg.get('fcf', 0.0), 0.0)
+    max_peg = _safe_float(cfg.get('peg', 1.5), 1.5)
+    max_pe = _safe_float(cfg.get('pe', 25.0), 25.0)
+    min_intcov = _safe_float(cfg.get('int_cov', 3.0), 3.0)
+    perfect_only = bool(cfg.get('perfect_only', False))
+
+    cond_roic = df['ROIC'].fillna(-np.inf) >= min_roic
+    cond_fcf = df['Free Cash Flow'].fillna(-np.inf) >= min_fcf
+    cond_peg = df['PEG Ratio'].fillna(np.inf) <= max_peg
+    cond_pe = df['P/E Ratio'].fillna(np.inf) <= max_pe
+    cond_int = df['Interest Coverage'].fillna(-np.inf) >= min_intcov
+
+    df = df[cond_roic & cond_fcf & cond_int & (cond_peg | cond_pe)].copy()
+    if perfect_only and not df.empty:
+        df = df[cond_roic & cond_fcf & cond_peg & cond_pe & cond_int]
+    return df
+
+
+def dataframe_to_csv_download(df: pd.DataFrame, filename: str, label: str) -> None:
+    if df is None or df.empty:
+        return
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    st.download_button(label=label, data=csv_bytes, file_name=filename, mime='text/csv', use_container_width=True)
+
+
+def init_extended_session_state() -> None:
+    defaults = {
+        'holdings_mode': {},
+        'holding_units': {},
+        'last_prices': {},
+        'portfolio_analysis_cache': None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def resolve_position_market_value(ticker: str, amount_value: float, units_value: float) -> Tuple[float, float]:
+    price = get_last_price_from_symbol(ticker)
+    if price is not None and not np.isnan(price):
+        st.session_state.last_prices[ticker] = float(price)
+    else:
+        price = _safe_float(st.session_state.last_prices.get(ticker), np.nan)
+    market_value = _safe_float(amount_value, 0.0)
+    if _safe_float(units_value, 0.0) > 0 and price is not None and not np.isnan(price):
+        market_value = float(units_value) * float(price)
+    return market_value, price if price is not None else np.nan
+
+
+def render_extended_modules() -> None:
+    init_extended_session_state()
+    if st.session_state.get('batch_results') is None or st.session_state.batch_results is None or st.session_state.batch_results.empty:
+        return
+    ticker = st.session_state.get('selected_ticker')
+    if not ticker:
+        return
+    row_df = st.session_state.batch_results[st.session_state.batch_results['Ticker'] == ticker]
+    if row_df.empty:
+        return
+    row = row_df.iloc[0]
+
+    st.markdown('---')
+    st.subheader('Estensioni V2')
+    ext_tabs = st.tabs(['Valutazione', 'Screener avanzato', 'Analisi portafoglio estesa'])
+
+    with ext_tabs[0]:
+        try:
+            fund = FundamentalMetrics(
+                ticker=row['Ticker'],
+                company_name=row['Company Name'],
+                price=_safe_float(row['Price'], 0.0),
+                fcf=_safe_float(row['Free Cash Flow'], 0.0),
+                roic=_safe_float(row['ROIC'], 0.0),
+                peg_ratio=row['PEG Ratio'],
+                peg_source=row['PEG Source'],
+                pe_ratio=row['P/E Ratio'],
+                interest_coverage=_safe_float(row['Interest Coverage'], 0.0),
+                currency=row['Currency'],
+                raw_data=row['raw_data'],
+            )
+            dcf = discounted_cash_flow_valuation(fund)
+            info = fund.raw_data.get('info', {}) if isinstance(fund.raw_data, dict) else {}
+            ddm = dividend_discount_model(info)
+            val_df = pd.DataFrame([build_valuation_summary_row(fund, dcf, ddm)])
+            st.dataframe(val_df, use_container_width=True)
+        except Exception as e:
+            st.warning(f'Valutazione non disponibile: {e}')
+
+        dftech = get_technical_data(ticker)
+        if dftech is not None and not dftech.empty:
+            rets = dftech['Close'].pct_change().dropna()
+            reg = calculate_regime_statistics(rets)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric('Regime', reg.get('Regime', 'N/D'))
+            c2.metric('Vol ann.', f"{reg.get('Vol ann.', np.nan) * 100:.1f}%" if pd.notna(reg.get('Vol ann.', np.nan)) else 'N/D')
+            c3.metric('Skew', f"{reg.get('Skew', np.nan):.2f}" if pd.notna(reg.get('Skew', np.nan)) else 'N/D')
+            c4.metric('Kurt', f"{reg.get('Kurt', np.nan):.2f}" if pd.notna(reg.get('Kurt', np.nan)) else 'N/D')
+
+            bench = get_benchmark_returns()
+            beta_data = estimate_beta_and_alpha(rets, bench) if bench is not None else {'Beta': np.nan, 'Alpha ann.': np.nan, 'RÂ²': np.nan}
+            b1, b2, b3 = st.columns(3)
+            b1.metric('Beta vs S&P500', f"{beta_data['Beta']:.2f}" if pd.notna(beta_data['Beta']) else 'N/D')
+            b2.metric('Alpha ann.', f"{beta_data['Alpha ann.'] * 100:.2f}%" if pd.notna(beta_data['Alpha ann.']) else 'N/D')
+            b3.metric('RÂ² benchmark', f"{beta_data['RÂ²']:.2f}" if pd.notna(beta_data['RÂ²']) else 'N/D')
+
+    with ext_tabs[1]:
+        ranked = rank_batch_by_smart_score(st.session_state.batch_results)
+        filtered = apply_fundamental_filters(st.session_state.batch_results, {'roic': 10.0, 'fcf': 0.0, 'peg': 1.5, 'pe': 25.0, 'int_cov': 3.0, 'perfect_only': False})
+        st.markdown('### Ranking Smart Score')
+        if ranked is not None and not ranked.empty:
+            st.dataframe(ranked, use_container_width=True)
+            dataframe_to_csv_download(ranked, 'ranking_smart_score.csv', 'Scarica ranking CSV')
+        else:
+            st.info('Nessun ranking disponibile al momento.')
+        st.markdown('### Filtro fondamentali')
+        if filtered is not None and not filtered.empty:
+            st.dataframe(filtered.drop(columns=['raw_data'], errors='ignore'), use_container_width=True)
+            dataframe_to_csv_download(filtered.drop(columns=['raw_data'], errors='ignore'), 'filtro_fondamentali.csv', 'Scarica filtro CSV')
+        else:
+            st.info('Nessun titolo passa i filtri attuali.')
+
+    with ext_tabs[2]:
+        st.info('Questa sezione aggiunge la possibilitÃ  di inserire importo oppure numero quote/azioni, senza rimuovere la logica base del portafoglio.')
+        all_tickers_batch = []
+        if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
+            all_tickers_batch = st.session_state.batch_results['Ticker'].tolist()
+        selected = st.multiselect('Titoli batch per analisi estesa', all_tickers_batch, default=st.session_state.get('portfolio_tickers', []), key='ext_portfolio_selected')
+        manual_ticker_ext = st.text_input('Aggiungi ticker manuale per analisi estesa', key='manual_ticker_ext')
+        if st.button('Aggiungi ticker esteso', key='btn_add_ticker_ext'):
+            if manual_ticker_ext.strip():
+                try:
+                    tclean = sanitize_ticker(manual_ticker_ext)
+                    if tclean not in st.session_state.portfolio_tickers:
+                        st.session_state.portfolio_tickers.append(tclean)
+                    st.success(f'Aggiunto {tclean}')
+                except Exception as e:
+                    st.error(str(e))
+        portfolio_list = sorted(set(selected + st.session_state.get('portfolio_tickers', [])))
+        if portfolio_list:
+            rows_data = []
+            cols = st.columns(3)
+            for i, t in enumerate(portfolio_list):
+                col = cols[i % 3]
+                mode_default = st.session_state.holdings_mode.get(t, 'Importo')
+                mode = col.selectbox(f'{t} - ModalitÃ ', ['Importo', 'Quote/Azioni'], index=['Importo', 'Quote/Azioni'].index(mode_default) if mode_default in ['Importo', 'Quote/Azioni'] else 0, key=f'holdingmode_{t}')
+                st.session_state.holdings_mode[t] = mode
+
+                current_amount = _safe_float(st.session_state.holdings.get(t, 0.0), 0.0)
+                current_units = _safe_float(st.session_state.holding_units.get(t, 0.0), 0.0)
+                amount_value = current_amount
+                units_value = current_units
+                if mode == 'Importo':
+                    amount_value = col.number_input(f'{t} - Importo investito', min_value=0.0, value=current_amount, step=100.0, key=f'ext_amount_{t}')
+                else:
+                    units_value = col.number_input(f'{t} - Numero quote/azioni', min_value=0.0, value=current_units, step=1.0, key=f'ext_units_{t}')
+
+                cur_default = st.session_state.holdings_currency.get(t, 'USD')
+                cur = col.selectbox(f'{t} - Valuta', ['USD', 'EUR'], index=['USD', 'EUR'].index(cur_default) if cur_default in ['USD', 'EUR'] else 0, key=f'ext_currency_{t}')
+                st.session_state.holdings_currency[t] = cur
+                st.session_state.holdings[t] = amount_value
+                st.session_state.holding_units[t] = units_value
+
+                mv, px = resolve_position_market_value(t, amount_value, units_value)
+                rows_data.append({'Ticker': t, 'ModalitÃ ': mode, 'Importo inserito': amount_value, 'Quote/Azioni': units_value, 'Prezzo stimato': px, 'Market Value stimato': mv, 'Valuta': cur})
+
+            df_positions = pd.DataFrame(rows_data)
+            st.markdown('### Dati posizioni')
+            st.dataframe(df_positions, use_container_width=True)
+
+            if st.button('Calcola analisi portafoglio estesa', key='calc_ext_portfolio'):
+                positive_positions = {r['Ticker']: _safe_float(r['Market Value stimato'], 0.0) for r in rows_data if _safe_float(r['Market Value stimato'], 0.0) > 0}
+                if not positive_positions:
+                    st.error('Inserisci almeno un importo o un numero quote/azioni valido.')
+                else:
+                    total_mv = sum(positive_positions.values())
+                    weights_pct = {k: v / total_mv * 100.0 for k, v in positive_positions.items()}
+                    built = build_portfolio_returns(list(positive_positions.keys()), weights_pct)
+                    if built is None:
+                        st.error('Impossibile costruire la serie rendimenti del portafoglio esteso.')
+                    else:
+                        df_rets, port_ret = built
+                        pm = calculate_portfolio_metrics(port_ret)
+                        rc = compute_risk_contribution(df_rets, weights_pct)
+                        w_minvar = optimize_portfolio_min_variance(df_rets)
+                        w_maxsh = optimize_portfolio_max_sharpe(df_rets)
+                        stress = stress_test_portfolio(df_rets, weights_pct, {'DEFAULT': -15.0})
+                        dd = compute_drawdown_distribution(port_ret)
+
+                        wdf = pd.DataFrame({'Ticker': list(weights_pct.keys()), 'Peso %': list(weights_pct.values()), 'Market Value': [positive_positions[t] for t in weights_pct.keys()]})
+                        st.markdown('### Pesi portafoglio esteso')
+                        st.dataframe(wdf, use_container_width=True)
+
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric('Rendimento annuo atteso', f"{pm['AnnRet'] * 100:.2f}%")
+                        c2.metric('VolatilitÃ  annua', f"{pm['AnnVol'] * 100:.2f}%")
+                        c3.metric('Sharpe', f"{pm['Sharpe']:.2f}")
+                        c4.metric('Max Drawdown', f"{pm['MaxDD'] * 100:.2f}%")
+
+                        equity_p = (1 + port_ret).cumprod()
+                        figp = go.Figure()
+                        figp.add_trace(go.Scatter(x=equity_p.index, y=equity_p.values, name='Equity portafoglio esteso'))
+                        figp.update_layout(template='plotly_dark', height=400, xaxis_title='Data', yaxis_title='Equity normalizzata')
+                        st.plotly_chart(figp, use_container_width=True)
+
+                        if rc is not None and not rc.empty:
+                            st.markdown('### Risk contribution')
+                            st.dataframe(rc, use_container_width=True)
+                        if w_minvar:
+                            st.markdown('### Pesi suggeriti Min Variance')
+                            st.dataframe(pd.DataFrame({'Ticker': list(w_minvar.keys()), 'Peso %': list(w_minvar.values())}), use_container_width=True)
+                        if w_maxsh:
+                            st.markdown('### Pesi suggeriti Max Sharpe')
+                            st.dataframe(pd.DataFrame({'Ticker': list(w_maxsh.keys()), 'Peso %': list(w_maxsh.values())}), use_container_width=True)
+                        if stress is not None and not stress.empty:
+                            st.markdown('### Stress test (-15% default)')
+                            st.dataframe(stress, use_container_width=True)
+                        if isinstance(dd, dict) and 'drawdowns' in dd and not dd['drawdowns'].empty:
+                            st.markdown('### Episodi di drawdown')
+                            st.dataframe(dd['drawdowns'], use_container_width=True)
+        else:
+            st.info('Aggiungi o seleziona almeno un ticker per attivare l\'analisi portafoglio estesa.')
+
+
+def main_v2_wrapper():
+    try:
+        init_extended_session_state()
+    except Exception:
+        pass
+    try:
+        main()
+    except NameError:
+        pass
+    except Exception as e:
+        st.error(f'Errore nella main originale: {e}')
+    try:
+        render_extended_modules()
+    except Exception as e:
+        st.warning(f'Estensioni V2 non completamente disponibili: {e}')
+
+
+if __name__ == '__main__':
+    main_v2_wrapper()
