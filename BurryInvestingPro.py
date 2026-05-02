@@ -36,6 +36,14 @@ header {visibility: hidden;}
 """
 st.markdown(hide_style, unsafe_allow_html=True)
 
+st.sidebar.header("Informazioni")
+st.sidebar.info("""
+**Burry Investing Pro**
+Dashboard avanzata per l'analisi del valore intrinseco e il monitoraggio dei mercati globali. 
+*Analisi basata su dati di mercato in tempo reale e modelli quantitativi.*
+""")
+
+
 # =================================================================
 # DA QUI INIZIA IL TUO CODICE ORIGINALE
 # =================================================================
