@@ -22,7 +22,9 @@ st.set_page_config(
 )
 
 # Caricamento Manifesto e CSS (tutto allineato a sinistra)
-st.markdown('<link rel="manifest" href="./manifest.json?v=3">', unsafe_allow_html=True)
+st.markdown('<link rel="manifest" # Sostituisci la riga del manifesto con questa (usa il TUO link raw)
+st.markdown('<link rel="manifest" href="https://raw.githubusercontent.com/innovativeprogram/burry-investing-pro/main/manifest.json">', unsafe_allow_html=True)
+', unsafe_allow_html=True)
 
 hide_style = """
 <style>
