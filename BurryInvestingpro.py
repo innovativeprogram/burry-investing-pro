@@ -624,16 +624,16 @@ def main():
         # --- TAB FONDAMENTALI ---
         with tab_f:
             st.info("💡 **Come leggere questa sezione:** Questa tabella rappresenta il motore dell'azienda. Cerca società con un ROIC (ritorno sul capitale investito) costantemente alto e un debito gestibile. Il Free Cash Flow è il vero denaro prodotto dal business. Ricorda sempre: il prezzo è quello che paghi, il valore è quello che ottieni.")
-            
+
             st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
-            
+
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB TECNICO ---
         with tab_t:
             st.info("💡 **Come leggere il grafico:** Anche se preferiamo studiare il business, il prezzo ci dice come si muove il mercato. La linea blu (Media Mobile a 200 giorni) indica il trend di lungo periodo: se il prezzo è sopra, la marea è a nostro favore. Il grafico in basso (RSI) segnala se c'è troppa euforia (valori sopra 70, attenzione) o troppo pessimismo (sotto 30, possibili occasioni).")
-            
+
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 df_calc = calculate_technical_indicators(df_tech)
@@ -674,14 +674,14 @@ def main():
                 )
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
-            
+
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB QUANT ---
         with tab_q:
             st.info("💡 **Come interpretare i dati:** Qui lasciamo parlare la statistica. Lo **Sharpe Ratio** ci dice quanto rendimento stiamo ottenendo per ogni unità di rischio sopportata (più è alto, meglio è). L'**Altman Z-Score** è vitale per allontanarci dalle aziende a rischio bancarotta (sopra 3 è ottimo). I grafici in basso (Monte Carlo) simulano gli scenari futuri in base alla volatilità storica, mostrandoci il rischio concreto (Drawdown) di perdite permanenti.")
-            
+
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 qm = calculate_quant_metrics(df_tech, row["_raw_data"])
@@ -749,14 +749,14 @@ def main():
                             yaxis_title="Equity normalizzata"
                         )
                         st.plotly_chart(fig_mc, use_container_width=True)
-            
+
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB VERDETTO ---
         with tab_v:
             st.info("💡 **Come leggere il verdetto:** Questa è la nostra sintesi razionale. Combina la solidità del business (Fondamentali), il momento (Tecnico) e le probabilità statistiche (Quant). Richiedi sempre un margine di sicurezza: investi solo quando il verdetto ti suggerisce che il rischio di perdere capitale in modo permanente è bassissimo.")
-            
+
             df_tech = get_technical_data(ticker)
             qm = calculate_quant_metrics(df_tech, row["_raw_data"]) if df_tech is not None else {}
             risk = calculate_risk_metrics(df_tech) if df_tech is not None else {
@@ -793,14 +793,14 @@ def main():
                     st.warning("🟡 HOLD (Quant): Setup discreto ma non eccezionale.")
                 else:
                     st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole o rischio elevato.")
-            
+
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
 
         # --- TAB PORTAFOGLIO ---
         with tab_p:
             st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Qui aggreghiamo i tuoi investimenti. Il grafico ti mostra la crescita combinata, mentre la matrice di correlazione in fondo è cruciale: se le aziende che possiedi tendono a muoversi tutte nella stessa direzione contemporaneamente, non sei diversificato come pensi.")
-            
+
             st.markdown(
                 "### Portafoglio reale\n"
                 "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
@@ -946,7 +946,7 @@ def main():
                             st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
             else:
                 st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente per costruire il portafoglio.")
-                
+
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
