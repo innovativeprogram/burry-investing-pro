@@ -12,8 +12,23 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 
-st.set_page_config(page_title="Burry Investing Pro", layout="wide")
+import streamlit as st
+
+st.set_page_config(page_title="Burry Investing Pro", page_icon="📈", layout="wide")
+
+# Questo carica il manifesto per Android
 st.markdown('<link rel="manifest" href="./manifest.json">', unsafe_allow_html=True)
+
+# Questo nasconde l'interfaccia standard di Streamlit per farla sembrare un'app
+hide_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    </style>
+    """
+st.markdown(hide_style, unsafe_allow_html=True)
+
 
 st.markdown(
     """
