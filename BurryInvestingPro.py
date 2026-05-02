@@ -14,17 +14,17 @@ from sklearn.linear_model import LinearRegression
 
 import streamlit as st
 
-# Configurazione della pagina (deve essere la prima istruzione Streamlit)
+# 1. Configurazione Pagina
 st.set_page_config(
     page_title="Burry Investing Pro",
     page_icon="📈",
     layout="wide"
 )
 
-# Caricamento Manifesto e CSS (tutto allineato a sinistra)
-st.markdown('<link rel="manifest" href="https://raw.githubusercontent.com/innovativeprogram/burry-investing-pro/main/manifest.json">', unsafe_allow_html=True)
-', unsafe_allow_html=True)
+# 2. Link al Manifesto (TUTTO SU UNA RIGA)
+st.markdown('<link rel="manifest" href="https://raw.githubusercontent.com/Innovativeprogram/burry-investing-pro/main/manifest.json">', unsafe_allow_html=True)
 
+# 3. CSS per nascondere menu
 hide_style = """
 <style>
 #MainMenu {visibility: hidden;}
@@ -34,6 +34,7 @@ header {visibility: hidden;}
 </style>
 """
 st.markdown(hide_style, unsafe_allow_html=True)
+">', )
 
 
 # ==========================================
