@@ -39,7 +39,7 @@ st.markdown(hide_style, unsafe_allow_html=True)
 
 
 
- ==========================================
+# ==========================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
