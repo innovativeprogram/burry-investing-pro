@@ -14,33 +14,32 @@ from sklearn.linear_model import LinearRegression
 
 import streamlit as st
 
-# 1. Configurazione della pagina (Titolo della scheda del browser e Icona)
+# Configurazione della pagina (deve essere la prima istruzione Streamlit)
 st.set_page_config(
     page_title="Burry Investing Pro",
     page_icon="📈",
     layout="wide"
 )
 
-# 2. Collegamento al file Manifest per Android (PWA)
-# Usiamo un trucco (?v=2) per forzare il telefono a scaricare la nuova versione del logo
+# Caricamento Manifesto e CSS (tutto allineato a sinistra)
 st.markdown('<link rel="manifest" href="./manifest.json?v=2">', unsafe_allow_html=True)
 
-# 3. CSS per rendere l'interfaccia simile a un'app nativa
-# Nascondiamo l'header, il footer e il menu di Streamlit
 hide_style = """
-    <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    /* Rimuove lo spazio bianco in alto */
-    .block-container {
-        padding-top: 2rem;
-    }
-    </style>
-    """
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+.block-container {padding-top: 2rem;}
+</style>
+"""
 st.markdown(hide_style, unsafe_allow_html=True)
 
-# Da qui in poi prosegue il tuo codice originale (main, grafici, ecc.)
+# ==========================================
+# DA QUI INIZIA IL RESTO DEL CODICE
+# ==========================================
+
+
+
  ==========================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================
