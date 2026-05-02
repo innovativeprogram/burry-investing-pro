@@ -34,8 +34,7 @@ header {visibility: hidden;}
 """
 st.markdown(hide_style, unsafe_allow_html=True)
 
-# #==========================================
-# DA QUI INIZIA IL RESTO DEL CODICE
+
 # ==========================================
 
 
