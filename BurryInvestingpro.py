@@ -721,7 +721,7 @@ def main():
             st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
             
             st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
         # --- TAB TECNICO ---
         with tab_t:
@@ -1100,7 +1100,7 @@ def main():
                 st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente per costruire il portafoglio.")
 
             st.markdown("---")
-            st.markdown("\ncreato e sviluppato da Innovative Program[source: 1]\n\n", unsafe_allow_html=True)
+            st.markdown("\ncreato e sviluppato da Innovative Program \n\n", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
