@@ -905,6 +905,17 @@ def compute_rebalancing_actions(
 # ==========================================
 # 6. UI: SIDEBAR & STYLE
 # ==========================================
+
+
+def render_apk_download_box() -> None:
+    with st.sidebar.expander("Download App Android (APK)", expanded=False):
+        st.write("Scarica l'APK ufficiale di BurryInvestingPro per installare l'app su Android.")
+        st.link_button(
+            "📲 Scarica Burryinvestingpro.apk",
+            "https://github.com/innovativeprogram/burry-investing-pro/releases/download/v1.0.0/Burryinvestingpro.apk",
+            width="stretch"
+        )
+        st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute per il browser o il file manager usato per il download.")
 def setup_sidebar() -> Dict[str, Any]:
     st.sidebar.header("1. Selezione Asset")
 
@@ -969,6 +980,8 @@ def setup_sidebar() -> Dict[str, Any]:
 - Crypto di solito coppia con valuta, es. BTC-USD, ETH-USD.
 - Se hai dubbi, cerca prima il titolo su Yahoo Finance e copia il ticker esatto.
         """)
+
+    render_apk_download_box()
 
     with st.sidebar.expander("Contatti", expanded=True):
         st.write("Per supporto tecnico, collaborazioni o richieste:")
