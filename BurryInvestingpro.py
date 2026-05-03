@@ -597,11 +597,6 @@ def inject_pwa_support():
     </script>
     """, unsafe_allow_html=True)
 
-
-def render_logo_uploader_notice():
-    st.caption("PWA installabile: quando esegui l'app dal browser del telefono puoi aggiungerla alla Home come applicazione. Ho predisposto il supporto tecnico PWA; per usare la tua immagine reale come icona definitiva basta sostituire il placeholder base64 nel blocco inject_pwa_support() con il tuo file PNG.")
-
-
 def calculate_position_from_quantity(ticker: str, quantity: float, pmc: float) -> Dict[str, float]:
     current_price = get_latest_price(ticker)
     invested = float(quantity * pmc)
