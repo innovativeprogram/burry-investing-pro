@@ -661,10 +661,14 @@ def setup_sidebar() -> Dict[str, Any]:
             "- Se hai dubbi, cerca prima il titolo su Yahoo Finance e copia il ticker esatto."
         )
 
-    with st.sidebar.expander("Contatti"):
-        st.write("Per supporto tecnico, collaborazioni o richieste:")
-        st.markdown("[📧 Scrivimi via email](innovativeprogram@proton.me)")
-        st.caption("Risposta normalmente entro 24/48 ore.")
+    with st.sidebar.expander("Contatti", expanded=True):
+    st.write("Per supporto tecnico, collaborazioni o richieste:")
+    st.link_button(
+        "📧 Scrivimi via mail",
+        "mailto: innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
+        width="stretch"
+    )
+    st.caption("Risposta normalmente entro 24/48 ore.")
 
     return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "cfg": cfg}
 
