@@ -617,17 +617,25 @@ def calculate_position_from_quantity(ticker: str, quantity: float, pmc: float) -
 # ==========================================
 def setup_sidebar() -> Dict[str, Any]:
     st.sidebar.header("1. Selezione Asset")
-    input_mode = st.sidebar.radio("Modalità:", ["Manuale", "Batch (CSV)"], horizontal=True)
+
+    input_mode = st.sidebar.radio(
+        "Modalità",
+        ["Manuale", "Batch CSV"],
+        horizontal=True
+    )
+
     file, manual = None, None
-    if input_mode == "Batch (CSV)":
+    if input_mode == "Batch CSV":
         file = st.sidebar.file_uploader("Carica CSV", type=["csv"])
     else:
         manual = st.sidebar.text_input("Ticker", value="AAPL").upper().strip()
 
     st.sidebar.header("2. Mercato")
-    market = st.sidebar.selectbox("Borsa:", ["USA ", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Crypto", "Custom"])
-    # FIX BUG #5: Il suffisso per Francia (.PA) e GB (.L) non veniva applicato.
-    # Ora tutti i mercati supportati hanno il loro suffisso corretto.
+    market = st.sidebar.selectbox(
+        "Borsa",
+        ["USA", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Crypto", "Custom"]
+    )
+
     if "Italia" in market:
         suffix = ".MI"
     elif "Germania" in market:
@@ -638,40 +646,47 @@ def setup_sidebar() -> Dict[str, Any]:
         suffix = ".L"
     else:
         suffix = ""
+
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", use_container_width=True)
 
     with st.sidebar.expander("⚙️ Parametri Fondamentali"):
         cfg = {
             "roic": st.number_input("Min ROIC %", 10.0, step=0.5),
-            "fcf": st.number_input("Min FCF (Mld $)", 0.0) * 1e9,
+            "fcf": st.number_input("Min FCF (Mld)", 0.0, step=1e9),
             "peg": st.number_input("Max PEG Ratio", 1.5, step=0.1),
-            "pe": st.number_input("Max P/E (Fallback)", 25.0),
-            "int_cov": st.number_input("Min Int. Coverage", 3.0),
-            "perfect_only": st.checkbox("🏆 Solo 'All Green'")
+            "pe": st.number_input("Max PE (Fallback)", 25.0),
+            "intcov": st.number_input("Min Int. Coverage", 3.0),
+            "perfectonly": st.checkbox("Solo All Green"),
         }
 
     with st.sidebar.expander("❓ Come cercare il ticker corretto"):
-        st.markdown(
-            "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).\n"
-            "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI` per Stellantis, `ENI.MI`, `ISP.MI`).\n"
-            "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).\n"
-            "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA` per Airbus, `OR.PA` per L'Oréal).\n"
-            "- Azioni UK: aggiungi `.L` (es. `ULVR.L` per Unilever).\n"
-            "- Crypto: di solito coppia con valuta, es. `BTC-USD`, `ETH-USD`.\n"
-            "- Se hai dubbi, cerca prima il titolo su Yahoo Finance e copia il ticker esatto."
+        st.markdown("""
+- Azioni USA normalmente solo ticker, es. AAPL, MSFT.
+- Azioni italiane aggiungi .MI, es. STLAM.MI, ENI.MI, ISP.MI.
+- Azioni tedesche aggiungi .DE, es. BMW.DE, SAP.DE.
+- Azioni francesi aggiungi .PA, es. AIR.PA, OR.PA.
+- Azioni UK aggiungi .L, es. ULVR.L.
+- Crypto di solito coppia con valuta, es. BTC-USD, ETH-USD.
+- Se hai dubbi, cerca prima il titolo su Yahoo Finance e copia il ticker esatto.
+        """)
+
+    with st.sidebar.expander("Contatti", expanded=True):
+        st.write("Per supporto tecnico, collaborazioni o richieste:")
+        st.link_button(
+            "📧 Scrivimi via mail",
+            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
+            width="stretch"
         )
-with st.sidebar.expander("Contatti", expanded=True):
-    st.write("Per supporto tecnico, collaborazioni o richieste:")
-    st.link_button(
-        "📧 Scrivimi via mail",
-        "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
-        width="stretch"
-    )
-    st.caption("Risposta normalmente entro 24/48 ore.")
-        
-    return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "cfg": cfg}
+        st.caption("Risposta normalmente entro 24/48 ore.")
 
-
+    return {
+        "mode": input_mode,
+        "file": file,
+        "manual": manual,
+        "suffix": suffix,
+        "btn": analyze_btn,
+        "cfg": cfg
+    }
 # ==========================================
 # 7. MAIN ORCHESTRATOR
 # ==========================================
