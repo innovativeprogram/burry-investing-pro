@@ -661,11 +661,7 @@ def setup_sidebar() -> Dict[str, Any]:
             "- Se hai dubbi, cerca prima il titolo su Yahoo Finance e copia il ticker esatto."
         )
 
-        with st.sidebar.expander("Contatti"):
-        st.write("Per supporto tecnico, collaborazioni o richieste:")
-        st.markdown("[📧 Scrivimi via email](mailto: innovativeprogram@proton.me)")
-        st.caption("Risposta normalmente entro 24/48 ore.")
-
+        
     return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "cfg": cfg}
 
 
