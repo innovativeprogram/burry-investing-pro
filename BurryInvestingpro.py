@@ -611,6 +611,155 @@ def calculate_position_from_quantity(ticker: str, quantity: float, pmc: float) -
         'P&L %': pnl_pct,
     }
 
+# ==========================================
+# 5.F PORTAFOGLIO: ALLOCAZIONE & RIBILANCIAMENTO
+# ==========================================
+def infer_asset_class(ticker: str, company_name: str = "") -> str:
+    t = str(ticker).upper()
+    name = str(company_name).lower()
+
+    etf_keywords = ["etf", "ucits", "ishares", "xtrackers", "vanguard", "lyxor", "amundi", "invesco", "wisdomtree"]
+    bond_keywords = ["bond", "treasury", "aggregate", "gov", "government"]
+    gold_keywords = ["gold", "physical gold", "precious", "silver", "metals"]
+    crypto_keywords = ["btc-", "eth-", "-usd"]
+
+    if any(k in name for k in etf_keywords):
+        if any(k in name for k in bond_keywords):
+            return "ETF Obbligazionario"
+        if any(k in name for k in gold_keywords):
+            return "ETF/ETC Oro"
+        return "ETF Azionario"
+
+    if any(k in t for k in crypto_keywords):
+        return "Crypto"
+
+    if any(k in name for k in bond_keywords):
+        return "Obbligazione/Fondo Bond"
+
+    if any(k in name for k in gold_keywords):
+        return "Oro/Metalli"
+
+    return "Azione"
+
+
+def infer_geography(ticker: str, company_name: str = "") -> str:
+    t = str(ticker).upper()
+    name = str(company_name).lower()
+
+    if t.endswith(".MI"):
+        return "Italia"
+    if t.endswith(".DE"):
+        return "Germania"
+    if t.endswith(".PA"):
+        return "Francia"
+    if t.endswith(".L"):
+        return "Regno Unito"
+    if "-USD" in t:
+        return "Crypto/USD"
+
+    us_keywords = ["s&p", "nasdaq", "russell", "usa", "united states", "msci usa"]
+    eu_keywords = ["europe", "stoxx", "euro stoxx", "msci europe"]
+    em_keywords = ["emerging", "em", "msci em"]
+    world_keywords = ["world", "all-world", "acwi", "ftse all-world"]
+    japan_keywords = ["japan", "topix", "nikkei"]
+    china_keywords = ["china", "csi", "hang seng"]
+
+    if any(k in name for k in world_keywords):
+        return "Globale"
+    if any(k in name for k in us_keywords):
+        return "USA"
+    if any(k in name for k in eu_keywords):
+        return "Europa"
+    if any(k in name for k in em_keywords):
+        return "Emergenti"
+    if any(k in name for k in japan_keywords):
+        return "Giappone"
+    if any(k in name for k in china_keywords):
+        return "Cina"
+
+    return "Da classificare"
+
+
+def build_portfolio_allocation_df(
+    positive_holdings: Dict[str, float],
+    holdings_currency: Dict[str, str]
+) -> pd.DataFrame:
+    rows = []
+
+    for ticker, amount in positive_holdings.items():
+        raw = get_fundamental_data(ticker)
+        info = raw["info"] if raw and "info" in raw else {}
+        company_name = info.get("longName", info.get("shortName", ticker))
+        detected_currency = holdings_currency.get(ticker, info.get("currency", "USD"))
+
+        rows.append({
+            "Ticker": ticker,
+            "Company Name": company_name,
+            "Importo": float(amount),
+            "Valuta": detected_currency,
+            "Asset Class": infer_asset_class(ticker, company_name),
+            "Geografia": infer_geography(ticker, company_name)
+        })
+
+    df_alloc = pd.DataFrame(rows)
+    if df_alloc.empty:
+        return df_alloc
+
+    total = df_alloc["Importo"].sum()
+    df_alloc["Peso %"] = np.where(total > 0, df_alloc["Importo"] / total * 100.0, 0.0)
+    return df_alloc.sort_values("Peso %", ascending=False).reset_index(drop=True)
+
+
+def summarize_group_weights(df_alloc: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    if df_alloc.empty or group_col not in df_alloc.columns:
+        return pd.DataFrame()
+
+    out = (
+        df_alloc.groupby(group_col, dropna=False)["Importo"]
+        .sum()
+        .reset_index()
+        .sort_values("Importo", ascending=False)
+    )
+
+    total = out["Importo"].sum()
+    out["Peso %"] = np.where(total > 0, out["Importo"] / total * 100.0, 0.0)
+    return out.reset_index(drop=True)
+
+
+def compute_rebalancing_actions(
+    df_alloc: pd.DataFrame,
+    target_weights: Dict[str, float],
+    group_col: str = "Ticker",
+    tolerance_pct: float = 1.0
+) -> pd.DataFrame:
+    if df_alloc.empty:
+        return pd.DataFrame()
+
+    current = summarize_group_weights(df_alloc, group_col)
+    if current.empty:
+        return pd.DataFrame()
+
+    target_df = pd.DataFrame({
+        group_col: list(target_weights.keys()),
+        "Target %": list(target_weights.values())
+    })
+
+    merged = current.merge(target_df, on=group_col, how="outer").fillna(0.0)
+    total_value = df_alloc["Importo"].sum()
+
+    merged["Scostamento %"] = merged["Target %"] - merged["Peso %"]
+    merged["Azione €"] = total_value * merged["Scostamento %"] / 100.0
+    merged["Azione"] = np.where(
+        merged["Azione €"] > tolerance_pct / 100.0 * total_value,
+        "Compra",
+        np.where(
+            merged["Azione €"] < -tolerance_pct / 100.0 * total_value,
+            "Riduci",
+            "In target"
+        )
+    )
+
+    return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================
 # 6. UI: SIDEBAR & STYLE
