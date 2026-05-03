@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 import re
 import logging
 import concurrent.futures
+import os
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
@@ -511,6 +512,112 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 
 
 # ==========================================
+# 5.F HELPER PORTAFOGLIO AVANZATO & PWA
+# ==========================================
+def get_latest_price(symbol: str) -> Optional[float]:
+    df = get_technical_data(symbol)
+    if df is not None and not df.empty and 'Close' in df.columns:
+        try:
+            return float(df['Close'].dropna().iloc[-1])
+        except Exception:
+            pass
+    raw = get_fundamental_data(symbol)
+    if raw and raw.get('info'):
+        info = raw['info']
+        price = info.get('currentPrice') or info.get('regularMarketPrice')
+        if price is not None:
+            return float(price)
+    return None
+
+
+def inject_pwa_support():
+    st.markdown("""
+    <script>
+    (function(){
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
+      const manifest = {
+        name: 'BurryInvestingPro',
+        short_name: 'BurryPro',
+        description: 'Analisi investimenti e portafoglio installabile su smartphone',
+        start_url: '.',
+        display: 'standalone',
+        background_color: '#0e1117',
+        theme_color: '#0e1117',
+        icons: [
+          { src: 'data:image/png;base64,' + base64Png, sizes: '192x192', type: 'image/png' },
+          { src: 'data:image/png;base64,' + base64Png, sizes: '512x512', type: 'image/png' }
+        ]
+      };
+      const manifestBlob = new Blob([JSON.stringify(manifest)], {type: 'application/manifest+json'});
+      const manifestUrl = URL.createObjectURL(manifestBlob);
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = manifestUrl;
+      document.head.appendChild(link);
+
+      const appleIcon = document.createElement('link');
+      appleIcon.rel = 'apple-touch-icon';
+      appleIcon.href = 'data:image/png;base64,' + base64Png;
+      document.head.appendChild(appleIcon);
+
+      const meta1 = document.createElement('meta');
+      meta1.name = 'apple-mobile-web-app-capable';
+      meta1.content = 'yes';
+      document.head.appendChild(meta1);
+
+      const meta2 = document.createElement('meta');
+      meta2.name = 'apple-mobile-web-app-status-bar-style';
+      meta2.content = 'black-translucent';
+      document.head.appendChild(meta2);
+
+      const meta3 = document.createElement('meta');
+      meta3.name = 'apple-mobile-web-app-title';
+      meta3.content = 'BurryPro';
+      document.head.appendChild(meta3);
+
+      const meta4 = document.createElement('meta');
+      meta4.name = 'theme-color';
+      meta4.content = '#0e1117';
+      document.head.appendChild(meta4);
+
+      const swCode = `
+        self.addEventListener('install', event => { self.skipWaiting(); });
+        self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
+        self.addEventListener('fetch', event => {
+          if (event.request.method !== 'GET') return;
+          event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+        });
+      `;
+      if ('serviceWorker' in navigator) {
+        const swBlob = new Blob([swCode], { type: 'text/javascript' });
+        const swUrl = URL.createObjectURL(swBlob);
+        navigator.serviceWorker.register(swUrl).catch(() => {});
+      }
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+
+def render_logo_uploader_notice():
+    st.caption("PWA installabile: quando esegui l'app dal browser del telefono puoi aggiungerla alla Home come applicazione. Ho predisposto il supporto tecnico PWA; per usare la tua immagine reale come icona definitiva basta sostituire il placeholder base64 nel blocco inject_pwa_support() con il tuo file PNG.")
+
+
+def calculate_position_from_quantity(ticker: str, quantity: float, pmc: float) -> Dict[str, float]:
+    current_price = get_latest_price(ticker)
+    invested = float(quantity * pmc)
+    market_value = float(quantity * current_price) if current_price is not None else 0.0
+    pnl_value = market_value - invested if current_price is not None else 0.0
+    pnl_pct = (pnl_value / invested) * 100.0 if invested > 0 and current_price is not None else 0.0
+    return {
+        'Prezzo Attuale': float(current_price) if current_price is not None else np.nan,
+        'Importo Investito': invested,
+        'Valore di Mercato': market_value,
+        'P&L': pnl_value,
+        'P&L %': pnl_pct,
+    }
+
+
+# ==========================================
 # 6. UI: SIDEBAR & STYLE
 # ==========================================
 def setup_sidebar() -> Dict[str, Any]:
@@ -567,6 +674,7 @@ def setup_sidebar() -> Dict[str, Any]:
 # ==========================================
 def main():
     st.title("💎 BurryInvestingPro")
+    inject_pwa_support()
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -577,6 +685,10 @@ def main():
         st.session_state.holdings = {}
     if 'holdings_currency' not in st.session_state:
         st.session_state.holdings_currency = {}
+    if 'holdings_quantity' not in st.session_state:
+        st.session_state.holdings_quantity = {}
+    if 'holdings_pmc' not in st.session_state:
+        st.session_state.holdings_pmc = {}
 
     ui = setup_sidebar()
     if ui["btn"]:
@@ -799,20 +911,20 @@ def main():
 
         # --- TAB PORTAFOGLIO ---
         with tab_p:
-            st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Qui aggreghiamo i tuoi investimenti. Il grafico ti mostra la crescita combinata, mentre la matrice di correlazione in fondo è cruciale: se le aziende che possiedi tendono a muoversi tutte nella stessa direzione contemporaneamente, non sei diversificato come pensi.")
-            
+            st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Ora puoi inserire sia **quote/azioni** sia **PMC** per ogni posizione, anche con **quote frazionate per gli ETF**, così il calcolo di valore investito, P&L e rendimento % è molto più preciso.")
+            render_logo_uploader_notice()
             st.markdown(
                 "### Portafoglio reale\n"
                 "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
-                "- Per ogni titolo, indica il **ticker corretto per il mercato** e l'**importo investito**.\n"
-                "- Il sistema calcola automaticamente il **peso percentuale** di ogni posizione e le metriche "
-                "quantitative del portafoglio (rendimento atteso, volatilità, Sharpe, drawdown).\n\n"
+                "- Per ogni titolo, indica **ticker**, **quantità** e **PMC**.\n"
+                "- Le **quantità frazionate** sono supportate, utili soprattutto per ETF e PAC.\n"
+                "- Il sistema calcola automaticamente **importo investito**, **valore attuale**, **P&L in valore**, **P&L %** e i **pesi percentuali** del portafoglio.\n\n"
                 "**Come cercare il ticker giusto:**\n"
                 "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).\n"
-                "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI` per Stellantis a Milano, `ENI.MI`, `ISP.MI`).\n"
+                "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI`, `ENI.MI`, `ISP.MI`).\n"
                 "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).\n"
-                "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA` per Airbus, `OR.PA` per L'Oréal`).\n"
-                "- Azioni UK: aggiungi `.L` (es. `ULVR.L` per Unilever).\n"
+                "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA`, `OR.PA`).\n"
+                "- Azioni UK: aggiungi `.L` (es. `ULVR.L`).\n"
                 "- Crypto: in genere coppia con valuta, es. `BTC-USD`, `ETH-USD`.\n"
             )
 
@@ -822,10 +934,7 @@ def main():
 
             if all_tickers_batch:
                 st.markdown("#### Seleziona dal batch analizzato")
-                default_batch = [
-                    t for t in st.session_state.portfolio_tickers
-                    if t in all_tickers_batch
-                ]
+                default_batch = [t for t in st.session_state.portfolio_tickers if t in all_tickers_batch]
                 selected_from_batch = st.multiselect(
                     "Titoli da includere nel portafoglio (da batch)",
                     all_tickers_batch,
@@ -839,7 +948,6 @@ def main():
                 "Ticker (incluso suffisso mercato, es. STLAM.MI, ENI.MI, BMW.DE, AIR.PA, ULVR.L)",
                 ""
             )
-
             if st.button("➕ Aggiungi ticker manuale al portafoglio"):
                 if manual_ticker.strip():
                     t_clean = sanitize_ticker(manual_ticker)
@@ -853,21 +961,43 @@ def main():
             st.session_state.portfolio_tickers = portfolio_list
 
             if portfolio_list:
-                st.markdown("#### Importo investito per ogni posizione")
-                cols = st.columns(3)
+                st.markdown("#### Dati posizione per ogni ticker")
+                cols = st.columns(2)
                 holdings: Dict[str, float] = st.session_state.holdings
+                holdings_quantity: Dict[str, float] = st.session_state.holdings_quantity
+                holdings_pmc: Dict[str, float] = st.session_state.holdings_pmc
 
                 for i, t in enumerate(portfolio_list):
-                    col = cols[i % 3]
-                    default_amt = float(holdings.get(t, 0.0))
-                    amt = col.number_input(
-                        f"{t} - Importo investito",
+                    col = cols[i % 2]
+                    col.markdown(f"##### {t}")
+                    default_qty = float(holdings_quantity.get(t, 0.0))
+                    default_pmc = float(holdings_pmc.get(t, 0.0))
+                    qty = col.number_input(
+                        f"{t} - Quantità / Quote",
                         min_value=0.0,
-                        value=default_amt,
-                        step=100.0,
-                        key=f"holding_{t}"
+                        value=default_qty,
+                        step=0.01,
+                        format="%.4f",
+                        key=f"holding_qty_{t}"
                     )
-                    holdings[t] = amt
+                    pmc = col.number_input(
+                        f"{t} - PMC",
+                        min_value=0.0,
+                        value=default_pmc,
+                        step=0.01,
+                        format="%.4f",
+                        key=f"holding_pmc_{t}"
+                    )
+                    derived = calculate_position_from_quantity(t, qty, pmc) if qty > 0 and pmc > 0 else {
+                        'Importo Investito': 0.0,
+                        'Prezzo Attuale': np.nan,
+                        'Valore di Mercato': 0.0,
+                        'P&L': 0.0,
+                        'P&L %': 0.0,
+                    }
+                    holdings_quantity[t] = qty
+                    holdings_pmc[t] = pmc
+                    holdings[t] = float(derived['Importo Investito'])
 
                     cur_default = st.session_state.holdings_currency.get(t, "USD")
                     cur = col.selectbox(
@@ -878,47 +1008,74 @@ def main():
                     )
                     st.session_state.holdings_currency[t] = cur
 
+                    price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
+                    col.caption(
+                        f"Prezzo attuale: {price_text} | Investito: {derived['Importo Investito']:.2f} | "
+                        f"Valore: {derived['Valore di Mercato']:.2f} | P&L: {derived['P&L']:.2f} ({derived['P&L %']:.2f}%)"
+                    )
+
                     if col.button("🗑 Rimuovi", key=f"remove_{t}"):
                         if t in st.session_state.portfolio_tickers:
-                            st.session_state.portfolio_tickers = [
-                                x for x in st.session_state.portfolio_tickers if x != t
-                            ]
+                            st.session_state.portfolio_tickers = [x for x in st.session_state.portfolio_tickers if x != t]
                         if t in st.session_state.holdings:
                             del st.session_state.holdings[t]
                         if t in st.session_state.holdings_currency:
                             del st.session_state.holdings_currency[t]
+                        if t in st.session_state.holdings_quantity:
+                            del st.session_state.holdings_quantity[t]
+                        if t in st.session_state.holdings_pmc:
+                            del st.session_state.holdings_pmc[t]
                         st.rerun()
 
                 st.session_state.holdings = holdings
+                st.session_state.holdings_quantity = holdings_quantity
+                st.session_state.holdings_pmc = holdings_pmc
 
                 if st.button("📊 Calcola pesi e analisi del portafoglio"):
                     positive_holdings = {t: a for t, a in holdings.items() if a > 0}
                     if not positive_holdings:
-                        st.error("Imposta un importo > 0 almeno per un titolo.")
+                        st.error("Imposta quantità e PMC > 0 almeno per un titolo.")
                     else:
                         tot = sum(positive_holdings.values())
                         weights_pct = {t: a / tot * 100.0 for t, a in positive_holdings.items()}
-
                         built = build_portfolio_returns(list(positive_holdings.keys()), weights_pct)
                         if built is None:
                             st.error("Impossibile costruire la serie dei rendimenti (dati insufficienti per uno o più ticker).")
                         else:
                             df_rets, port_ret = built
                             pm = calculate_portfolio_metrics(port_ret)
-
-                            st.markdown("#### Pesi percentuali del portafoglio")
-                            df_weights = pd.DataFrame(
-                                {
-                                    "Ticker": list(weights_pct.keys()),
-                                    "Importo": [positive_holdings[t] for t in weights_pct.keys()],
-                                    "Peso %": [weights_pct[t] for t in weights_pct.keys()]
-                                }
-                            )
-                            df_weights["Valuta"] = [
-                                st.session_state.holdings_currency.get(t, "USD")
-                                for t in weights_pct.keys()
-                            ]
+                            st.markdown("#### Dettaglio posizioni e pesi del portafoglio")
+                            rows = []
+                            total_market_value = 0.0
+                            for t in weights_pct.keys():
+                                qty = holdings_quantity.get(t, 0.0)
+                                pmc = holdings_pmc.get(t, 0.0)
+                                derived = calculate_position_from_quantity(t, qty, pmc)
+                                total_market_value += derived['Valore di Mercato']
+                                rows.append({
+                                    "Ticker": t,
+                                    "Quantità": qty,
+                                    "PMC": pmc,
+                                    "Prezzo Attuale": derived['Prezzo Attuale'],
+                                    "Importo Investito": derived['Importo Investito'],
+                                    "Valore di Mercato": derived['Valore di Mercato'],
+                                    "P&L": derived['P&L'],
+                                    "P&L %": derived['P&L %'],
+                                    "Peso %": weights_pct[t],
+                                    "Valuta": st.session_state.holdings_currency.get(t, "USD")
+                                })
+                            df_weights = pd.DataFrame(rows)
                             st.dataframe(df_weights)
+
+                            total_invested = float(df_weights["Importo Investito"].sum())
+                            total_pnl = float(df_weights["P&L"].sum())
+                            total_pnl_pct = (total_pnl / total_invested) * 100.0 if total_invested > 0 else 0.0
+
+                            ctot1, ctot2, ctot3, ctot4 = st.columns(4)
+                            ctot1.metric("Investito totale", f"{total_invested:,.2f}")
+                            ctot2.metric("Valore attuale", f"{total_market_value:,.2f}")
+                            ctot3.metric("P&L totale", f"{total_pnl:,.2f}")
+                            ctot4.metric("Rendimento totale", f"{total_pnl_pct:.2f}%")
 
                             cpa, cpv, cps, cpdd = st.columns(4)
                             cpa.metric("Rendimento annuo atteso", f"{pm['AnnRet'] * 100:.2f}%")
@@ -946,10 +1103,9 @@ def main():
                             st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
             else:
                 st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente per costruire il portafoglio.")
-                
-            st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
+            st.markdown("---")
+            st.markdown("\ncreato e sviluppato da Innovative Program[source: 1]\n\n", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
