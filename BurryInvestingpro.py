@@ -1040,7 +1040,7 @@ def main():
 
         # --- TAB FONDAMENTALI ---
         with tab_f:
-            st.info("💡 **Come leggere questa sezione:** Questa tabella rappresenta il motore dell'azienda. Cerca società con un ROIC (ritorno sul capitale investito) costantemente alto e un debito gestibile. Il Free Cash Flow è il vero denaro prodotto dal business. Ricorda sempre: il prezzo è quello che paghi, il valore è quello che ottieni.")
+            st.info("💡 **Come leggere questa sezione:** Qui analizzi la qualità economica e finanziaria del business, non il movimento del prezzo. Le metriche principali ti aiutano a capire se l'azienda crea valore in modo efficiente, se cresce con equilibrio e se il debito resta sostenibile. **ROIC** misura quanto bene il management reinveste il capitale; **Free Cash Flow** indica il denaro realmente generato; **PEG Ratio** mette in relazione valutazione e crescita; **Interest Coverage** e **Debt/Equity** servono per controllare la solidità finanziaria. Nelle nuove aggiunte trovi anche **Revenue Growth**, **Net Margin** e **FCF Margin**: la prima misura la crescita del fatturato, la seconda la redditività finale, la terza la capacità di trasformare i ricavi in cassa vera. Questa tab va letta così: prima qualità del business, poi sostenibilità finanziaria, solo alla fine prezzo e multipli.")
             
             st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
             
@@ -1049,7 +1049,7 @@ def main():
 
         # --- TAB TECNICO ---
         with tab_t:
-            st.info("💡 **Come leggere il grafico:** Anche se preferiamo studiare il business, il prezzo ci dice come si muove il mercato. La linea blu (Media Mobile a 200 giorni) indica il trend di lungo periodo: se il prezzo è sopra, la marea è a nostro favore. Il grafico in basso (RSI) segnala se c'è troppa euforia (valori sopra 70, attenzione) o troppo pessimismo (sotto 30, possibili occasioni).")
+            st.info("💡 **Come leggere il grafico:** Questa tab non serve a dire se un'azienda è buona, ma a capire **quando** il mercato la sta premiando o penalizzando. La candela mostra il prezzo, la **SMA 200** identifica il trend di fondo e l'**RSI** misura se il movimento recente è troppo tirato o troppo depresso. Il **Timing Score** nasce dalla combinazione delle regole tecniche del programma: premio al prezzo sopra SMA 200, premio aggiuntivo in caso di ipervenduto RSI e ulteriore supporto quando il prezzo si avvicina alla banda bassa di Bollinger. Va quindi interpretato come un indicatore di contesto: punteggio alto significa setup tecnico più favorevole, non certezza di rialzo.")
             
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
@@ -1097,7 +1097,7 @@ def main():
 
         # --- TAB QUANT ---
         with tab_q:
-            st.info("💡 **Come interpretare i dati:** Qui lasciamo parlare la statistica. Lo **Sharpe Ratio** ci dice quanto rendimento stiamo ottenendo per ogni unità di rischio sopportata (più è alto, meglio è). L'**Altman Z-Score** è vitale per allontanarci dalle aziende a rischio bancarotta (sopra 3 è ottimo). I grafici in basso (Monte Carlo) simulano gli scenari futuri in base alla volatilità storica, mostrandoci il rischio concreto (Drawdown) di perdite permanenti.")
+            st.info("💡 **Come interpretare i dati:** In questa tab il programma misura la qualità statistica del titolo e il suo profilo di rischio-rendimento. **Sharpe Ratio** valuta quanto rendimento ottieni per unità di rischio, **R-Squared** misura quanto il trend è lineare e pulito, mentre **Altman Z-Score** aiuta a identificare aziende potenzialmente fragili sul piano patrimoniale. Le nuove aggiunte più importanti sono i **risk metrics**: **Max Drawdown** per la perdita massima storica dal picco, **CAGR** per la crescita composta annua, **VaR 95%** per la perdita giornaliera attesa in scenari normali estremi e **CVaR 95%** per la severità media delle perdite oltre quel livello. Anche **Skewness** e **Kurtosis** sono utili: la prima indica l'asimmetria dei rendimenti, la seconda segnala la presenza di code estreme. La simulazione **Monte Carlo** non prevede il futuro, ma mostra un ventaglio di esiti possibili partendo dal comportamento storico del titolo, così puoi ragionare in termini probabilistici e non emotivi.")
             
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
@@ -1121,6 +1121,7 @@ def main():
                 st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
 
                 with st.expander("📉 Distribuzione rendimenti & rischio"):
+                    st.markdown("**Come leggere questi indicatori di rischio:** il **CVaR 95%** stima la perdita media nei giorni peggiori oltre la soglia del VaR; più è negativo, più la coda sinistra è pesante. **Skewness** negativa indica ribassi estremi più frequenti dei rialzi estremi, mentre **Kurtosis** elevata segnala distribuzioni con code più violente della normale. L'istogramma sotto ti aiuta a capire se i rendimenti sono compatti e regolari oppure instabili e pieni di eventi estremi.")
                     st.write(f"CVaR 95%: {risk['CVaR_95'] * 100:.2f}%")
                     st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
 
@@ -1131,6 +1132,7 @@ def main():
                     st.plotly_chart(fig_r, use_container_width=True)
 
                 with st.expander("🎲 Simulazione Monte Carlo (rendimenti storici)"):
+                    st.markdown("**Come leggere la simulazione:** il modello estrae molte sequenze possibili di rendimenti sulla base della storia recente del titolo e costruisce traiettorie alternative di equity. La **mediana** rappresenta lo scenario centrale, il **5° percentile** mostra uno scenario prudente e il **95° percentile** uno scenario molto favorevole. La probabilità di perdita oltre il 20% serve a visualizzare in modo immediato quanto può essere duro il percorso dell'investimento anche quando il caso base sembra buono.")
                     col_mc1, col_mc2 = st.columns(2)
                     horizon_days = col_mc1.slider("Orizzonte (giorni trading)", 60, 756, 252, step=21)
                     n_paths = col_mc2.slider("Numero traiettorie", 100, 3000, 1000, step=100)
@@ -1175,7 +1177,7 @@ def main():
 
         # --- TAB VERDETTO ---
         with tab_v:
-            st.info("💡 **Come leggere il verdetto:** Questa è la nostra sintesi razionale. Combina la solidità del business (Fondamentali), il momento (Tecnico) e le probabilità statistiche (Quant). Richiedi sempre un margine di sicurezza: investi solo quando il verdetto ti suggerisce che il rischio di perdere capitale in modo permanente è bassissimo.")
+            st.info("💡 **Come leggere il verdetto:** Questa tab sintetizza tutte le analisi precedenti in una decisione operativa, ma va letta con metodo. Il programma usa tre livelli: **modello Classico** con criteri essenziali, **modello Evoluto** con controlli aggiuntivi su leva e marginalità, e **modello Personalizzabile** che applica le soglie impostate nella sidebar. In parallelo viene calcolato lo **Smart Quant Score**, che unisce **Fundamental Score**, **Technical Score** e **Quant/Risk Score** per dare una misura complessiva del vantaggio statistico del setup. Il senso corretto del verdetto è questo: BUY indica coerenza forte tra qualità, rischio e timing; HOLD segnala qualità parziale o timing ancora incompleto; SELL o NO TRADE indicano che il margine di sicurezza non è sufficiente secondo il modello selezionato.")
             
             df_tech = get_technical_data(ticker)
             qm = calculate_quant_metrics(df_tech, row["_raw_data"]) if df_tech is not None else {}
@@ -1311,23 +1313,26 @@ def main():
 
         # --- TAB PORTAFOGLIO ---
         with tab_p:
-            st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Ora puoi inserire sia **quote/azioni** sia **PMC** per ogni posizione, anche con **quote frazionate per gli ETF**, così il calcolo di valore investito, P&L e rendimento % è molto più preciso.")
+            st.info("💡 **Come usare questa sezione:** Qui costruisci il tuo **portafoglio reale** partendo dalle posizioni effettivamente detenute. Per ogni titolo inserisci **ticker**, **quantità/quote**, **PMC** e **valuta**; il sistema calcola automaticamente **importo investito**, **prezzo attuale**, **valore di mercato**, **P&L in euro o valuta locale**, **P&L %** e **peso percentuale**. Le nuove aggiunte più importanti sono la gestione di **quantità frazionate**, la **conversione FX reale** verso la valuta base del portafoglio, l'**analisi fiscale teorica**, la classificazione per **asset class**, **geografia** e **valuta**, oltre al **ribilanciamento automatico** rispetto ai target impostati. Questa tab va letta come una cabina di controllo: prima ricostruisci correttamente le posizioni, poi controlli concentrazione, rischio valutario, fiscalità teorica e scostamenti dai pesi obiettivo.")
             st.success("Versione Premium attiva: conversione FX reale integrata nei totali portafoglio.")
-            st.markdown(
-                "### Portafoglio reale\n"
-                "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
-                "- Per ogni titolo, indica **ticker**, **quantità** e **PMC**.\n"
-                "- Le **quantità frazionate** sono supportate, utili soprattutto per ETF e PAC.\n"
-                "- Il sistema calcola automaticamente **importo investito**, **valore attuale**, **P&L in valore**, **P&L %** e i **pesi percentuali** del portafoglio.\n\n"
-                "**Come cercare il ticker giusto:**\n"
-                "- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).\n"
-                "- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI`, `ENI.MI`, `ISP.MI`).\n"
-                "- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).\n"
-                "- Azioni francesi: aggiungi `.PA` (es. `AIR.PA`, `OR.PA`).\n"
-                "- Azioni UK: aggiungi `.L` (es. `ULVR.L`).\n"
-                "- Crypto: in genere coppia con valuta, es. `BTC-USD`, `ETH-USD`.\n"
-            )
+            st.markdown("""
+### Portafoglio reale
+- Qui inserisci le **posizioni effettive** che hai in portafoglio, non semplici pesi teorici.
+- Per ogni titolo indica **ticker**, **quantità/quote**, **PMC** e **valuta della posizione**.
+- Le **quantità frazionate** sono supportate e sono particolarmente utili per ETF, PAC e broker che consentono acquisti parziali.
+- Il sistema ricostruisce in automatico **capitale investito**, **valore di mercato**, **profitto/perdita**, **rendimento %** e **peso della posizione** sul totale.
+- Se la valuta del titolo è diversa dalla valuta base, entra in gioco la **conversione FX reale**, così i totali portafoglio diventano confrontabili in modo corretto.
+- L'analisi successiva mostra anche **impatto fiscale teorico**, **allocazione per asset class**, **allocazione geografica**, **allocazione per valuta** e **suggerimenti di ribilanciamento**.
 
+**Come cercare il ticker giusto:**
+- Azioni USA: normalmente solo ticker (es. `AAPL`, `MSFT`).
+- Azioni italiane: aggiungi `.MI` (es. `STLAM.MI`, `ENI.MI`, `ISP.MI`).
+- Azioni tedesche: aggiungi `.DE` (es. `BMW.DE`, `SAP.DE`).
+- Azioni francesi: aggiungi `.PA` (es. `AIR.PA`, `OR.PA`).
+- Azioni UK: aggiungi `.L` (es. `ULVR.L`).
+- Crypto: in genere coppia con valuta, es. `BTC-USD`, `ETH-USD`.
+- Inserisci sempre il ticker esatto di Yahoo Finance, perché tutti i calcoli di prezzo, resa e conversione dipendono da quello.
+""")
             all_tickers_batch: List[str] = []
             if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
                 all_tickers_batch = st.session_state.batch_results["Ticker"].tolist()
@@ -1467,6 +1472,7 @@ def main():
                             df_weights = pd.DataFrame(rows)
                             st.dataframe(df_weights)
                             st.markdown("#### Analisi fiscale teorica")
+                            st.caption("Questa sezione stima l'effetto fiscale potenziale sulle plusvalenze utilizzando l'aliquota selezionata. È una simulazione teorica utile per capire quanto del profitto lordo resterebbe dopo le imposte; non sostituisce il calcolo fiscale reale del broker o del commercialista.")
                             tax_rate_input = st.slider(
                                 "Aliquota fiscale teorica (%)",
                                 min_value=0.0,
@@ -1518,6 +1524,7 @@ def main():
                                     st.dataframe(df_cur, use_container_width=True)
 
                                 st.markdown("#### Ribilanciamento automatico")
+                                st.caption("Il ribilanciamento confronta i pesi attuali con i target definiti dall'utente e calcola lo scostamento. Se la differenza supera la tolleranza impostata, il sistema suggerisce in quali aree comprare o ridurre per riportare il portafoglio verso la struttura desiderata.")
                                 rebalance_mode = st.radio(
                                     "Livello target",
                                     ["Ticker", "Asset Class", "Geografia", "Valuta"],
