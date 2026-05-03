@@ -7,9 +7,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
-import concurrent.futures
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 
@@ -514,28 +513,39 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 # ==========================================
 # 5.F HELPER PORTAFOGLIO AVANZATO & PWA
 # ==========================================
+@st.cache_data(ttl=60, show_spinner=False)
 def get_latest_price(symbol: str) -> Optional[float]:
-    df = get_technical_data(symbol)
-    if df is not None and not df.empty and 'Close' in df.columns:
-        try:
-            return float(df['Close'].dropna().iloc[-1])
-        except Exception:
-            pass
-    raw = get_fundamental_data(symbol)
-    if raw and raw.get('info'):
-        info = raw['info']
-        price = info.get('currentPrice') or info.get('regularMarketPrice')
+    # FIX #7: TTL ridotto a 60s per prezzi live aggiornati.
+    # Priorità: currentPrice > regularMarketPrice > previousClose (fallback).
+    # Non usa più get_technical_data (TTL 900s) che restituiva dati storici stantii.
+    try:
+        info = yf.Ticker(symbol).info
+        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
         if price is not None:
             return float(price)
+    except Exception:
+        pass
     return None
 
 
 def inject_pwa_support():
-    st.markdown("""
+    # FIX #11: carica logo.png reale dalla cartella del progetto e lo converte in base64.
+    # Se il file non esiste, usa un PNG trasparente 1x1 come fallback senza crashare.
+    _logo_b64 = ""
+    try:
+        _logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        if os.path.exists(_logo_path):
+            import base64 as _b64
+            with open(_logo_path, "rb") as _f:
+                _logo_b64 = _b64.b64encode(_f.read()).decode("utf-8")
+    except Exception:
+        pass
+    _icon_data = _logo_b64 if _logo_b64 else "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    st.markdown(f"""
     <script>
-    (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
-      const manifest = {
+    (function(){{
+      const base64Png = '{_icon_data}';
+      const manifest = {{
         name: 'BurryInvestingPro',
         short_name: 'BurryPro',
         description: 'Analisi investimenti e portafoglio installabile su smartphone',
@@ -544,11 +554,11 @@ def inject_pwa_support():
         background_color: '#0e1117',
         theme_color: '#0e1117',
         icons: [
-          { src: 'data:image/png;base64,' + base64Png, sizes: '192x192', type: 'image/png' },
-          { src: 'data:image/png;base64,' + base64Png, sizes: '512x512', type: 'image/png' }
+          {{ src: 'data:image/png;base64,' + base64Png, sizes: '192x192', type: 'image/png' }},
+          {{ src: 'data:image/png;base64,' + base64Png, sizes: '512x512', type: 'image/png' }}
         ]
-      };
-      const manifestBlob = new Blob([JSON.stringify(manifest)], {type: 'application/manifest+json'});
+      }};
+      const manifestBlob = new Blob([JSON.stringify(manifest)], {{type: 'application/manifest+json'}});
       const manifestUrl = URL.createObjectURL(manifestBlob);
       const link = document.createElement('link');
       link.rel = 'manifest';
@@ -581,19 +591,19 @@ def inject_pwa_support():
       document.head.appendChild(meta4);
 
       const swCode = `
-        self.addEventListener('install', event => { self.skipWaiting(); });
-        self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
-        self.addEventListener('fetch', event => {
+        self.addEventListener('install', event => {{ self.skipWaiting(); }});
+        self.addEventListener('activate', event => {{ event.waitUntil(self.clients.claim()); }});
+        self.addEventListener('fetch', event => {{
           if (event.request.method !== 'GET') return;
           event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
-        });
+        }});
       `;
-      if ('serviceWorker' in navigator) {
-        const swBlob = new Blob([swCode], { type: 'text/javascript' });
+      if ('serviceWorker' in navigator) {{
+        const swBlob = new Blob([swCode], {{ type: 'text/javascript' }});
         const swUrl = URL.createObjectURL(swBlob);
-        navigator.serviceWorker.register(swUrl).catch(() => {});
-      }
-    })();
+        navigator.serviceWorker.register(swUrl).catch(() => {{}});
+      }}
+    }})();
     </script>
     """, unsafe_allow_html=True)
 
@@ -823,8 +833,8 @@ def setup_sidebar() -> Dict[str, Any]:
         st.write("Per supporto tecnico, collaborazioni o richieste:")
         st.link_button(
             "📧 Scrivimi via mail",
-            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
-            width="stretch"
+            # FIX #4: rimosso width="stretch" che non esiste in st.link_button e causa TypeError.
+            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro"
         )
         st.caption("Risposta normalmente entro 24/48 ore.")
 
@@ -840,8 +850,10 @@ def setup_sidebar() -> Dict[str, Any]:
 # 7. MAIN ORCHESTRATOR
 # ==========================================
 def main():
-    st.title("💎 BurryInvestingPro")
+    # FIX #9: inject_pwa_support() chiamata come prima istruzione di main()
+    # in modo che i tag PWA vengano registrati nel DOM prima di ogni altro output.
     inject_pwa_support()
+    st.title("💎 BurryInvestingPro")
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -864,7 +876,9 @@ def main():
     ui = setup_sidebar()
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
-        if ui["mode"] == "Batch (CSV)" and ui["file"]:
+        # FIX #1: la sidebar definisce "Batch CSV" (senza parentesi), il controllo originale
+        # usava "Batch (CSV)" — mismatch che impediva di leggere qualsiasi file CSV.
+        if ui["mode"] == "Batch CSV" and ui["file"]:
             targets = pd.read_csv(ui["file"])["Ticker"].tolist()[:MAX_CSV_ROWS]
 
         if targets:
@@ -1083,7 +1097,6 @@ def main():
         # --- TAB PORTAFOGLIO ---
         with tab_p:
             st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Ora puoi inserire sia **quote/azioni** sia **PMC** per ogni posizione, anche con **quote frazionate per gli ETF**, così il calcolo di valore investito, P&L e rendimento % è molto più preciso.")
-            st.success("Logo PWA personalizzato integrato correttamente.")
             st.markdown(
                 "### Portafoglio reale\n"
                 "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
@@ -1171,10 +1184,14 @@ def main():
                     holdings[t] = float(derived['Importo Investito'])
 
                     cur_default = st.session_state.holdings_currency.get(t, "USD")
+                    # FIX #8: aggiunti GBP e CHF. Con solo ["USD","EUR"] un titolo UK (es. ULVR.L)
+                    # con valuta GBP causava ValueError in list.index() e crashava il tab.
+                    _valute = ["USD", "EUR", "GBP", "CHF"]
+                    _cur_idx = _valute.index(cur_default) if cur_default in _valute else 0
                     cur = col.selectbox(
                         f"{t} - Valuta",
-                        ["USD", "EUR"],
-                        index=["USD", "EUR"].index(cur_default),
+                        _valute,
+                        index=_cur_idx,
                         key=f"currency_{t}"
                     )
                     st.session_state.holdings_currency[t] = cur
