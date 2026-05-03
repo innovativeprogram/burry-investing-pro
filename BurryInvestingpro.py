@@ -13,47 +13,6 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 
 
-import streamlit as st
-
-# 1. Configurazione Pagina (Deve essere la prima istruzione)
-st.set_page_config(
-    page_title="Burry Investing Pro",
-    page_icon="📈",
-    layout="wide"
-)
-
-# 2. Link al Manifesto PWA (Tutto su una riga per evitare errori)
-st.markdown('<link rel="manifest" href="https://raw.githubusercontent.com/Innovativeprogram/burry-investing-pro/main/manifest.json">', unsafe_allow_html=True)
-
-# 3. CSS per nascondere l'interfaccia Streamlit
-hide_style = """
-<style>
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-.block-container {padding-top: 2rem;}
-</style>
-"""
-st.markdown(hide_style, unsafe_allow_html=True)
-
-st.sidebar.header("Informazioni")
-st.sidebar.info("""
-**Burry Investing Pro**
-Dashboard avanzata per l'analisi del valore intrinseco e il monitoraggio dei mercati globali. 
-*Analisi basata su dati di mercato in tempo reale e modelli quantitativi.*
-""")
-
-
-# =================================================================
-# DA QUI INIZIA IL TUO CODICE ORIGINALE
-# =================================================================
-
-
-
-# ==========================================
-
-
-
 # ==========================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================
@@ -179,7 +138,9 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
         op_cash = cf.loc['Operating Cash Flow'].iloc[0] if 'Operating Cash Flow' in cf.index else 0.0
         cap_ex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index else 0.0
-        fcf = float(op_cash + cap_ex)
+        # FIX BUG #1: Il CapEx da Yahoo Finance è già negativo, quindi sottraiamo il valore
+        # assoluto per garantire che FCF = OpCashFlow - |CapEx| indipendentemente dal segno
+        fcf = float(op_cash - abs(cap_ex))
 
         total_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0.0
         equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else np.nan
@@ -213,9 +174,12 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             price=float(info.get('currentPrice', 0.0)),
             fcf=fcf,
             roic=roic,
-            peg_ratio=float(peg) if peg else None,
+            # FIX BUG #8: peg==0 veniva trattato come None per via di "if peg".
+            # Ora controlliamo esplicitamente "if peg is not None" per preservare peg=0.0
+            peg_ratio=float(peg) if peg is not None else None,
             peg_source=peg_src,
-            pe_ratio=float(pe) if pe else None,
+            # Stessa correzione per pe_ratio
+            pe_ratio=float(pe) if pe is not None else None,
             interest_coverage=int_cov,
             currency=info.get('currency', 'USD'),
             raw_data=raw_data
@@ -233,8 +197,11 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False)
+        # FIX BUG #9: Se il MultiIndex produce colonne duplicate dopo get_level_values(0),
+        # le de-duplichiamo tenendo la prima occorrenza per evitare errori downstream.
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
         return df if len(df) >= 200 else None
     except Exception:
         return None
@@ -283,7 +250,9 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
 def calculate_quant_metrics(df: pd.DataFrame, fund_data: Dict[str, Any]) -> Dict[str, Any]:
     returns = df['Close'].pct_change().dropna()
     excess_returns = returns - (RISK_FREE_RATE / TRADING_DAYS_YEAR)
-    sharpe = (excess_returns.mean() / returns.std()) * np.sqrt(TRADING_DAYS_YEAR) if returns.std() != 0 else 0
+    # FIX BUG #3: Il denominatore dello Sharpe deve usare excess_returns.std(),
+    # non returns.std(), per coerenza con la formula standard dello Sharpe Ratio.
+    sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(TRADING_DAYS_YEAR) if excess_returns.std() != 0 else 0
     vol = returns.std() * np.sqrt(TRADING_DAYS_YEAR)
 
     log_returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
@@ -297,11 +266,16 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Dict[str, Any]) -> Dict
         try:
             bs, fin, info = fund_data["balance_sheet"], fund_data["financials"], fund_data["info"]
             ta_val = bs.loc['Total Assets'].iloc[0]
+            # FIX BUG #7: Proteggiamo da divisione per zero su ta_val e tl prima del calcolo Z-Score
+            if ta_val == 0:
+                raise ValueError("Total Assets è zero, impossibile calcolare Z-Score")
             wc = (bs.loc['Current Assets'].iloc[0] - bs.loc['Current Liabilities'].iloc[0]) if 'Current Assets' in bs.index else 0
             re = bs.loc['Retained Earnings'].iloc[0] if 'Retained Earnings' in bs.index else 0
             ebit = fin.loc['EBIT'].iloc[0]
             mc = info.get('marketCap', 1)
             tl = bs.loc['Total Liabilities Net Minority Interest'].iloc[0]
+            if tl == 0:
+                raise ValueError("Total Liabilities è zero, impossibile calcolare Z-Score")
             rev = info.get('totalRevenue', 0)
             z_score = (1.2 * (wc / ta_val)) + (1.4 * (re / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val))
         except Exception:
@@ -550,7 +524,18 @@ def setup_sidebar() -> Dict[str, Any]:
 
     st.sidebar.header("2. Mercato")
     market = st.sidebar.selectbox("Borsa:", ["USA ", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Crypto", "Custom"])
-    suffix = ".MI" if "Italia" in market else (".DE" if "Germania" in market else "")
+    # FIX BUG #5: Il suffisso per Francia (.PA) e GB (.L) non veniva applicato.
+    # Ora tutti i mercati supportati hanno il loro suffisso corretto.
+    if "Italia" in market:
+        suffix = ".MI"
+    elif "Germania" in market:
+        suffix = ".DE"
+    elif "Francia" in market:
+        suffix = ".PA"
+    elif "GB" in market:
+        suffix = ".L"
+    else:
+        suffix = ""
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", use_container_width=True)
 
     with st.sidebar.expander("⚙️ Parametri Fondamentali"):
@@ -601,9 +586,10 @@ def main():
 
         if targets:
             results: List[Dict[str, Any]] = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-                futures = [ex.submit(normalize_ticker, t, ui["suffix"]) for t in targets]
-                tickers = [f.result() for f in concurrent.futures.as_completed(futures)]
+            # FIX BUG #6: normalize_ticker è una funzione locale senza I/O, il parallelismo
+            # con ThreadPoolExecutor era inutile e produceva ordine non deterministico con
+            # as_completed(). Ora i ticker vengono normalizzati in modo sincrono e ordinato.
+            tickers = [normalize_ticker(t, ui["suffix"]) for t in targets]
 
             for t in tickers:
                 raw = get_fundamental_data(t)
@@ -624,16 +610,16 @@ def main():
         # --- TAB FONDAMENTALI ---
         with tab_f:
             st.info("💡 **Come leggere questa sezione:** Questa tabella rappresenta il motore dell'azienda. Cerca società con un ROIC (ritorno sul capitale investito) costantemente alto e un debito gestibile. Il Free Cash Flow è il vero denaro prodotto dal business. Ricorda sempre: il prezzo è quello che paghi, il valore è quello che ottieni.")
-
+            
             st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
-
+            
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB TECNICO ---
         with tab_t:
             st.info("💡 **Come leggere il grafico:** Anche se preferiamo studiare il business, il prezzo ci dice come si muove il mercato. La linea blu (Media Mobile a 200 giorni) indica il trend di lungo periodo: se il prezzo è sopra, la marea è a nostro favore. Il grafico in basso (RSI) segnala se c'è troppa euforia (valori sopra 70, attenzione) o troppo pessimismo (sotto 30, possibili occasioni).")
-
+            
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 df_calc = calculate_technical_indicators(df_tech)
@@ -674,14 +660,14 @@ def main():
                 )
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
-
+            
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB QUANT ---
         with tab_q:
             st.info("💡 **Come interpretare i dati:** Qui lasciamo parlare la statistica. Lo **Sharpe Ratio** ci dice quanto rendimento stiamo ottenendo per ogni unità di rischio sopportata (più è alto, meglio è). L'**Altman Z-Score** è vitale per allontanarci dalle aziende a rischio bancarotta (sopra 3 è ottimo). I grafici in basso (Monte Carlo) simulano gli scenari futuri in base alla volatilità storica, mostrandoci il rischio concreto (Drawdown) di perdite permanenti.")
-
+            
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 qm = calculate_quant_metrics(df_tech, row["_raw_data"])
@@ -697,7 +683,12 @@ def main():
                 c5.metric("CAGR", f"{risk['CAGR'] * 100:.1f}%")
                 c6.metric("VaR 95% (giornaliero)", f"{risk['VaR_95'] * 100:.2f}%")
 
-                smart = compute_smart_quant_score(row, score, qm, risk)
+                # FIX BUG #2 (parziale Tab Quant): score calcolato localmente nel tab tecnico
+                # non era disponibile qui. Calcoliamo un timing_score locale se df_tech è disponibile.
+                df_calc_q = calculate_technical_indicators(df_tech)
+                score_q, _ = calculate_timing_score(df_calc_q, df_calc_q['Close'].iloc[-1])
+
+                smart = compute_smart_quant_score(row, score_q, qm, risk)
                 st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
 
                 with st.expander("📉 Distribuzione rendimenti & rischio"):
@@ -749,20 +740,29 @@ def main():
                             yaxis_title="Equity normalizzata"
                         )
                         st.plotly_chart(fig_mc, use_container_width=True)
-
+            
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB VERDETTO ---
         with tab_v:
             st.info("💡 **Come leggere il verdetto:** Questa è la nostra sintesi razionale. Combina la solidità del business (Fondamentali), il momento (Tecnico) e le probabilità statistiche (Quant). Richiedi sempre un margine di sicurezza: investi solo quando il verdetto ti suggerisce che il rischio di perdere capitale in modo permanente è bassissimo.")
-
+            
             df_tech = get_technical_data(ticker)
             qm = calculate_quant_metrics(df_tech, row["_raw_data"]) if df_tech is not None else {}
             risk = calculate_risk_metrics(df_tech) if df_tech is not None else {
                 "Max Drawdown": 0.0,
                 "CAGR": 0.0
             }
+
+            # FIX BUG #2: score veniva usata nel Tab Verdetto senza essere definita in questo scope.
+            # Il Tab Tecnico la calcolava nel suo scope locale, ma i tab sono indipendenti.
+            # Ricalcoliamo score direttamente qui per garantire che sia sempre disponibile.
+            if df_tech is not None:
+                df_calc_v = calculate_technical_indicators(df_tech)
+                score, _ = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
+            else:
+                score = 0
 
             z_val = qm.get('Altman Z-Score', 0.0)
             z_safe = "-" in ticker or (isinstance(z_val, float) and z_val >= 1.8)
@@ -793,14 +793,14 @@ def main():
                     st.warning("🟡 HOLD (Quant): Setup discreto ma non eccezionale.")
                 else:
                     st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole o rischio elevato.")
-
+            
             st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
         # --- TAB PORTAFOGLIO ---
         with tab_p:
             st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Qui aggreghiamo i tuoi investimenti. Il grafico ti mostra la crescita combinata, mentre la matrice di correlazione in fondo è cruciale: se le aziende che possiedi tendono a muoversi tutte nella stessa direzione contemporaneamente, non sei diversificato come pensi.")
-
+            
             st.markdown(
                 "### Portafoglio reale\n"
                 "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
@@ -946,7 +946,7 @@ def main():
                             st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
             else:
                 st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente per costruire il portafoglio.")
-
+                
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
 
