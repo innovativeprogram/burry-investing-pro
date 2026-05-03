@@ -907,7 +907,7 @@ def main():
         # --- TAB PORTAFOGLIO ---
         with tab_p:
             st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Ora puoi inserire sia **quote/azioni** sia **PMC** per ogni posizione, anche con **quote frazionate per gli ETF**, così il calcolo di valore investito, P&L e rendimento % è molto più preciso.")
-            render_logo_uploader_notice()
+            st.success("Logo PWA personalizzato integrato correttamente.")
             st.markdown(
                 "### Portafoglio reale\n"
                 "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
