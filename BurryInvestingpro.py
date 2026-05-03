@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
-import os
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
@@ -20,12 +19,60 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_TAX_RATE = 0.21
+DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 100.0
 TRADING_DAYS_YEAR = 252
 MAX_CSV_ROWS = 100
 MAX_WORKERS = 10
 RISK_FREE_RATE = 0.04
+FX_TTL_SECONDS = 3600
+
+@st.cache_data(ttl=FX_TTL_SECONDS, show_spinner=False)
+def get_fx_rate(from_currency: str, to_currency: str) -> float:
+    try:
+        f = str(from_currency or "").upper().strip()
+        t = str(to_currency or "").upper().strip()
+        if not f or not t or f == t:
+            return 1.0
+        direct = yf.Ticker(f"{f}{t}=X").history(period="5d", interval="1d")
+        if direct is not None and not direct.empty and 'Close' in direct.columns:
+            s = direct['Close'].dropna()
+            if not s.empty:
+                return float(s.iloc[-1])
+        inverse = yf.Ticker(f"{t}{f}=X").history(period="5d", interval="1d")
+        if inverse is not None and not inverse.empty and 'Close' in inverse.columns:
+            s = inverse['Close'].dropna()
+            if not s.empty and float(s.iloc[-1]) != 0:
+                return float(1.0 / float(s.iloc[-1]))
+    except Exception as e:
+        logger.warning(f"FX fallback {from_currency}->{to_currency}: {e}")
+    return 1.0
+
+def enrich_portfolio_with_fx(dfweights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
+    if dfweights is None or dfweights.empty:
+        return pd.DataFrame()
+    out = dfweights.copy()
+    base = str(base_currency or "EUR").upper().strip()
+    out["Valuta Base"] = base
+    out["FX Rate"] = out["Valuta"].apply(lambda c: float(get_fx_rate(c, base)))
+    out["Importo Investito Base"] = out["Importo Investito"].astype(float) * out["FX Rate"]
+    out["Valore di Mercato Base"] = out["Valore di Mercato"].astype(float) * out["FX Rate"]
+    out["P/L Base"] = out["P/L"].astype(float) * out["FX Rate"]
+    total_base_mv = float(out["Valore di Mercato Base"].sum())
+    out["Peso Base"] = np.where(total_base_mv > 0, out["Valore di Mercato Base"] / total_base_mv * 100.0, 0.0)
+    return out
+
+def calculate_tax_impact_df_base(dfweights_base: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> pd.DataFrame:
+    if dfweights_base is None or dfweights_base.empty:
+        return pd.DataFrame()
+    dftax = dfweights_base.copy()
+    dftax["Aliquota Fiscale %"] = tax_rate * 100.0
+    dftax["PlusMinus Lorda Base"] = dftax["P/L Base"].astype(float)
+    dftax["Imposta Teorica Base"] = np.where(dftax["PlusMinus Lorda Base"] > 0, dftax["PlusMinus Lorda Base"] * tax_rate, 0.0)
+    dftax["PlusMinus Netta Base"] = dftax["PlusMinus Lorda Base"] - dftax["Imposta Teorica Base"]
+    dftax["Valore Netto Post Imposta Base"] = dftax["Valore di Mercato Base"] - dftax["Imposta Teorica Base"]
+    dftax["Rendimento Netto Base"] = np.where(dftax["Importo Investito Base"] > 0, dftax["PlusMinus Netta Base"] / dftax["Importo Investito Base"] * 100.0, 0.0)
+    return dftax
 
 
 # ==========================================
@@ -52,6 +99,10 @@ class FundamentalMetrics:
     peg_source: str
     pe_ratio: Optional[float]
     interest_coverage: float
+    debt_to_equity: Optional[float]
+    revenue_growth: Optional[float]
+    net_margin: Optional[float]
+    fcf_margin: Optional[float]
     currency: str
     raw_data: Dict[str, Any]
 
@@ -66,8 +117,12 @@ class FundamentalMetrics:
             "PEG Source": self.peg_source,
             "P/E Ratio": self.pe_ratio,
             "Interest Coverage": self.interest_coverage,
+            "Debt/Equity": self.debt_to_equity,
+            "Revenue Growth": self.revenue_growth,
+            "Net Margin": self.net_margin,
+            "FCF Margin": self.fcf_margin,
             "Currency": self.currency,
-            "_raw_data": self.raw_data
+            "_raw_data": self.raw_data,
         }
 
 
@@ -130,6 +185,10 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
                 peg_source="Crypto",
                 pe_ratio=None,
                 interest_coverage=SAFE_INTEREST_COVERAGE,
+                debt_to_equity=None,
+                revenue_growth=None,
+                net_margin=None,
+                fcf_margin=None,
                 currency=info.get('currency', 'USD'),
                 raw_data=raw_data
             )
@@ -138,8 +197,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
         op_cash = cf.loc['Operating Cash Flow'].iloc[0] if 'Operating Cash Flow' in cf.index else 0.0
         cap_ex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index else 0.0
-        # FIX BUG #1: Il CapEx da Yahoo Finance è già negativo, quindi sottraiamo il valore
-        # assoluto per garantire che FCF = OpCashFlow - |CapEx| indipendentemente dal segno
         fcf = float(op_cash - abs(cap_ex))
 
         total_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0.0
@@ -167,6 +224,21 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
         int_exp = fin.loc['Interest Expense'].iloc[0] if 'Interest Expense' in fin.index else 0.0
         int_cov = float(ebit / abs(int_exp)) if int_exp != 0 else SAFE_INTEREST_COVERAGE
+        total_revenue = info.get('totalRevenue')
+        net_income = info.get('netIncomeToCommon')
+        revenue_growth = info.get('revenueGrowth')
+
+        debt_to_equity = None
+        if equity is not None and not np.isnan(equity) and equity != 0:
+            debt_to_equity = float(total_debt / equity)
+
+        net_margin = None
+        if total_revenue is not None and total_revenue != 0 and net_income is not None:
+            net_margin = float(net_income / total_revenue)
+
+        fcf_margin = None
+        if total_revenue is not None and total_revenue != 0:
+            fcf_margin = float(fcf / total_revenue)
 
         return FundamentalMetrics(
             ticker=raw_data["symbol"],
@@ -174,13 +246,14 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             price=float(info.get('currentPrice', 0.0)),
             fcf=fcf,
             roic=roic,
-            # FIX BUG #8: peg==0 veniva trattato come None per via di "if peg".
-            # Ora controlliamo esplicitamente "if peg is not None" per preservare peg=0.0
             peg_ratio=float(peg) if peg is not None else None,
             peg_source=peg_src,
-            # Stessa correzione per pe_ratio
             pe_ratio=float(pe) if pe is not None else None,
             interest_coverage=int_cov,
+            debt_to_equity=debt_to_equity,
+            revenue_growth=float(revenue_growth) if revenue_growth is not None else None,
+            net_margin=net_margin,
+            fcf_margin=fcf_margin,
             currency=info.get('currency', 'USD'),
             raw_data=raw_data
         )
@@ -197,8 +270,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False)
-        # FIX BUG #9: Se il MultiIndex produce colonne duplicate dopo get_level_values(0),
-        # le de-duplichiamo tenendo la prima occorrenza per evitare errori downstream.
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.loc[:, ~df.columns.duplicated(keep='first')]
@@ -250,8 +321,6 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
 def calculate_quant_metrics(df: pd.DataFrame, fund_data: Dict[str, Any]) -> Dict[str, Any]:
     returns = df['Close'].pct_change().dropna()
     excess_returns = returns - (RISK_FREE_RATE / TRADING_DAYS_YEAR)
-    # FIX BUG #3: Il denominatore dello Sharpe deve usare excess_returns.std(),
-    # non returns.std(), per coerenza con la formula standard dello Sharpe Ratio.
     sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(TRADING_DAYS_YEAR) if excess_returns.std() != 0 else 0
     vol = returns.std() * np.sqrt(TRADING_DAYS_YEAR)
 
@@ -266,13 +335,12 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Dict[str, Any]) -> Dict
         try:
             bs, fin, info = fund_data["balance_sheet"], fund_data["financials"], fund_data["info"]
             ta_val = bs.loc['Total Assets'].iloc[0]
-            # FIX BUG #7: Proteggiamo da divisione per zero su ta_val e tl prima del calcolo Z-Score
             if ta_val == 0:
                 raise ValueError("Total Assets è zero, impossibile calcolare Z-Score")
             wc = (bs.loc['Current Assets'].iloc[0] - bs.loc['Current Liabilities'].iloc[0]) if 'Current Assets' in bs.index else 0
             re = bs.loc['Retained Earnings'].iloc[0] if 'Retained Earnings' in bs.index else 0
             ebit = fin.loc['EBIT'].iloc[0]
-            mc = info.get('marketCap', 1)
+            mc = info.get('marketCap') or 1  # Evita fallback fallaci a None
             tl = bs.loc['Total Liabilities Net Minority Interest'].iloc[0]
             if tl == 0:
                 raise ValueError("Total Liabilities è zero, impossibile calcolare Z-Score")
@@ -385,24 +453,59 @@ def compute_smart_quant_score(
 ) -> Dict[str, Any]:
 
     f_score = 0.0
+
     roic = row.get("ROIC", 0.0)
-    f_score += float(np.clip((roic - 0.10) / (0.25 - 0.10), 0, 1)) * 50.0
+    f_score += float(np.clip((roic - 0.10) / (0.25 - 0.10), 0, 1)) * 30.0
 
     peg = row.get("PEG Ratio", None)
     if peg is not None and peg > 0:
         if peg <= 1:
-            f_score += 30.0
+            f_score += 25.0
         elif peg <= 2:
-            f_score += 15.0
-        else:
-            f_score += 0.0
+            f_score += 12.0
+
+    debt_to_equity = row.get("Debt/Equity", None)
+    if debt_to_equity is not None:
+        if debt_to_equity <= 0.5:
+            f_score += 12.0
+        elif debt_to_equity <= 1.0:
+            f_score += 7.0
+        elif debt_to_equity <= 2.0:
+            f_score += 3.0
+
+    revenue_growth = row.get("Revenue Growth", None)
+    if revenue_growth is not None:
+        if revenue_growth >= 0.15:
+            f_score += 6.0
+        elif revenue_growth >= 0.05:
+            f_score += 3.0
+        elif revenue_growth > 0:
+            f_score += 1.5
+
+    net_margin = row.get("Net Margin", None)
+    if net_margin is not None:
+        if net_margin >= 0.20:
+            f_score += 8.0
+        elif net_margin >= 0.10:
+            f_score += 4.0
+        elif net_margin > 0:
+            f_score += 2.0
+
+    fcf_margin = row.get("FCF Margin", None)
+    if fcf_margin is not None:
+        if fcf_margin >= 0.15:
+            f_score += 12.0
+        elif fcf_margin >= 0.08:
+            f_score += 7.0
+        elif fcf_margin > 0:
+            f_score += 3.0
 
     z = qm.get("Altman Z-Score", "N/A")
     if isinstance(z, (int, float, np.floating)):
         if z >= 3.0:
-            f_score += 20.0
+            f_score += 7.0
         elif z >= 1.8:
-            f_score += 10.0
+            f_score += 3.5
 
     f_score = float(np.clip(f_score, 0, 100))
 
@@ -438,7 +541,46 @@ def compute_smart_quant_score(
         "TechnicalScore": t_score,
         "QuantRiskScore": q_score
     }
+    
+def calculate_tax_impact(df_weights: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> pd.DataFrame:
+    if df_weights is None or df_weights.empty:
+        return pd.DataFrame()
 
+    df_tax = df_weights.copy()
+
+    df_tax["Aliquota Fiscale %"] = tax_rate * 100.0
+    df_tax["Plus/Minus Lorda"] = df_tax["P&L"].astype(float)
+
+    df_tax["Imposta Teorica"] = np.where(
+        df_tax["Plus/Minus Lorda"] > 0,
+        df_tax["Plus/Minus Lorda"] * tax_rate,
+        0.0
+    )
+
+    df_tax["Plus/Minus Netta"] = df_tax["Plus/Minus Lorda"] - df_tax["Imposta Teorica"]
+
+    df_tax["Valore Netto Post Imposta"] = df_tax["Valore di Mercato"] - df_tax["Imposta Teorica"]
+
+    df_tax["Rendimento Netto %"] = np.where(
+        df_tax["Importo Investito"] > 0,
+        (df_tax["Plus/Minus Netta"] / df_tax["Importo Investito"]) * 100.0,
+        0.0
+    )
+
+    cols = [
+        "Ticker",
+        "Importo Investito",
+        "Valore di Mercato",
+        "P&L",
+        "Aliquota Fiscale %",
+        "Imposta Teorica",
+        "Plus/Minus Netta",
+        "Valore Netto Post Imposta",
+        "Rendimento Netto %"
+    ]
+
+    existing_cols = [c for c in cols if c in df_tax.columns]
+    return df_tax[existing_cols]
 
 # ==========================================
 # 5.E PORTAFOGLIO: RENDIMENTI & METRICHE
@@ -513,39 +655,28 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 # ==========================================
 # 5.F HELPER PORTAFOGLIO AVANZATO & PWA
 # ==========================================
-@st.cache_data(ttl=60, show_spinner=False)
 def get_latest_price(symbol: str) -> Optional[float]:
-    # FIX #7: TTL ridotto a 60s per prezzi live aggiornati.
-    # Priorità: currentPrice > regularMarketPrice > previousClose (fallback).
-    # Non usa più get_technical_data (TTL 900s) che restituiva dati storici stantii.
-    try:
-        info = yf.Ticker(symbol).info
-        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+    df = get_technical_data(symbol)
+    if df is not None and not df.empty and 'Close' in df.columns:
+        try:
+            return float(df['Close'].dropna().iloc[-1])
+        except Exception:
+            pass
+    raw = get_fundamental_data(symbol)
+    if raw and raw.get('info'):
+        info = raw['info']
+        price = info.get('currentPrice') or info.get('regularMarketPrice')
         if price is not None:
             return float(price)
-    except Exception:
-        pass
     return None
 
 
 def inject_pwa_support():
-    # FIX #11: carica logo.png reale dalla cartella del progetto e lo converte in base64.
-    # Se il file non esiste, usa un PNG trasparente 1x1 come fallback senza crashare.
-    _logo_b64 = ""
-    try:
-        _logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
-        if os.path.exists(_logo_path):
-            import base64 as _b64
-            with open(_logo_path, "rb") as _f:
-                _logo_b64 = _b64.b64encode(_f.read()).decode("utf-8")
-    except Exception:
-        pass
-    _icon_data = _logo_b64 if _logo_b64 else "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-    st.markdown(f"""
+    st.markdown("""
     <script>
-    (function(){{
-      const base64Png = '{_icon_data}';
-      const manifest = {{
+    (function(){
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
+      const manifest = {
         name: 'BurryInvestingPro',
         short_name: 'BurryPro',
         description: 'Analisi investimenti e portafoglio installabile su smartphone',
@@ -554,11 +685,11 @@ def inject_pwa_support():
         background_color: '#0e1117',
         theme_color: '#0e1117',
         icons: [
-          {{ src: 'data:image/png;base64,' + base64Png, sizes: '192x192', type: 'image/png' }},
-          {{ src: 'data:image/png;base64,' + base64Png, sizes: '512x512', type: 'image/png' }}
+          { src: 'data:image/png;base64,' + base64Png, sizes: '192x192', type: 'image/png' },
+          { src: 'data:image/png;base64,' + base64Png, sizes: '512x512', type: 'image/png' }
         ]
-      }};
-      const manifestBlob = new Blob([JSON.stringify(manifest)], {{type: 'application/manifest+json'}});
+      };
+      const manifestBlob = new Blob([JSON.stringify(manifest)], {type: 'application/manifest+json'});
       const manifestUrl = URL.createObjectURL(manifestBlob);
       const link = document.createElement('link');
       link.rel = 'manifest';
@@ -591,19 +722,19 @@ def inject_pwa_support():
       document.head.appendChild(meta4);
 
       const swCode = `
-        self.addEventListener('install', event => {{ self.skipWaiting(); }});
-        self.addEventListener('activate', event => {{ event.waitUntil(self.clients.claim()); }});
-        self.addEventListener('fetch', event => {{
+        self.addEventListener('install', event => { self.skipWaiting(); });
+        self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
+        self.addEventListener('fetch', event => {
           if (event.request.method !== 'GET') return;
           event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
-        }});
+        });
       `;
-      if ('serviceWorker' in navigator) {{
-        const swBlob = new Blob([swCode], {{ type: 'text/javascript' }});
+      if ('serviceWorker' in navigator) {
+        const swBlob = new Blob([swCode], { type: 'text/javascript' });
         const swUrl = URL.createObjectURL(swBlob);
-        navigator.serviceWorker.register(swUrl).catch(() => {{}});
-      }}
-    }})();
+        navigator.serviceWorker.register(swUrl).catch(() => {});
+      }
+    })();
     </script>
     """, unsafe_allow_html=True)
 
@@ -815,7 +946,17 @@ def setup_sidebar() -> Dict[str, Any]:
             "peg": st.number_input("Max PEG Ratio", 1.5, step=0.1),
             "pe": st.number_input("Max PE (Fallback)", 25.0),
             "intcov": st.number_input("Min Int. Coverage", 3.0),
+
+            "custom_max_de": st.number_input("Custom Max Debt/Equity", 1.0, step=0.1),
+            "custom_min_fcf_margin": st.number_input("Custom Min FCF Margin", 0.08, step=0.01, format="%.2f"),
+            "custom_min_net_margin": st.number_input("Custom Min Net Margin", 0.10, step=0.01, format="%.2f"),
+
             "perfectonly": st.checkbox("Solo All Green"),
+            "model_mode": st.selectbox(
+                "Modello verdetto",
+                ["Entrambi", "Classico", "Evoluto", "Personalizzabile"],
+                index=0
+            ),
         }
 
     with st.sidebar.expander("❓ Come cercare il ticker corretto"):
@@ -833,8 +974,8 @@ def setup_sidebar() -> Dict[str, Any]:
         st.write("Per supporto tecnico, collaborazioni o richieste:")
         st.link_button(
             "📧 Scrivimi via mail",
-            # FIX #4: rimosso width="stretch" che non esiste in st.link_button e causa TypeError.
-            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro"
+            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
+            width="stretch"
         )
         st.caption("Risposta normalmente entro 24/48 ore.")
 
@@ -850,10 +991,8 @@ def setup_sidebar() -> Dict[str, Any]:
 # 7. MAIN ORCHESTRATOR
 # ==========================================
 def main():
-    # FIX #9: inject_pwa_support() chiamata come prima istruzione di main()
-    # in modo che i tag PWA vengano registrati nel DOM prima di ogni altro output.
-    inject_pwa_support()
     st.title("💎 BurryInvestingPro")
+    inject_pwa_support()
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -876,16 +1015,11 @@ def main():
     ui = setup_sidebar()
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
-        # FIX #1: la sidebar definisce "Batch CSV" (senza parentesi), il controllo originale
-        # usava "Batch (CSV)" — mismatch che impediva di leggere qualsiasi file CSV.
         if ui["mode"] == "Batch CSV" and ui["file"]:
             targets = pd.read_csv(ui["file"])["Ticker"].tolist()[:MAX_CSV_ROWS]
 
         if targets:
             results: List[Dict[str, Any]] = []
-            # FIX BUG #6: normalize_ticker è una funzione locale senza I/O, il parallelismo
-            # con ThreadPoolExecutor era inutile e produceva ordine non deterministico con
-            # as_completed(). Ora i ticker vengono normalizzati in modo sincrono e ordinato.
             tickers = [normalize_ticker(t, ui["suffix"]) for t in targets]
 
             for t in tickers:
@@ -980,8 +1114,6 @@ def main():
                 c5.metric("CAGR", f"{risk['CAGR'] * 100:.1f}%")
                 c6.metric("VaR 95% (giornaliero)", f"{risk['VaR_95'] * 100:.2f}%")
 
-                # FIX BUG #2 (parziale Tab Quant): score calcolato localmente nel tab tecnico
-                # non era disponibile qui. Calcoliamo un timing_score locale se df_tech è disponibile.
                 df_calc_q = calculate_technical_indicators(df_tech)
                 score_q, _ = calculate_timing_score(df_calc_q, df_calc_q['Close'].iloc[-1])
 
@@ -1052,9 +1184,6 @@ def main():
                 "CAGR": 0.0
             }
 
-            # FIX BUG #2: score veniva usata nel Tab Verdetto senza essere definita in questo scope.
-            # Il Tab Tecnico la calcolava nel suo scope locale, ma i tab sono indipendenti.
-            # Ricalcoliamo score direttamente qui per garantire che sia sempre disponibile.
             if df_tech is not None:
                 df_calc_v = calculate_technical_indicators(df_tech)
                 score, _ = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
@@ -1063,33 +1192,119 @@ def main():
 
             z_val = qm.get('Altman Z-Score', 0.0)
             z_safe = "-" in ticker or (isinstance(z_val, float) and z_val >= 1.8)
-            fund_pts = (
+
+            fund_pts_classic = (
                 (1 if row['ROIC'] >= ui['cfg']['roic'] / 100 else 0) +
-                (1 if row['PEG Ratio'] and row['PEG Ratio'] <= ui['cfg']['peg'] else 0)
+                (1 if row['PEG Ratio'] is not None and row['PEG Ratio'] <= ui['cfg']['peg'] else 0)
             )
 
-            if fund_pts >= 2 and z_safe and score >= 50:
-                st.success("🟢 BUY: Fondamentali solidi e timing favorevole.")
-            elif fund_pts >= 1 and z_safe:
-                st.warning("🟡 HOLD: Azienda sicura ma attendere prezzi migliori.")
-            else:
-                st.error("🔴 SELL: Rischio finanziario o fondamentali scarsi.")
+            # Rinomina la logica precedentemente chiamata "fund_pts" in "fund_pts_evoluto" per evitare il NameError
+            fund_pts_evoluto = (
+                (1 if row['ROIC'] >= ui['cfg']['roic'] / 100 else 0) +
+                (1 if row['PEG Ratio'] is not None and row['PEG Ratio'] <= ui['cfg']['peg'] else 0) +
+                (1 if row.get('Debt/Equity') is not None and row.get('Debt/Equity') <= 1.0 else 0) +
+                (1 if row.get('FCF Margin') is not None and row.get('FCF Margin') >= 0.08 else 0) +
+                (1 if row.get('Net Margin') is not None and row.get('Net Margin') >= 0.10 else 0)
+            )
+
+            # Definisci la logica mancante per "fund_pts_custom" usando le opzioni UI
+            fund_pts_custom = (
+                (1 if row['ROIC'] >= ui['cfg']['roic'] / 100 else 0) +
+                (1 if row['PEG Ratio'] is not None and row['PEG Ratio'] <= ui['cfg']['peg'] else 0) +
+                (1 if row.get('Debt/Equity') is not None and row.get('Debt/Equity') <= ui['cfg']['custom_max_de'] else 0) +
+                (1 if row.get('FCF Margin') is not None and row.get('FCF Margin') >= ui['cfg']['custom_min_fcf_margin'] else 0) +
+                (1 if row.get('Net Margin') is not None and row.get('Net Margin') >= ui['cfg']['custom_min_net_margin'] else 0)
+            )
+
+            mode = ui['cfg']['model_mode']
+
+            if mode == "Entrambi":
+                col_m1, col_m2 = st.columns(2)
+                col_m1.metric("Punti Modello Classico", f"{fund_pts_classic}/2")
+                col_m2.metric("Punti Modello Evoluto", f"{fund_pts_evoluto}/5")
+                
+            if mode == "Personalizzabile":
+                st.caption(
+                    "Personalizzabile → "
+                    f"ROIC: {'✅' if row['ROIC'] >= ui['cfg']['roic'] / 100 else '❌'} | "
+                    f"PEG: {'✅' if row['PEG Ratio'] is not None and row['PEG Ratio'] <= ui['cfg']['peg'] else '❌'} | "
+                    f"D/E: {'✅' if row.get('Debt/Equity') is not None and row.get('Debt/Equity') <= ui['cfg']['custom_max_de'] else '❌'} | "
+                    f"FCF Margin: {'✅' if row.get('FCF Margin') is not None and row.get('FCF Margin') >= ui['cfg']['custom_min_fcf_margin'] else '❌'} | "
+                    f"Net Margin: {'✅' if row.get('Net Margin') is not None and row.get('Net Margin') >= ui['cfg']['custom_min_net_margin'] else '❌'}"
+                )                
+                
+            if mode in ["Entrambi", "Evoluto"]:
+                st.caption(
+                    "Evoluto → "
+                    f"ROIC: {'✅' if row['ROIC'] >= ui['cfg']['roic'] / 100 else '❌'} | "
+                    f"PEG: {'✅' if row['PEG Ratio'] is not None and row['PEG Ratio'] <= ui['cfg']['peg'] else '❌'} | "
+                    f"D/E: {'✅' if row.get('Debt/Equity') is not None and row.get('Debt/Equity') <= 1.0 else '❌'} | "
+                    f"FCF Margin: {'✅' if row.get('FCF Margin') is not None and row.get('FCF Margin') >= 0.08 else '❌'} | "
+                    f"Net Margin: {'✅' if row.get('Net Margin') is not None and row.get('Net Margin') >= 0.10 else '❌'}"
+                )                
+
+            if mode in ["Entrambi", "Classico"]:
+                st.subheader("Modello Classico")
+
+                if fund_pts_classic >= 2 and z_safe and score >= 50:
+                    st.success("🟢 BUY: Fondamentali base solidi e timing favorevole.")
+                elif fund_pts_classic >= 1 and z_safe:
+                    st.warning("🟡 HOLD: Azienda discreta, ma serve più margine di sicurezza.")
+                else:
+                    st.error("🔴 SELL: Fondamentali o sicurezza finanziaria insufficienti.")
+
+            if mode in ["Entrambi", "Evoluto"]:
+                st.subheader("Modello Evoluto")
+
+                if fund_pts_evoluto >= 4 and z_safe and score >= 50:
+                    st.success("🟢 BUY: Fondamentali robusti, buona qualità finanziaria e timing favorevole.")
+                elif fund_pts_evoluto >= 3 and z_safe:
+                    st.warning("🟡 HOLD: Azienda interessante, ma serve più conferma su prezzo o momentum.")
+                else:
+                    st.error("🔴 SELL: Fondamentali insufficienti o profilo rischio/rendimento debole.")
+                    
+            if mode == "Personalizzabile":
+                st.subheader("Modello Personalizzabile")
+
+                if fund_pts_custom >= 4 and z_safe and score >= 50:
+                    st.success("🟢 BUY: Fondamentali coerenti con i parametri personalizzati e timing favorevole.")
+                elif fund_pts_custom >= 3 and z_safe:
+                    st.warning("🟡 HOLD: Setup discreto secondo i parametri personalizzati, ma non ancora abbastanza forte.")
+                else:
+                    st.error("🔴 SELL: Il titolo non soddisfa i criteri del modello personalizzato.")                    
 
             if df_tech is not None and qm:
                 smart_v = compute_smart_quant_score(row, score, qm, risk)
-                st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
-                st.write(
-                    f"F: {smart_v['FundamentalScore']:.0f} | "
-                    f"T: {smart_v['TechnicalScore']:.0f} | "
-                    f"Q: {smart_v['QuantRiskScore']:.0f}"
-                )
 
-                if smart_v["SmartScore"] >= 70 and z_safe:
-                    st.success("🟢 BUY (Quant): Vantaggio statistico e rischio controllato.")
-                elif smart_v["SmartScore"] >= 50 and z_safe:
-                    st.warning("🟡 HOLD (Quant): Setup discreto ma non eccezionale.")
-                else:
-                    st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole o rischio elevato.")
+                if mode in ["Entrambi", "Evoluto"]:
+                    st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
+                    st.write(
+                        f"F: {smart_v['FundamentalScore']:.0f} | "
+                        f"T: {smart_v['TechnicalScore']:.0f} | "
+                        f"Q: {smart_v['QuantRiskScore']:.0f}"
+                    )
+
+                    if smart_v["SmartScore"] >= 70 and z_safe and fund_pts_evoluto >= 4:
+                        st.success("🟢 BUY (Quant): Vantaggio statistico, fondamentali solidi e rischio controllato.")
+                    elif smart_v["SmartScore"] >= 50 and z_safe and fund_pts_evoluto >= 3:
+                        st.warning("🟡 HOLD (Quant): Setup discreto, ma non ancora abbastanza forte per un BUY pieno.")
+                    else:
+                        st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole, fondamentali insufficienti o rischio elevato.")
+                        
+                if mode == "Personalizzabile":
+                    st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
+                    st.write(
+                        f"F: {smart_v['FundamentalScore']:.0f} | "
+                        f"T: {smart_v['TechnicalScore']:.0f} | "
+                        f"Q: {smart_v['QuantRiskScore']:.0f}"
+                    )
+
+                    if smart_v["SmartScore"] >= 70 and z_safe and fund_pts_custom >= 4:
+                        st.success("🟢 BUY (Quant): Vantaggio statistico e criteri personalizzati soddisfatti.")
+                    elif smart_v["SmartScore"] >= 50 and z_safe and fund_pts_custom >= 3:
+                        st.warning("🟡 HOLD (Quant): Setup discreto secondo il modello personalizzato.")
+                    else:
+                        st.error("🔴 NO TRADE (Quant): Score quantitativo o criteri personalizzati insufficienti.")                        
             
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
@@ -1097,6 +1312,7 @@ def main():
         # --- TAB PORTAFOGLIO ---
         with tab_p:
             st.info("💡 **Come usare questa sezione:** La diversificazione sensata è la protezione per il nostro capitale. Ora puoi inserire sia **quote/azioni** sia **PMC** per ogni posizione, anche con **quote frazionate per gli ETF**, così il calcolo di valore investito, P&L e rendimento % è molto più preciso.")
+            st.success("Versione Premium attiva: conversione FX reale integrata nei totali portafoglio.")
             st.markdown(
                 "### Portafoglio reale\n"
                 "- Qui inserisci le **posizioni effettive** che hai in portafoglio.\n"
@@ -1184,14 +1400,10 @@ def main():
                     holdings[t] = float(derived['Importo Investito'])
 
                     cur_default = st.session_state.holdings_currency.get(t, "USD")
-                    # FIX #8: aggiunti GBP e CHF. Con solo ["USD","EUR"] un titolo UK (es. ULVR.L)
-                    # con valuta GBP causava ValueError in list.index() e crashava il tab.
-                    _valute = ["USD", "EUR", "GBP", "CHF"]
-                    _cur_idx = _valute.index(cur_default) if cur_default in _valute else 0
                     cur = col.selectbox(
                         f"{t} - Valuta",
-                        _valute,
-                        index=_cur_idx,
+                        ["USD", "EUR"],
+                        index=["USD", "EUR"].index(cur_default),
                         key=f"currency_{t}"
                     )
                     st.session_state.holdings_currency[t] = cur
@@ -1254,6 +1466,31 @@ def main():
                                 })
                             df_weights = pd.DataFrame(rows)
                             st.dataframe(df_weights)
+                            st.markdown("#### Analisi fiscale teorica")
+                            tax_rate_input = st.slider(
+                                "Aliquota fiscale teorica (%)",
+                                min_value=0.0,
+                                max_value=50.0,
+                                value=float(DEFAULT_TAX_RATE * 100.0),
+                                step=1.0,
+                                key="portfolio_tax_rate_slider"
+                            ) / 100.0
+
+                            df_tax = calculate_tax_impact(df_weights, tax_rate=tax_rate_input)
+
+                            if not df_tax.empty:
+                                st.dataframe(df_tax, use_container_width=True)
+
+                                total_tax = float(df_tax["Imposta Teorica"].sum())
+                                total_net_pnl = float(df_tax["Plus/Minus Netta"].sum())
+                                total_net_value = float(df_tax["Valore Netto Post Imposta"].sum())
+
+                                tax_c1, tax_c2, tax_c3 = st.columns(3)
+                                tax_c1.metric("Imposta teorica totale", f"{total_tax:,.2f}")
+                                tax_c2.metric("P&L netto teorico", f"{total_net_pnl:,.2f}")
+                                tax_c3.metric("Valore netto post imposta", f"{total_net_value:,.2f}")
+
+                                st.caption("Stima teorica fiscale: non sostituisce il calcolo fiscale ufficiale del broker o del commercialista.")                            
                             st.markdown("#### Allocazione del portafoglio")
                             df_alloc = build_portfolio_allocation_df(
                                 positive_holdings,
