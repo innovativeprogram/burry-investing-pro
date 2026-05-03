@@ -665,9 +665,8 @@ def setup_sidebar() -> Dict[str, Any]:
     st.write("Per supporto tecnico, collaborazioni o richieste:")
     st.link_button(
         "📧 Scrivimi via mail",
-        
-"mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
-        use_container_width=True
+        "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
+        width="stretch"
     )
     st.caption("Risposta normalmente entro 24/48 ore.")
 
