@@ -663,7 +663,7 @@ def setup_sidebar() -> Dict[str, Any]:
 
     with st.sidebar.expander("Contatti"):
         st.write("Per supporto tecnico, collaborazioni o richieste:")
-        st.markdown("[📧 Scrivimi via email](mailto: innovativeprogram@proton.me)")
+        st.markdown("[📧 Scrivimi via email](innovativeprogram@proton.me)")
         st.caption("Risposta normalmente entro 24/48 ore.")
 
     return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "cfg": cfg}
