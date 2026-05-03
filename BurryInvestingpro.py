@@ -856,6 +856,10 @@ def main():
         st.session_state.holdings_quantity = {}
     if 'holdings_pmc' not in st.session_state:
         st.session_state.holdings_pmc = {}
+    if 'portfolio_target_mode' not in st.session_state:
+        st.session_state.portfolio_target_mode = "Ticker"
+    if 'portfolio_targets' not in st.session_state:
+        st.session_state.portfolio_targets = {}
 
     ui = setup_sidebar()
     if ui["btn"]:
@@ -1233,7 +1237,128 @@ def main():
                                 })
                             df_weights = pd.DataFrame(rows)
                             st.dataframe(df_weights)
+                            st.markdown("#### Allocazione del portafoglio")
+                            df_alloc = build_portfolio_allocation_df(
+                                positive_holdings,
+                                st.session_state.holdings_currency
+                            )
 
+                            if not df_alloc.empty:
+                                st.dataframe(df_alloc, use_container_width=True)
+
+                                col_a1, col_a2, col_a3 = st.columns(3)
+
+                                with col_a1:
+                                    st.markdown("**Per Asset Class**")
+                                    df_asset = summarize_group_weights(df_alloc, "Asset Class")
+                                    st.dataframe(df_asset, use_container_width=True)
+
+                                with col_a2:
+                                    st.markdown("**Per Geografia**")
+                                    df_geo = summarize_group_weights(df_alloc, "Geografia")
+                                    st.dataframe(df_geo, use_container_width=True)
+
+                                with col_a3:
+                                    st.markdown("**Per Valuta**")
+                                    df_cur = summarize_group_weights(df_alloc, "Valuta")
+                                    st.dataframe(df_cur, use_container_width=True)
+
+                                st.markdown("#### Ribilanciamento automatico")
+                                rebalance_mode = st.radio(
+                                    "Livello target",
+                                    ["Ticker", "Asset Class", "Geografia", "Valuta"],
+                                    horizontal=True,
+                                    key="rebalance_mode_radio"
+                                )
+                                st.session_state.portfolio_target_mode = rebalance_mode
+
+                                if rebalance_mode == "Ticker":
+                                    current_target_df = df_alloc[["Ticker", "Peso %"]].copy()
+                                    label_col = "Ticker"
+                                elif rebalance_mode == "Asset Class":
+                                    current_target_df = df_asset[["Asset Class", "Peso %"]].copy()
+                                    label_col = "Asset Class"
+                                elif rebalance_mode == "Geografia":
+                                    current_target_df = df_geo[["Geografia", "Peso %"]].copy()
+                                    label_col = "Geografia"
+                                else:
+                                    current_target_df = df_cur[["Valuta", "Peso %"]].copy()
+                                    label_col = "Valuta"
+
+                                st.caption("Inserisci i target percentuali desiderati. Se la somma non fa 100%, il sistema la normalizza automaticamente.")
+
+                                target_inputs = {}
+                                cols_target = st.columns(3)
+
+                                for i, rec in enumerate(current_target_df.to_dict("records")):
+                                    col = cols_target[i % 3]
+                                    label = rec[label_col]
+                                    current_weight = float(rec["Peso %"])
+                                    default_target = float(
+                                        st.session_state.portfolio_targets.get(
+                                            f"{rebalance_mode}::{label}",
+                                            current_weight
+                                        )
+                                    )
+
+                                    target_val = col.number_input(
+                                        f"Target {label}",
+                                        min_value=0.0,
+                                        max_value=100.0,
+                                        value=default_target,
+                                        step=1.0,
+                                        key=f"target_{rebalance_mode}_{label}"
+                                    )
+
+                                    target_inputs[label] = target_val
+                                    st.session_state.portfolio_targets[f"{rebalance_mode}::{label}"] = target_val
+
+                                tolerance_pct = st.slider(
+                                    "Tolleranza ribilanciamento (%)",
+                                    min_value=0.0,
+                                    max_value=10.0,
+                                    value=1.0,
+                                    step=0.5
+                                )
+
+                                target_sum = sum(target_inputs.values())
+                                if target_sum > 0:
+                                    normalized_targets = {
+                                        k: v / target_sum * 100.0 for k, v in target_inputs.items()
+                                    }
+                                else:
+                                    normalized_targets = target_inputs
+
+                                rebalance_df = compute_rebalancing_actions(
+                                    df_alloc=df_alloc,
+                                    target_weights=normalized_targets,
+                                    group_col=label_col,
+                                    tolerance_pct=tolerance_pct
+                                )
+
+                                if not rebalance_df.empty:
+                                    st.markdown("##### Azioni suggerite per tornare in target")
+                                    st.dataframe(rebalance_df, use_container_width=True)
+
+                                    fig_reb = go.Figure()
+                                    fig_reb.add_trace(go.Bar(
+                                        x=rebalance_df[label_col],
+                                        y=rebalance_df["Peso %"],
+                                        name="Peso attuale %"
+                                    ))
+                                    fig_reb.add_trace(go.Bar(
+                                        x=rebalance_df[label_col],
+                                        y=rebalance_df["Target %"],
+                                        name="Target %"
+                                    ))
+                                    fig_reb.update_layout(
+                                        barmode="group",
+                                        template="plotly_dark",
+                                        height=420,
+                                        xaxis_title=label_col,
+                                        yaxis_title="Peso %"
+                                    )
+                                    st.plotly_chart(fig_reb, use_container_width=True)
                             total_invested = float(df_weights["Importo Investito"].sum())
                             total_pnl = float(df_weights["P&L"].sum())
                             total_pnl_pct = (total_pnl / total_invested) * 100.0 if total_invested > 0 else 0.0
