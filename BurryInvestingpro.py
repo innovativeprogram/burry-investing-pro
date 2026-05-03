@@ -769,7 +769,7 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
             
             st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
         # --- TAB QUANT ---
         with tab_q:
@@ -849,7 +849,7 @@ def main():
                         st.plotly_chart(fig_mc, use_container_width=True)
             
             st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
         # --- TAB VERDETTO ---
         with tab_v:
@@ -902,7 +902,7 @@ def main():
                     st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole o rischio elevato.")
             
             st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program[source: 1]</p>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
         # --- TAB PORTAFOGLIO ---
         with tab_p:
