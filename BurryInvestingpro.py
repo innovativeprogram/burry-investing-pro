@@ -1224,6 +1224,8 @@ def main():
         st.session_state.portfolio_target_mode = "Ticker"
     if 'portfolio_targets' not in st.session_state:
         st.session_state.portfolio_targets = {}
+    if 'analysis_errors' not in st.session_state:
+        st.session_state.analysis_errors = []
 
     ui = setup_sidebar()
     if not is_authenticated():
@@ -1240,23 +1242,53 @@ def main():
 
         if targets:
             results: List[Dict[str, Any]] = []
-            tickers = [normalize_ticker(t, ui["suffix"]) for t in targets]
-
-            for t in tickers:
-                raw = get_fundamental_data(t)
-                if raw:
+            analysis_errors: List[str] = []
+            normalized_targets: List[str] = []
+            for t in targets:
+                try:
+                    normalized_targets.append(normalize_ticker(t, ui["suffix"]))
+                except Exception as e:
+                    analysis_errors.append(f'{t}: {e}')
+            for t in normalized_targets:
+                try:
+                    raw = get_fundamental_data(t)
+                    if not raw:
+                        analysis_errors.append(f'{t}: nessun dato fondamentale disponibile')
+                        continue
                     met = calculate_fundamental_metrics(raw)
                     if met:
                         results.append(met.to_ui_dict())
+                    else:
+                        analysis_errors.append(f'{t}: impossibile calcolare le metriche')
+                except Exception as e:
+                    analysis_errors.append(f'{t}: {e}')
             st.session_state.batch_results = pd.DataFrame(results)
+            st.session_state.analysis_errors = analysis_errors
             if results:
                 st.session_state.selected_ticker = results[0]["Ticker"]
+            else:
+                st.session_state.selected_ticker = None
+
+    if st.session_state.get('analysis_errors'):
+        with st.expander('⚠️ Diagnostica analisi', expanded=not bool(st.session_state.get('batch_results') is not None and not st.session_state.batch_results.empty)):
+            for err in st.session_state.analysis_errors:
+                st.write(f'- {err}')
 
     tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
 
     ticker = st.session_state.selected_ticker
-    if ticker and st.session_state.batch_results is not None:
+    if st.session_state.analysis_errors:
+        st.warning('Alcuni ticker non sono stati caricati correttamente: ' + ' | '.join(st.session_state.analysis_errors[:5]))
+    if ticker and st.session_state.batch_results is not None and not st.session_state.batch_results.empty and ticker in st.session_state.batch_results['Ticker'].values:
         row = st.session_state.batch_results[st.session_state.batch_results['Ticker'] == ticker].iloc[0]
+    elif st.session_state.batch_results is None or st.session_state.batch_results.empty:
+        st.info('Nessun dato disponibile. Verifica il ticker inserito, il mercato selezionato e la connessione ai dati Yahoo Finance.')
+        row = None
+    else:
+        st.info('Ticker selezionato non presente nei risultati correnti.')
+        row = None
+
+    if row is not None:
 
         # --- TAB FONDAMENTALI ---
         with tab_f:
@@ -1311,6 +1343,8 @@ def main():
                 )
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f'Dati tecnici non disponibili per {ticker}.')
             
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
