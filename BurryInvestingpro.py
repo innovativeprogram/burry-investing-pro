@@ -2,11 +2,15 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except Exception:
+    ta = None
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
+import os
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
@@ -94,9 +98,20 @@ SUPABASE_PROJECT_REF = "fuupxyksbaylznlboawy"
 SUPABASE_ANON_KEY_FALLBACK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1dXB4eWtzYmF5bHpubGJvYXd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4OTU4NzQsImV4cCI6MjA5MzQ3MTg3NH0.j6XW9WK2IZOFw0HLH-M4G-QGBl60fYLx_IJQL-nAMAY"
 SUPABASE_URL_FALLBACK = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
 
+def get_app_base_url() -> str:
+    candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
+    for c in candidates:
+        if c and str(c).strip().startswith(('http://', 'https://')):
+            return str(c).strip().rstrip('/')
+    return 'http://localhost:8501'
+
+def get_email_redirect_url() -> str:
+    return get_app_base_url()
+
+
 def get_supabase_credentials() -> Tuple[str, str]:
-    url = SUPABASE_URL_FALLBACK
-    key = SUPABASE_ANON_KEY_FALLBACK
+    url = os.getenv('SUPABASE_URL', SUPABASE_URL_FALLBACK)
+    key = os.getenv('SUPABASE_ANON_KEY', SUPABASE_ANON_KEY_FALLBACK)
     try:
         if 'SUPABASE_URL' in st.secrets and st.secrets['SUPABASE_URL']:
             url = str(st.secrets['SUPABASE_URL']).strip()
@@ -140,7 +155,8 @@ def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
         supabase = get_supabase_client()
         response = supabase.auth.sign_up({
             'email': email.strip(),
-            'password': password
+            'password': password,
+            'options': {'email_redirect_to': get_email_redirect_url()}
         })
         user, session = _extract_auth_payload(response)
         if user is None:
@@ -282,9 +298,11 @@ class FundamentalMetrics:
 # 2. HELPER FUNCTIONS & VALIDAZIONE
 # ==========================================
 def sanitize_ticker(ticker: str) -> str:
-    clean = str(ticker).strip().upper()
-    if not re.match(r"^[A-Z0-9\-\.]+$", clean):
-        raise ValueError(f"Ticker contiene caratteri non validi: {clean}")
+    clean = str(ticker or '').strip().upper()
+    if not clean:
+        raise ValueError('Ticker vuoto')
+    if not re.match(r'^[A-Z0-9\-\.=]+$', clean):
+        raise ValueError(f'Ticker contiene caratteri non validi: {clean}')
     return clean
 
 
@@ -308,8 +326,10 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
-        if not info or 'symbol' not in info:
+        if not info:
             return None
+        if 'symbol' not in info:
+            info['symbol'] = symbol
         return {
             "info": info,
             "financials": stock.financials,
@@ -432,26 +452,49 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
-    data['SMA_50'] = ta.sma(data['Close'], length=50)
-    data['SMA_200'] = ta.sma(data['Close'], length=200)
-    data['RSI'] = ta.rsi(data['Close'], length=14)
-    bb = ta.bbands(data['Close'], length=20, std=2)
-    if bb is not None:
-        data['BB_Lower'] = bb.filter(like='BBL_').iloc[:, 0]
-        data['BB_Upper'] = bb.filter(like='BBU_').iloc[:, 0]
+    close = pd.to_numeric(data['Close'], errors='coerce')
+    data['SMA_50'] = close.rolling(50, min_periods=50).mean()
+    data['SMA_200'] = close.rolling(200, min_periods=200).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    data['RSI'] = 100 - (100 / (1 + rs))
+    ma20 = close.rolling(20, min_periods=20).mean()
+    std20 = close.rolling(20, min_periods=20).std(ddof=0)
+    data['BB_Lower'] = ma20 - 2 * std20
+    data['BB_Upper'] = ma20 + 2 * std20
+    if ta is not None:
+        try:
+            data['SMA_50'] = ta.sma(close, length=50)
+            data['SMA_200'] = ta.sma(close, length=200)
+            data['RSI'] = ta.rsi(close, length=14)
+            bb = ta.bbands(close, length=20, std=2)
+            if bb is not None:
+                low = bb.filter(like='BBL_')
+                up = bb.filter(like='BBU_')
+                if not low.empty:
+                    data['BB_Lower'] = low.iloc[:, 0]
+                if not up.empty:
+                    data['BB_Upper'] = up.iloc[:, 0]
+        except Exception:
+            pass
     return data
 
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
     score, reasons = 0, []
     last_row = data.iloc[-1]
-    if current_price > last_row['SMA_200']:
+    sma200 = last_row.get('SMA_200')
+    if pd.notna(sma200) and current_price > sma200:
         score += 30
         reasons.append("✅ Trend Rialzista (Sopra SMA 200)")
     else:
         reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
 
-    rsi = last_row['RSI']
+    rsi = last_row.get('RSI')
     if pd.notna(rsi):
         if rsi < 30:
             score += 30
@@ -460,7 +503,8 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
             score -= 10
             reasons.append("🛑 Ipercomprato (RSI > 70)")
 
-    if current_price <= last_row.get('BB_Lower', 0) * 1.02:
+    bb_lower = last_row.get('BB_Lower', np.nan)
+    if pd.notna(bb_lower) and current_price <= bb_lower * 1.02:
         score += 20
         reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
 
@@ -1160,6 +1204,8 @@ def main():
     init_auth_state()
     st.title("💎 BurryInvestingPro")
     inject_pwa_support()
+    if 'localhost' in get_app_base_url() or '127.0.0.1' in get_app_base_url():
+        st.warning("Configura APP_BASE_URL con l'URL pubblico della tua app per evitare errori nei link email di conferma.")
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -1185,7 +1231,12 @@ def main():
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
-            targets = pd.read_csv(ui["file"])["Ticker"].tolist()[:MAX_CSV_ROWS]
+            csv_df = pd.read_csv(ui["file"])
+            if 'Ticker' not in csv_df.columns:
+                st.error('Il CSV deve contenere una colonna Ticker.')
+                targets = []
+            else:
+                targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
 
         if targets:
             results: List[Dict[str, Any]] = []
