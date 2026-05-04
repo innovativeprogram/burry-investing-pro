@@ -7,9 +7,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
+from supabase import create_client, Client
 
 
 # ==========================================
@@ -84,6 +86,156 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# ==========================================
+# 0.B AUTH SUPABASE
+# ==========================================
+SUPABASE_PROJECT_REF = "fuupxyksbaylznlboawy"
+SUPABASE_ANON_KEY_FALLBACK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1dXB4eWtzYmF5bHpubGJvYXd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4OTU4NzQsImV4cCI6MjA5MzQ3MTg3NH0.j6XW9WK2IZOFw0HLH-M4G-QGBl60fYLx_IJQL-nAMAY"
+SUPABASE_URL_FALLBACK = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
+
+def get_supabase_credentials() -> Tuple[str, str]:
+    url = SUPABASE_URL_FALLBACK
+    key = SUPABASE_ANON_KEY_FALLBACK
+    try:
+        if 'SUPABASE_URL' in st.secrets and st.secrets['SUPABASE_URL']:
+            url = str(st.secrets['SUPABASE_URL']).strip()
+        if 'SUPABASE_ANON_KEY' in st.secrets and st.secrets['SUPABASE_ANON_KEY']:
+            key = str(st.secrets['SUPABASE_ANON_KEY']).strip()
+    except Exception:
+        pass
+    return url, key
+
+@st.cache_resource(show_spinner=False)
+def get_supabase_client() -> Client:
+    url, key = get_supabase_credentials()
+    return create_client(url, key)
+
+def init_auth_state() -> None:
+    if 'auth_user' not in st.session_state:
+        st.session_state.auth_user = None
+    if 'auth_session' not in st.session_state:
+        st.session_state.auth_session = None
+    if 'auth_error' not in st.session_state:
+        st.session_state.auth_error = None
+
+def get_logged_user_email() -> Optional[str]:
+    user = st.session_state.get('auth_user')
+    if not user:
+        return None
+    if isinstance(user, dict):
+        return user.get('email')
+    return getattr(user, 'email', None)
+
+def is_authenticated() -> bool:
+    return get_logged_user_email() is not None
+
+def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
+    user = getattr(auth_response, 'user', None)
+    session = getattr(auth_response, 'session', None)
+    return user, session
+
+def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
+    try:
+        supabase = get_supabase_client()
+        response = supabase.auth.sign_up({
+            'email': email.strip(),
+            'password': password
+        })
+        user, session = _extract_auth_payload(response)
+        if user is None:
+            return False, 'Registrazione non completata. Controlla eventuali restrizioni del progetto Supabase.'
+        st.session_state.auth_user = user
+        st.session_state.auth_session = session
+        if session is None:
+            return True, 'Registrazione eseguita. Controlla la tua email per confermare l'account, se la conferma è attiva.'
+        return True, 'Registrazione completata con accesso effettuato.'
+    except Exception as e:
+        return False, f'Registrazione fallita: {e}'
+
+def sign_in_with_supabase(email: str, password: str) -> Tuple[bool, str]:
+    try:
+        supabase = get_supabase_client()
+        response = supabase.auth.sign_in_with_password({
+            'email': email.strip(),
+            'password': password
+        })
+        user, session = _extract_auth_payload(response)
+        if user is None:
+            return False, 'Login non riuscito. Verifica email e password.'
+        st.session_state.auth_user = user
+        st.session_state.auth_session = session
+        return True, 'Login eseguito con successo.'
+    except Exception as e:
+        return False, f'Login fallito: {e}'
+
+def sign_out_from_supabase() -> Tuple[bool, str]:
+    try:
+        supabase = get_supabase_client()
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+        st.session_state.auth_user = None
+        st.session_state.auth_session = None
+        return True, 'Logout eseguito con successo.'
+    except Exception as e:
+        return False, f'Logout fallito: {e}'
+
+def render_auth_sidebar() -> None:
+    st.sidebar.markdown('### 👤 Account')
+    current_email = get_logged_user_email()
+    if current_email:
+        st.sidebar.success(f'Connesso come: {current_email}')
+        if st.sidebar.button('🚪 Logout', use_container_width=True):
+            ok, msg = sign_out_from_supabase()
+            if ok:
+                st.sidebar.success(msg)
+                st.rerun()
+            else:
+                st.sidebar.error(msg)
+        st.sidebar.markdown('---')
+        return
+
+    auth_mode = st.sidebar.selectbox('Accesso', ['Login', 'Iscrizione'], key='auth_mode_select')
+    email = st.sidebar.text_input('Email', key='auth_email')
+    password = st.sidebar.text_input('Password', type='password', key='auth_password')
+
+    if auth_mode == 'Iscrizione':
+        password_confirm = st.sidebar.text_input('Conferma password', type='password', key='auth_password_confirm')
+        if st.sidebar.button('📝 Crea account', use_container_width=True):
+            if not email or '@' not in email:
+                st.sidebar.error('Inserisci una email valida.')
+            elif len(password) < 6:
+                st.sidebar.error('La password deve contenere almeno 6 caratteri.')
+            elif password != password_confirm:
+                st.sidebar.error('Le password non coincidono.')
+            else:
+                ok, msg = sign_up_with_supabase(email, password)
+                if ok:
+                    st.sidebar.success(msg)
+                    st.rerun()
+                else:
+                    st.sidebar.error(msg)
+    else:
+        if st.sidebar.button('🔐 Login', use_container_width=True):
+            if not email or not password:
+                st.sidebar.error('Inserisci email e password.')
+            else:
+                ok, msg = sign_in_with_supabase(email, password)
+                if ok:
+                    st.sidebar.success(msg)
+                    st.rerun()
+                else:
+                    st.sidebar.error(msg)
+
+    st.sidebar.caption('Auth gestita con Supabase email/password.')
+    st.sidebar.markdown('---')
+
+def require_login_screen() -> None:
+    st.title('💎 BurryInvestingPro')
+    st.info('Per usare l'app devi prima registrarti o accedere dal menu a tendina di sinistra.')
+    st.stop()
 
 # ==========================================
 # 1. MODELLI DATI (Dataclasses)
@@ -917,6 +1069,7 @@ def render_apk_download_box() -> None:
         )
         st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute per il browser o il file manager usato per il download.")
 def setup_sidebar() -> Dict[str, Any]:
+    render_auth_sidebar()
     st.sidebar.header("1. Selezione Asset")
 
     input_mode = st.sidebar.radio(
@@ -1004,6 +1157,7 @@ def setup_sidebar() -> Dict[str, Any]:
 # 7. MAIN ORCHESTRATOR
 # ==========================================
 def main():
+    init_auth_state()
     st.title("💎 BurryInvestingPro")
     inject_pwa_support()
     if 'batch_results' not in st.session_state:
@@ -1026,6 +1180,8 @@ def main():
         st.session_state.portfolio_targets = {}
 
     ui = setup_sidebar()
+    if not is_authenticated():
+        require_login_screen()
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
