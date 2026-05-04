@@ -234,7 +234,7 @@ def render_auth_sidebar() -> None:
 
 def require_login_screen() -> None:
     st.title('💎 BurryInvestingPro')
-    st.info('Per usare l'app devi prima registrarti o accedere dal menu a tendina di sinistra.')
+    st.info("Per usare l'app devi prima registrarti o accedere dal menu a tendina di sinistra.")
     st.stop()
 
 # ==========================================
