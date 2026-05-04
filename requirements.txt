@@ -6,3 +6,4 @@ pandas-ta
 scikit-learn
 plotly
 matplotlib
+supabase
