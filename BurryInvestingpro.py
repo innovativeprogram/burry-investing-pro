@@ -912,7 +912,7 @@ def render_apk_download_box() -> None:
         st.write("Scarica l'APK ufficiale di BurryInvestingPro per installare l'app su Android.")
         st.link_button(
             "📲 Scarica Burryinvestingpro.apk",
-            "https://github.com/innovativeprogram/burry-investing-pro/releases/download/v1.0.0/Burryinvestingpro.apk",
+            "https://github.com/innovativeprogram/Burryinvestingpro-release/releases/latest/download/Burryinvestingpro.apk",
             width="stretch"
         )
         st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute per il browser o il file manager usato per il download.")
