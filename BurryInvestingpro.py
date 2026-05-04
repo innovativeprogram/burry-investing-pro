@@ -148,7 +148,7 @@ def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
         st.session_state.auth_user = user
         st.session_state.auth_session = session
         if session is None:
-            return True, 'Registrazione eseguita. Controlla la tua email per confermare l'account, se la conferma è attiva.'
+            return True, 'Registrazione eseguita. Controlla la tua email per confermare l'account, se la conferma è attiva."
         return True, 'Registrazione completata con accesso effettuato.'
     except Exception as e:
         return False, f'Registrazione fallita: {e}'
