@@ -1,5 +1,7 @@
 streamlit
 yfinance
+yahooquery
+requests
 pandas
 numpy
 pandas-ta
@@ -7,5 +9,3 @@ plotly
 scikit-learn
 supabase
 matplotlib
-yahooquery
-requests
