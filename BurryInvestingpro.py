@@ -98,66 +98,6 @@ SUPABASE_PROJECT_REF = "fuupxyksbaylznlboawy"
 SUPABASE_ANON_KEY_FALLBACK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1dXB4eWtzYmF5bHpubGJvYXd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4OTU4NzQsImV4cCI6MjA5MzQ3MTg3NH0.j6XW9WK2IZOFw0HLH-M4G-QGBl60fYLx_IJQL-nAMAY"
 SUPABASE_URL_FALLBACK = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
 
-SUPABASE_PORTFOLIO_SQL = """
-create extension if not exists pgcrypto;
-
-create table if not exists portfolio_positions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null,
-  ticker text not null,
-  quantity numeric not null default 0,
-  pmc numeric not null default 0,
-  currency text not null default 'USD',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint portfolio_positions_user_ticker_unique unique (user_id, ticker)
-);
-
-create index if not exists portfolio_positions_user_id_idx
-  on portfolio_positions(user_id);
-
-create or replace function set_portfolio_positions_updated_at()
-returns trigger as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$ language plpgsql;
-
-drop trigger if exists trg_portfolio_positions_updated_at on portfolio_positions;
-create trigger trg_portfolio_positions_updated_at
-before update on portfolio_positions
-for each row execute function set_portfolio_positions_updated_at();
-
-alter table portfolio_positions enable row level security;
-
-drop policy if exists "portfolio_select_own" on portfolio_positions;
-create policy "portfolio_select_own"
-on portfolio_positions
-for select
-using (auth.uid() = user_id);
-
-drop policy if exists "portfolio_insert_own" on portfolio_positions;
-create policy "portfolio_insert_own"
-on portfolio_positions
-for insert
-with check (auth.uid() = user_id);
-
-drop policy if exists "portfolio_update_own" on portfolio_positions;
-create policy "portfolio_update_own"
-on portfolio_positions
-for update
-using (auth.uid() = user_id)
-with check (auth.uid() = user_id);
-
-drop policy if exists "portfolio_delete_own" on portfolio_positions;
-create policy "portfolio_delete_own"
-on portfolio_positions
-for delete
-using (auth.uid() = user_id);
-"""
-
-
 def get_app_base_url() -> str:
     candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
     for c in candidates:
@@ -257,126 +197,6 @@ def sign_out_from_supabase() -> Tuple[bool, str]:
         return True, 'Logout eseguito con successo.'
     except Exception as e:
         return False, f'Logout fallito: {e}'
-
-def get_logged_user_id() -> Optional[str]:
-    user = st.session_state.get("auth_user")
-    if not user:
-        return None
-    if isinstance(user, dict):
-        return user.get("id")
-    return getattr(user, "id", None)
-
-def is_guest_mode() -> bool:
-    return not is_authenticated()
-
-def ensure_portfolio_state() -> None:
-    ensure_portfolio_state()
-    maybe_autoload_portfolio()
-    if "portfolio_loaded_for_user" not in st.session_state:
-        st.session_state.portfolio_loaded_for_user = None
-
-def clear_portfolio_session() -> None:
-    st.session_state.portfolio_tickers = []
-    st.session_state.holdings = {}
-    st.session_state.holdings_currency = {}
-    st.session_state.holdings_quantity = {}
-    st.session_state.holdings_pmc = {}
-
-def load_user_portfolio() -> Tuple[bool, str]:
-    ensure_portfolio_state()
-    user_id = get_logged_user_id()
-    if not user_id:
-        return False, "Utente non autenticato."
-    try:
-        supabase = get_supabase_client()
-        response = supabase.table("portfolio_positions").select("*").eq("user_id", user_id).execute()
-        rows = response.data or []
-        clear_portfolio_session()
-        for row in rows:
-            ticker = str(row.get("ticker", "")).strip().upper()
-            if not ticker:
-                continue
-            quantity = float(row.get("quantity") or 0.0)
-            pmc = float(row.get("pmc") or 0.0)
-            currency = str(row.get("currency") or "USD").upper().strip() or "USD"
-            if ticker not in st.session_state.portfolio_tickers:
-                st.session_state.portfolio_tickers.append(ticker)
-            st.session_state.holdings_quantity[ticker] = quantity
-            st.session_state.holdings_pmc[ticker] = pmc
-            st.session_state.holdings_currency[ticker] = currency
-            st.session_state.holdings[ticker] = quantity * pmc
-        st.session_state.portfolio_loaded_for_user = user_id
-        return True, f"Portafoglio caricato: {len(rows)} posizioni."
-    except Exception as e:
-        return False, f"Errore caricamento portafoglio: {e}"
-
-def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> Tuple[bool, str]:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return False, "Modalità ospite: salvataggio non disponibile."
-    try:
-        payload = {
-            "user_id": user_id,
-            "ticker": str(ticker).strip().upper(),
-            "quantity": float(quantity or 0.0),
-            "pmc": float(pmc or 0.0),
-            "currency": str(currency or "USD").strip().upper() or "USD",
-        }
-        supabase = get_supabase_client()
-        supabase.table("portfolio_positions").upsert(payload, on_conflict="user_id,ticker").execute()
-        return True, f"Posizione {payload['ticker']} salvata."
-    except Exception as e:
-        return False, f"Errore salvataggio posizione: {e}"
-
-def save_all_portfolio_positions() -> Tuple[bool, str]:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return False, "Modalità ospite: salvataggio non disponibile."
-    ensure_portfolio_state()
-    tickers = list(st.session_state.get("portfolio_tickers", []))
-    try:
-        supabase = get_supabase_client()
-        existing = supabase.table("portfolio_positions").select("ticker").eq("user_id", user_id).execute()
-        existing_tickers = {str(x.get("ticker", "")).upper() for x in (existing.data or [])}
-        current_tickers = {str(t).upper() for t in tickers}
-        to_delete = existing_tickers - current_tickers
-        for ticker in to_delete:
-            supabase.table("portfolio_positions").delete().eq("user_id", user_id).eq("ticker", ticker).execute()
-        for ticker in tickers:
-            quantity = float(st.session_state.holdings_quantity.get(ticker, 0.0) or 0.0)
-            pmc = float(st.session_state.holdings_pmc.get(ticker, 0.0) or 0.0)
-            currency = str(st.session_state.holdings_currency.get(ticker, "USD") or "USD")
-            supabase.table("portfolio_positions").upsert({
-                "user_id": user_id,
-                "ticker": ticker,
-                "quantity": quantity,
-                "pmc": pmc,
-                "currency": currency.upper().strip() or "USD",
-            }, on_conflict="user_id,ticker").execute()
-        st.session_state.portfolio_loaded_for_user = user_id
-        return True, f"Portafoglio salvato: {len(tickers)} posizioni."
-    except Exception as e:
-        return False, f"Errore salvataggio portafoglio: {e}"
-
-def delete_user_portfolio_position(ticker: str) -> Tuple[bool, str]:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return False, "Modalità ospite: nessun dato remoto da eliminare."
-    try:
-        supabase = get_supabase_client()
-        supabase.table("portfolio_positions").delete().eq("user_id", user_id).eq("ticker", str(ticker).strip().upper()).execute()
-        return True, f"Posizione {ticker} eliminata dal cloud."
-    except Exception as e:
-        return False, f"Errore eliminazione posizione: {e}"
-
-def maybe_autoload_portfolio() -> None:
-    ensure_portfolio_state()
-    user_id = get_logged_user_id()
-    if not user_id:
-        return
-    if st.session_state.get("portfolio_loaded_for_user") == user_id:
-        return
-    load_user_portfolio()
 
 def render_auth_sidebar() -> None:
     st.sidebar.markdown('### 👤 Account')
@@ -1408,8 +1228,8 @@ def main():
         st.session_state.analysis_errors = []
 
     ui = setup_sidebar()
-    if is_guest_mode():
-        st.info("Modalità ospite attiva: puoi usare analisi, tab e portafoglio locale senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
+    if not is_authenticated():
+        require_login_screen()
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2096,13 +1916,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# ==============================
-# IMPLEMENTAZIONE AGGIORNATA
-# - Modalità ospite attiva senza login obbligatorio
-# - Portfolio persistente per account tramite Supabase
-# - SQL completo incluso nella costante SUPABASE_PORTFOLIO_SQL
-# - Sidebar account con sezione Il mio portafoglio
-# - Le tab restano accessibili anche senza analisi preventiva
-# ==============================
