@@ -7,3 +7,6 @@ scikit-learn
 plotly
 matplotlib
 supabase
+yfinance as yf
+from yahooquery import Ticker as YQ_Ticker  
+from openbb import obb
