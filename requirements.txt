@@ -3,10 +3,7 @@ yfinance
 pandas
 numpy
 pandas-ta
-scikit-learn
 plotly
-matplotlib
+scikit-learn
 supabase
-yfinance as yf
-from yahooquery import Ticker as YQ_Ticker  
-from openbb import obb
+matplotlib
