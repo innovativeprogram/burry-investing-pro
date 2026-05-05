@@ -142,102 +142,74 @@ def get_logged_user_email() -> Optional[str]:
         return user.get('email')
     return getattr(user, 'email', None)
 
+def is_authenticated() -> bool:
+    return get_logged_user_email() is not None
+
 def get_logged_user_id() -> Optional[str]:
-    user = st.session_state.get("auth_user")
+    user = st.session_state.get('auth_user')
     if not user:
         return None
     if isinstance(user, dict):
-        return user.get("id")
-    return getattr(user, "id", None)
+        return user.get('id')
+    return getattr(user, 'id', None)
 
-def init_portfolio_storage() -> None:
-    if "portfolio_loaded_from_db" not in st.session_state:
-        st.session_state.portfolio_loaded_from_db = False
-
-def load_user_portfolio() -> tuple[bool, str]:
+def load_user_portfolio() -> None:
     user_id = get_logged_user_id()
     if not user_id:
-        return False, "Utente non autenticato."
+        return
     try:
         supabase = get_supabase_client()
-        res = supabase.table("portfolio_positions").select("*").eq("user_id", user_id).execute()
-        rows = res.data or []
-        st.session_state.portfolio_tickers = []
-        st.session_state.holdings = {}
-        st.session_state.holdings_quantity = {}
-        st.session_state.holdings_pmc = {}
-        st.session_state.holdings_currency = {}
-        for r in rows:
-            t = str(r.get("ticker", "")).upper().strip()
-            if not t:
-                continue
-            q = float(r.get("quantity", 0) or 0)
-            pmc = float(r.get("pmc", 0) or 0)
-            c = str(r.get("currency", "USD") or "USD").upper().strip()
-            if t not in st.session_state.portfolio_tickers:
-                st.session_state.portfolio_tickers.append(t)
-            st.session_state.holdings_quantity[t] = q
-            st.session_state.holdings_pmc[t] = pmc
-            st.session_state.holdings_currency[t] = c
-            st.session_state.holdings[t] = float(q * pmc)
-        st.session_state.portfolio_loaded_from_db = True
-        return True, f"Portafoglio caricato: {len(st.session_state.portfolio_tickers)} titoli."
+        res = supabase.table('portfolio_positions').select('*').eq('user_id', user_id).execute()
+        rows = getattr(res, 'data', None) or []
     except Exception as e:
-        return False, f"Caricamento portafoglio fallito: {e}"
+        logger.warning(f'Load portfolio skipped: {e}')
+        return
 
-def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> tuple[bool, str]:
+    st.session_state.portfolio_tickers = []
+    st.session_state.holdings = {}
+    st.session_state.holdings_quantity = {}
+    st.session_state.holdings_pmc = {}
+    st.session_state.holdings_currency = {}
+
+    for r in rows:
+        t = str(r.get('ticker', '')).upper().strip()
+        if not t:
+            continue
+        qty = float(r.get('quantity', 0) or 0)
+        pmc = float(r.get('pmc', 0) or 0)
+        cur = str(r.get('currency', 'USD')).upper().strip() or 'USD'
+        if t not in st.session_state.portfolio_tickers:
+            st.session_state.portfolio_tickers.append(t)
+        st.session_state.holdings_quantity[t] = qty
+        st.session_state.holdings_pmc[t] = pmc
+        st.session_state.holdings_currency[t] = cur
+        st.session_state.holdings[t] = qty * pmc
+
+def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> None:
     user_id = get_logged_user_id()
     if not user_id:
-        return False, "Utente non autenticato."
+        return
     try:
         supabase = get_supabase_client()
-        supabase.table("portfolio_positions").upsert({
-            "user_id": user_id,
-            "ticker": str(ticker).upper().strip(),
-            "quantity": float(quantity),
-            "pmc": float(pmc),
-            "currency": str(currency or "USD").upper().strip(),
+        supabase.table('portfolio_positions').upsert({
+            'user_id': user_id,
+            'ticker': str(ticker).upper().strip(),
+            'quantity': float(quantity),
+            'pmc': float(pmc),
+            'currency': str(currency).upper().strip() or 'USD',
         }).execute()
-        return True, "Posizione salvata."
     except Exception as e:
-        return False, f"Salvataggio posizione fallito: {e}"
+        logger.warning(f'Save portfolio skipped for {ticker}: {e}')
 
-def save_all_portfolio_positions() -> tuple[bool, str]:
+def delete_user_portfolio_position(ticker: str) -> None:
     user_id = get_logged_user_id()
     if not user_id:
-        return False, "Utente non autenticato."
+        return
     try:
         supabase = get_supabase_client()
-        rows = []
-        for t in st.session_state.get("portfolio_tickers", []):
-            rows.append({
-                "user_id": user_id,
-                "ticker": str(t).upper().strip(),
-                "quantity": float(st.session_state.get("holdings_quantity", {}).get(t, 0) or 0),
-                "pmc": float(st.session_state.get("holdings_pmc", {}).get(t, 0) or 0),
-                "currency": str(st.session_state.get("holdings_currency", {}).get(t, "USD") or "USD").upper().strip(),
-            })
-        supabase.table("portfolio_positions").delete().eq("user_id", user_id).execute()
-        if rows:
-            supabase.table("portfolio_positions").upsert(rows).execute()
-        st.session_state.portfolio_loaded_from_db = True
-        return True, f"Portafoglio salvato: {len(rows)} posizioni."
+        supabase.table('portfolio_positions').delete().eq('user_id', user_id).eq('ticker', str(ticker).upper().strip()).execute()
     except Exception as e:
-        return False, f"Salvataggio portafoglio fallito: {e}"
-
-def delete_user_portfolio_position(ticker: str) -> tuple[bool, str]:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return False, "Utente non autenticato."
-    try:
-        supabase = get_supabase_client()
-        supabase.table("portfolio_positions").delete().eq("user_id", user_id).eq("ticker", str(ticker).upper().strip()).execute()
-        return True, "Posizione rimossa dal portafoglio salvato."
-    except Exception as e:
-        return False, f"Eliminazione posizione fallita: {e}"
-
-def is_authenticated() -> bool:
-    return get_logged_user_email() is not None
+        logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
 
 def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     user = getattr(auth_response, 'user', None)
@@ -288,83 +260,78 @@ def sign_out_from_supabase() -> Tuple[bool, str]:
             pass
         st.session_state.auth_user = None
         st.session_state.auth_session = None
+        st.session_state.portfolio_loaded_from_db = False
         return True, 'Logout eseguito con successo.'
     except Exception as e:
         return False, f'Logout fallito: {e}'
 
 def render_auth_sidebar() -> None:
-    st.sidebar.markdown("### Account")
+    st.sidebar.markdown('### 👤 Account')
     current_email = get_logged_user_email()
     if current_email:
-        st.sidebar.success(f"Connesso come: {current_email}")
-        with st.sidebar.expander("📁 Il mio portafoglio", expanded=False):
-            st.write(f"Titoli in sessione: {len(st.session_state.get('portfolio_tickers', []))}")
-            st.caption("Il salvataggio cloud usa la tabella Supabase 'portfolio_positions'.")
-            if st.button("Carica portafoglio salvato", use_container_width=True, key="load_saved_portfolio"):
-                ok, msg = load_user_portfolio()
-                (st.sidebar.success if ok else st.sidebar.error)(msg)
+        st.sidebar.success(f'Connesso come: {current_email}')
+
+        with st.sidebar.expander('📁 Il mio portafoglio', expanded=False):
+            n_pos = len(st.session_state.get('portfolio_tickers', []))
+            st.write(f'Titoli in sessione: {n_pos}')
+
+            if st.button('Carica portafoglio salvato', use_container_width=True, key='load_saved_portfolio_btn'):
+                load_user_portfolio()
+                st.session_state.portfolio_loaded_from_db = True
                 st.rerun()
-            if st.button("Salva portafoglio attuale", use_container_width=True, key="save_saved_portfolio"):
-                ok, msg = save_all_portfolio_positions()
-                (st.sidebar.success if ok else st.sidebar.error)(msg)
-            if st.button("Svuota portafoglio in sessione", use_container_width=True, key="clear_session_portfolio"):
-                st.session_state.portfolio_tickers = []
-                st.session_state.holdings = {}
-                st.session_state.holdings_currency = {}
-                st.session_state.holdings_quantity = {}
-                st.session_state.holdings_pmc = {}
-                st.sidebar.success("Portafoglio in sessione svuotato.")
-                st.rerun()
-        if st.sidebar.button("Logout", use_container_width=True):
+
+            if st.button('Salva portafoglio attuale', use_container_width=True, key='save_current_portfolio_btn'):
+                for t in st.session_state.get('portfolio_tickers', []):
+                    qty = float(st.session_state.get('holdings_quantity', {}).get(t, 0.0))
+                    pmc = float(st.session_state.get('holdings_pmc', {}).get(t, 0.0))
+                    cur = st.session_state.get('holdings_currency', {}).get(t, 'USD')
+                    save_user_portfolio_position(t, qty, pmc, cur)
+                st.sidebar.success('Portafoglio salvato correttamente.')
+
+        if st.sidebar.button('🚪 Logout', use_container_width=True):
             ok, msg = sign_out_from_supabase()
             if ok:
                 st.sidebar.success(msg)
                 st.rerun()
             else:
                 st.sidebar.error(msg)
-        st.sidebar.markdown("---")
+        st.sidebar.markdown('---')
         return
 
-    st.sidebar.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Il salvataggio cloud del portafoglio è disponibile solo dopo il login.")
-    auth_mode = st.sidebar.selectbox("Accesso", ["Ospite", "Login", "Iscrizione"], key="auth_mode_select")
-    if auth_mode == "Ospite":
-        st.sidebar.caption("Puoi analizzare ticker e usare le tab anche senza account.")
-        st.sidebar.markdown("---")
-        return
+    auth_mode = st.sidebar.selectbox('Accesso', ['Login', 'Iscrizione'], key='auth_mode_select')
+    email = st.sidebar.text_input('Email', key='auth_email')
+    password = st.sidebar.text_input('Password', type='password', key='auth_password')
 
-    email = st.sidebar.text_input("Email", key="auth_email")
-    password = st.sidebar.text_input("Password", type="password", key="auth_password")
-    if auth_mode == "Iscrizione":
-        password_confirm = st.sidebar.text_input("Conferma password", type="password", key="auth_password_confirm")
-        if st.sidebar.button("Crea account", use_container_width=True):
-            if not email or "@" not in email:
-                st.sidebar.error("Inserisci una email valida.")
+    if auth_mode == 'Iscrizione':
+        password_confirm = st.sidebar.text_input('Conferma password', type='password', key='auth_password_confirm')
+        if st.sidebar.button('📝 Crea account', use_container_width=True):
+            if not email or '@' not in email:
+                st.sidebar.error('Inserisci una email valida.')
             elif len(password) < 6:
-                st.sidebar.error("La password deve contenere almeno 6 caratteri.")
+                st.sidebar.error('La password deve contenere almeno 6 caratteri.')
             elif password != password_confirm:
-                st.sidebar.error("Le password non coincidono.")
+                st.sidebar.error('Le password non coincidono.')
             else:
                 ok, msg = sign_up_with_supabase(email, password)
                 if ok:
                     st.sidebar.success(msg)
-                    load_user_portfolio()
                     st.rerun()
                 else:
                     st.sidebar.error(msg)
     else:
-        if st.sidebar.button("Login", use_container_width=True):
+        if st.sidebar.button('🔐 Login', use_container_width=True):
             if not email or not password:
-                st.sidebar.error("Inserisci email e password.")
+                st.sidebar.error('Inserisci email e password.')
             else:
                 ok, msg = sign_in_with_supabase(email, password)
                 if ok:
                     st.sidebar.success(msg)
-                    load_user_portfolio()
                     st.rerun()
                 else:
                     st.sidebar.error(msg)
-    st.sidebar.caption("Auth gestita con Supabase email/password.")
-    st.sidebar.markdown("---")
+
+    st.sidebar.caption('Auth gestita con Supabase email/password.')
+    st.sidebar.markdown('---')
 
 def require_login_screen() -> None:
     st.title('💎 BurryInvestingPro')
@@ -1315,6 +1282,37 @@ def setup_sidebar() -> Dict[str, Any]:
         "btn": analyze_btn,
         "cfg": cfg
     }
+def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
+    ticker = st.session_state.get('selected_ticker')
+    batch = st.session_state.get('batch_results')
+    row = None
+    raw_data = None
+    source = 'none'
+
+    if ticker and batch is not None and not batch.empty and 'Ticker' in batch.columns and ticker in batch['Ticker'].values:
+        row = batch[batch['Ticker'] == ticker].iloc[0]
+        raw_data = row.get('_raw_data') if hasattr(row, 'get') else None
+        return ticker, row, raw_data, 'batch'
+
+    manual = sanitize_ticker(st.session_state.get('standalone_ticker_input', '')) if st.session_state.get('standalone_ticker_input') else ''
+    portfolio_tickers = st.session_state.get('portfolio_tickers', []) or []
+    portfolio_pick = sanitize_ticker(st.session_state.get('standalone_portfolio_pick', '')) if st.session_state.get('standalone_portfolio_pick') else ''
+
+    fallback_ticker = manual or portfolio_pick or (portfolio_tickers[0] if portfolio_tickers else None)
+    if not fallback_ticker:
+        return None, None, None, 'none'
+
+    try:
+        raw_data = get_fundamental_data(fallback_ticker)
+        if raw_data:
+            met = calculate_fundamental_metrics(raw_data)
+            if met:
+                row = pd.Series(met.to_ui_dict())
+        return fallback_ticker, row, raw_data, 'standalone'
+    except Exception as e:
+        logger.warning(f'Standalone analysis unavailable for {fallback_ticker}: {e}')
+        return fallback_ticker, None, None, 'standalone'
+
 # ==========================================
 # 7. MAIN ORCHESTRATOR
 # ==========================================
@@ -1344,11 +1342,19 @@ def main():
         st.session_state.portfolio_targets = {}
     if 'analysis_errors' not in st.session_state:
         st.session_state.analysis_errors = []
-    init_portfolio_storage()
+    if 'portfolio_loaded_from_db' not in st.session_state:
+        st.session_state.portfolio_loaded_from_db = False
+    if 'standalone_ticker_input' not in st.session_state:
+        st.session_state.standalone_ticker_input = ''
+    if 'standalone_portfolio_pick' not in st.session_state:
+        st.session_state.standalone_portfolio_pick = ''
 
     ui = setup_sidebar()
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
+        st.session_state.portfolio_loaded_from_db = True
+    if not is_authenticated():
+        st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -1395,93 +1401,99 @@ def main():
 
     tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
 
-    ticker = st.session_state.selected_ticker
     if st.session_state.analysis_errors:
         st.warning('Alcuni ticker non sono stati caricati correttamente: ' + ' | '.join(st.session_state.analysis_errors[:5]))
-    if ticker and st.session_state.batch_results is not None and not st.session_state.batch_results.empty and ticker in st.session_state.batch_results['Ticker'].values:
-        row = st.session_state.batch_results[st.session_state.batch_results['Ticker'] == ticker].iloc[0]
-    elif st.session_state.batch_results is None or st.session_state.batch_results.empty:
-        st.info('Nessun dato disponibile. Verifica il ticker inserito, il mercato selezionato e la connessione ai dati Yahoo Finance.')
-        row = None
-    else:
-        st.info('Ticker selezionato non presente nei risultati correnti.')
-        row = None
+
+    with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
+        csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
+        batch_options = []
+        if st.session_state.batch_results is not None and not st.session_state.batch_results.empty and 'Ticker' in st.session_state.batch_results.columns:
+            batch_options = st.session_state.batch_results['Ticker'].dropna().astype(str).tolist()
+        portfolio_options = sorted(st.session_state.get('portfolio_tickers', []) or [])
+
+        if batch_options:
+            selected_from_batch = csel1.selectbox(
+                'Ticker dai risultati caricati',
+                [''] + batch_options,
+                index=([''] + batch_options).index(st.session_state.selected_ticker) if st.session_state.selected_ticker in batch_options else 0,
+                key='quick_batch_pick'
+            )
+            if selected_from_batch:
+                st.session_state.selected_ticker = selected_from_batch
+                st.session_state.standalone_ticker_input = ''
+        else:
+            csel1.caption('Nessun batch attivo.')
+
+        if portfolio_options:
+            portfolio_pick = csel2.selectbox(
+                'Ticker dal portafoglio',
+                [''] + portfolio_options,
+                index=0,
+                key='standalone_portfolio_pick'
+            )
+            if portfolio_pick:
+                st.session_state.selected_ticker = None
+                st.session_state.standalone_ticker_input = portfolio_pick
+        else:
+            csel2.caption('Portafoglio vuoto.')
+
+        manual_quick = csel3.text_input('Ticker libero', value=st.session_state.get('standalone_ticker_input', ''), key='quick_manual_ticker').upper().strip()
+        if manual_quick:
+            st.session_state.selected_ticker = None
+            st.session_state.standalone_ticker_input = manual_quick
+
+    ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
+    if not ticker:
+        st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
 
     # --- TAB FONDAMENTALI ---
     with tab_f:
         if row is None:
-            st.info("Nessuna ricerca eseguita. Puoi comunque usare l'app in modalità ospite, analizzare un ticker dalla sidebar oppure costruire il portafoglio manualmente.")
+            st.info("Nessun ticker attivo. Usa il box 'Analisi rapida senza ricerca' oppure seleziona un titolo dal portafoglio.")
+            if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
+                st.dataframe(st.session_state.batch_results.drop(columns=['_raw_data'], errors='ignore'))
         else:
             st.info("💡 **Come leggere questa sezione:** Qui analizzi la qualità economica e finanziaria del business, non il movimento del prezzo. Le metriche principali ti aiutano a capire se l'azienda crea valore in modo efficiente, se cresce con equilibrio e se il debito resta sostenibile. **ROIC** misura quanto bene il management reinveste il capitale; **Free Cash Flow** indica il denaro realmente generato; **PEG Ratio** mette in relazione valutazione e crescita; **Interest Coverage** e **Debt/Equity** servono per controllare la solidità finanziaria. Nelle nuove aggiunte trovi anche **Revenue Growth**, **Net Margin** e **FCF Margin**: la prima misura la crescita del fatturato, la seconda la redditività finale, la terza la capacità di trasformare i ricavi in cassa vera. Questa tab va letta così: prima qualità del business, poi sostenibilità finanziaria, solo alla fine prezzo e multipli.")
-            
-            st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
-            
-            st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+            if analysis_source == 'batch' and st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
+                st.dataframe(st.session_state.batch_results.drop(columns=['_raw_data'], errors='ignore'))
+            elif row is not None:
+                st.success(f'Analisi standalone attiva su: {ticker}')
+                st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'))
+        st.markdown("---")
+        st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
     # --- TAB TECNICO ---
     with tab_t:
-        if row is None or not ticker:
-            st.info("Tab Tecnico accessibile anche senza ricerca iniziale. Si attiverà appena analizzi o selezioni un ticker.")
+        if row is None:
+            st.info("Nessun ticker attivo. Inserisci un ticker libero, scegli un titolo dal portafoglio o usa un risultato batch.")
         else:
             st.info("💡 **Come leggere il grafico:** Questa tab non serve a dire se un'azienda è buona, ma a capire **quando** il mercato la sta premiando o penalizzando. La candela mostra il prezzo, la **SMA 200** identifica il trend di fondo e l'**RSI** misura se il movimento recente è troppo tirato o troppo depresso. Il **Timing Score** nasce dalla combinazione delle regole tecniche del programma: premio al prezzo sopra SMA 200, premio aggiuntivo in caso di ipervenduto RSI e ulteriore supporto quando il prezzo si avvicina alla banda bassa di Bollinger. Va quindi interpretato come un indicatore di contesto: punteggio alto significa setup tecnico più favorevole, non certezza di rialzo.")
-            
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 df_calc = calculate_technical_indicators(df_tech)
                 score, _ = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
                 st.metric("Timing Score", f"{score}/100")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                fig.add_trace(
-                    go.Candlestick(
-                        x=df_calc.index,
-                        open=df_calc['Open'],
-                        high=df_calc['High'],
-                        low=df_calc['Low'],
-                        close=df_calc['Close'],
-                        name="Prezzo"
-                    ),
-                    row=1,
-                    col=1
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_calc.index,
-                        y=df_calc['SMA_200'],
-                        name="SMA 200",
-                        line=dict(color='blue')
-                    ),
-                    row=1,
-                    col=1
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_calc.index,
-                        y=df_calc['RSI'],
-                        name="RSI",
-                        line=dict(color='purple')
-                    ),
-                    row=2,
-                    col=1
-                )
+                fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200", line=dict(color='blue')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning(f'Dati tecnici non disponibili per {ticker}.')
-            
-            st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
     # --- TAB QUANT ---
     with tab_q:
-        if row is None or not ticker:
-            st.info("Tab Quant accessibile anche senza ricerca iniziale. Si attiverà appena analizzi o selezioni un ticker.")
+        if row is None:
+            st.info("Nessun ticker attivo. Inserisci un ticker libero, scegli un titolo dal portafoglio o usa un risultato batch.")
         else:
             st.info("💡 **Come interpretare i dati:** In questa tab il programma misura la qualità statistica del titolo e il suo profilo di rischio-rendimento. **Sharpe Ratio** valuta quanto rendimento ottieni per unità di rischio, **R-Squared** misura quanto il trend è lineare e pulito, mentre **Altman Z-Score** aiuta a identificare aziende potenzialmente fragili sul piano patrimoniale. Le nuove aggiunte più importanti sono i **risk metrics**: **Max Drawdown** per la perdita massima storica dal picco, **CAGR** per la crescita composta annua, **VaR 95%** per la perdita giornaliera attesa in scenari normali estremi e **CVaR 95%** per la severità media delle perdite oltre quel livello. Anche **Skewness** e **Kurtosis** sono utili: la prima indica l'asimmetria dei rendimenti, la seconda segnala la presenza di code estreme. La simulazione **Monte Carlo** non prevede il futuro, ma mostra un ventaglio di esiti possibili partendo dal comportamento storico del titolo, così puoi ragionare in termini probabilistici e non emotivi.")
             
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
-                qm = calculate_quant_metrics(df_tech, row["_raw_data"])
+                qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data)
                 risk = calculate_risk_metrics(df_tech)
 
                 c1, c2, c3 = st.columns(3)
@@ -1558,12 +1570,12 @@ def main():
     # --- TAB VERDETTO ---
     with tab_v:
         if row is None:
-            st.info("Nessun titolo selezionato per il verdetto. La tab resta disponibile e si attiverà dopo la prima analisi.")
+            st.info("Nessun ticker attivo. Inserisci un ticker libero, scegli un titolo dal portafoglio o usa un risultato batch.")
         else:
             st.info("💡 **Come leggere il verdetto:** Questa tab sintetizza tutte le analisi precedenti in una decisione operativa, ma va letta con metodo. Il programma usa tre livelli: **modello Classico** con criteri essenziali, **modello Evoluto** con controlli aggiuntivi su leva e marginalità, e **modello Personalizzabile** che applica le soglie impostate nella sidebar. In parallelo viene calcolato lo **Smart Quant Score**, che unisce **Fundamental Score**, **Technical Score** e **Quant/Risk Score** per dare una misura complessiva del vantaggio statistico del setup. Il senso corretto del verdetto è questo: BUY indica coerenza forte tra qualità, rischio e timing; HOLD segnala qualità parziale o timing ancora incompleto; SELL o NO TRADE indicano che il margine di sicurezza non è sufficiente secondo il modello selezionato.")
             
             df_tech = get_technical_data(ticker)
-            qm = calculate_quant_metrics(df_tech, row["_raw_data"]) if df_tech is not None else {}
+            qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data) if df_tech is not None else {}
             risk = calculate_risk_metrics(df_tech) if df_tech is not None else {
                 "Max Drawdown": 0.0,
                 "CAGR": 0.0
@@ -1741,9 +1753,20 @@ def main():
                     t_clean = sanitize_ticker(manual_ticker)
                     if t_clean not in st.session_state.portfolio_tickers:
                         st.session_state.portfolio_tickers.append(t_clean)
-                        st.success(f"Aggiunto {t_clean} al portafoglio.")
+                        if t_clean not in st.session_state.holdings_quantity:
+                            st.session_state.holdings_quantity[t_clean] = 0.0
+                        if t_clean not in st.session_state.holdings_pmc:
+                            st.session_state.holdings_pmc[t_clean] = 0.0
+                        if t_clean not in st.session_state.holdings_currency:
+                            st.session_state.holdings_currency[t_clean] = 'USD'
                         if is_authenticated():
-                            save_user_portfolio_position(t_clean, 0.0, 0.0, "USD")
+                            save_user_portfolio_position(
+                                t_clean,
+                                st.session_state.holdings_quantity[t_clean],
+                                st.session_state.holdings_pmc[t_clean],
+                                st.session_state.holdings_currency[t_clean]
+                            )
+                        st.success(f"Aggiunto {t_clean} al portafoglio.")
                 else:
                     st.warning("Inserisci un ticker valido prima di aggiungere.")
 
@@ -1797,6 +1820,8 @@ def main():
                         key=f"currency_{t}"
                     )
                     st.session_state.holdings_currency[t] = cur
+                    if is_authenticated():
+                        save_user_portfolio_position(t, qty, pmc, cur)
 
                     price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
                     col.caption(
@@ -1822,8 +1847,6 @@ def main():
                 st.session_state.holdings = holdings
                 st.session_state.holdings_quantity = holdings_quantity
                 st.session_state.holdings_pmc = holdings_pmc
-                if is_authenticated():
-                    save_all_portfolio_positions()
 
                 if st.button("📊 Calcola pesi e analisi del portafoglio"):
                     positive_holdings = {t: a for t, a in holdings.items() if a > 0}
