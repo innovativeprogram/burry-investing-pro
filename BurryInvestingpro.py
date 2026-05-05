@@ -2,20 +2,14 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-try:
-    import pandas_ta as ta
-except Exception:
-    ta = None
+import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
-import os
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
-from supabase import create_client, Client
 
 
 # ==========================================
@@ -29,7 +23,7 @@ DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 100.0
 TRADING_DAYS_YEAR = 252
 MAX_CSV_ROWS = 100
-MAX_WORKERS = 3
+MAX_WORKERS = 10
 RISK_FREE_RATE = 0.04
 FX_TTL_SECONDS = 3600
 
@@ -92,168 +86,6 @@ st.set_page_config(
 
 
 # ==========================================
-# 0.B AUTH SUPABASE
-# ==========================================
-SUPABASE_PROJECT_REF = "fuupxyksbaylznlboawy"
-SUPABASE_ANON_KEY_FALLBACK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1dXB4eWtzYmF5bHpubGJvYXd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4OTU4NzQsImV4cCI6MjA5MzQ3MTg3NH0.j6XW9WK2IZOFw0HLH-M4G-QGBl60fYLx_IJQL-nAMAY"
-SUPABASE_URL_FALLBACK = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
-
-def get_app_base_url() -> str:
-    candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
-    for c in candidates:
-        if c and str(c).strip().startswith(('http://', 'https://')):
-            return str(c).strip().rstrip('/')
-    return 'http://localhost:8501'
-
-def get_email_redirect_url() -> str:
-    return get_app_base_url()
-
-
-def get_supabase_credentials() -> Tuple[str, str]:
-    url = os.getenv('SUPABASE_URL', SUPABASE_URL_FALLBACK)
-    key = os.getenv('SUPABASE_ANON_KEY', SUPABASE_ANON_KEY_FALLBACK)
-    try:
-        if 'SUPABASE_URL' in st.secrets and st.secrets['SUPABASE_URL']:
-            url = str(st.secrets['SUPABASE_URL']).strip()
-        if 'SUPABASE_ANON_KEY' in st.secrets and st.secrets['SUPABASE_ANON_KEY']:
-            key = str(st.secrets['SUPABASE_ANON_KEY']).strip()
-    except Exception:
-        pass
-    return url, key
-
-@st.cache_resource(show_spinner=False)
-def get_supabase_client() -> Client:
-    url, key = get_supabase_credentials()
-    return create_client(url, key)
-
-def init_auth_state() -> None:
-    if 'auth_user' not in st.session_state:
-        st.session_state.auth_user = None
-    if 'auth_session' not in st.session_state:
-        st.session_state.auth_session = None
-    if 'auth_error' not in st.session_state:
-        st.session_state.auth_error = None
-
-def get_logged_user_email() -> Optional[str]:
-    user = st.session_state.get('auth_user')
-    if not user:
-        return None
-    if isinstance(user, dict):
-        return user.get('email')
-    return getattr(user, 'email', None)
-
-def is_authenticated() -> bool:
-    return get_logged_user_email() is not None
-
-def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
-    user = getattr(auth_response, 'user', None)
-    session = getattr(auth_response, 'session', None)
-    return user, session
-
-def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
-    try:
-        supabase = get_supabase_client()
-        response = supabase.auth.sign_up({
-            'email': email.strip(),
-            'password': password,
-            'options': {'email_redirect_to': get_email_redirect_url()}
-        })
-        user, session = _extract_auth_payload(response)
-        if user is None:
-            return False, 'Registrazione non completata. Controlla eventuali restrizioni del progetto Supabase.'
-        st.session_state.auth_user = user
-        st.session_state.auth_session = session
-        if session is None:
-            return True, "Registrazione eseguita. Controlla la tua email per confermare l'account, se la conferma è attiva."
-        return True, 'Registrazione completata con accesso effettuato.'
-    except Exception as e:
-        return False, f'Registrazione fallita: {e}'
-
-def sign_in_with_supabase(email: str, password: str) -> Tuple[bool, str]:
-    try:
-        supabase = get_supabase_client()
-        response = supabase.auth.sign_in_with_password({
-            'email': email.strip(),
-            'password': password
-        })
-        user, session = _extract_auth_payload(response)
-        if user is None:
-            return False, 'Login non riuscito. Verifica email e password.'
-        st.session_state.auth_user = user
-        st.session_state.auth_session = session
-        return True, 'Login eseguito con successo.'
-    except Exception as e:
-        return False, f'Login fallito: {e}'
-
-def sign_out_from_supabase() -> Tuple[bool, str]:
-    try:
-        supabase = get_supabase_client()
-        try:
-            supabase.auth.sign_out()
-        except Exception:
-            pass
-        st.session_state.auth_user = None
-        st.session_state.auth_session = None
-        return True, 'Logout eseguito con successo.'
-    except Exception as e:
-        return False, f'Logout fallito: {e}'
-
-def render_auth_sidebar() -> None:
-    st.sidebar.markdown('### 👤 Account')
-    current_email = get_logged_user_email()
-    if current_email:
-        st.sidebar.success(f'Connesso come: {current_email}')
-        if st.sidebar.button('🚪 Logout', use_container_width=True):
-            ok, msg = sign_out_from_supabase()
-            if ok:
-                st.sidebar.success(msg)
-                st.rerun()
-            else:
-                st.sidebar.error(msg)
-        st.sidebar.markdown('---')
-        return
-
-    auth_mode = st.sidebar.selectbox('Accesso', ['Login', 'Iscrizione'], key='auth_mode_select')
-    email = st.sidebar.text_input('Email', key='auth_email')
-    password = st.sidebar.text_input('Password', type='password', key='auth_password')
-
-    if auth_mode == 'Iscrizione':
-        password_confirm = st.sidebar.text_input('Conferma password', type='password', key='auth_password_confirm')
-        if st.sidebar.button('📝 Crea account', use_container_width=True):
-            if not email or '@' not in email:
-                st.sidebar.error('Inserisci una email valida.')
-            elif len(password) < 6:
-                st.sidebar.error('La password deve contenere almeno 6 caratteri.')
-            elif password != password_confirm:
-                st.sidebar.error('Le password non coincidono.')
-            else:
-                ok, msg = sign_up_with_supabase(email, password)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.error(msg)
-    else:
-        if st.sidebar.button('🔐 Login', use_container_width=True):
-            if not email or not password:
-                st.sidebar.error('Inserisci email e password.')
-            else:
-                ok, msg = sign_in_with_supabase(email, password)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.error(msg)
-
-    st.sidebar.caption('Auth gestita con Supabase email/password.')
-    st.sidebar.markdown('---')
-
-def require_login_screen() -> None:
-    st.title('💎 BurryInvestingPro')
-    st.info("Per usare l'app devi prima registrarti o accedere dal menu a tendina di sinistra.")
-    st.stop()
-
-# ==========================================
 # 1. MODELLI DATI (Dataclasses)
 # ==========================================
 @dataclass
@@ -298,11 +130,9 @@ class FundamentalMetrics:
 # 2. HELPER FUNCTIONS & VALIDAZIONE
 # ==========================================
 def sanitize_ticker(ticker: str) -> str:
-    clean = str(ticker or '').strip().upper()
-    if not clean:
-        raise ValueError('Ticker vuoto')
-    if not re.match(r'^[A-Z0-9\-\.=]+$', clean):
-        raise ValueError(f'Ticker contiene caratteri non validi: {clean}')
+    clean = str(ticker).strip().upper()
+    if not re.match(r"^[A-Z0-9\-\.]+$", clean):
+        raise ValueError(f"Ticker contiene caratteri non validi: {clean}")
     return clean
 
 
@@ -326,10 +156,8 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
-        if not info:
+        if not info or 'symbol' not in info:
             return None
-        if 'symbol' not in info:
-            info['symbol'] = symbol
         return {
             "info": info,
             "financials": stock.financials,
@@ -452,49 +280,26 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
-    close = pd.to_numeric(data['Close'], errors='coerce')
-    data['SMA_50'] = close.rolling(50, min_periods=50).mean()
-    data['SMA_200'] = close.rolling(200, min_periods=200).mean()
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    data['RSI'] = 100 - (100 / (1 + rs))
-    ma20 = close.rolling(20, min_periods=20).mean()
-    std20 = close.rolling(20, min_periods=20).std(ddof=0)
-    data['BB_Lower'] = ma20 - 2 * std20
-    data['BB_Upper'] = ma20 + 2 * std20
-    if ta is not None:
-        try:
-            data['SMA_50'] = ta.sma(close, length=50)
-            data['SMA_200'] = ta.sma(close, length=200)
-            data['RSI'] = ta.rsi(close, length=14)
-            bb = ta.bbands(close, length=20, std=2)
-            if bb is not None:
-                low = bb.filter(like='BBL_')
-                up = bb.filter(like='BBU_')
-                if not low.empty:
-                    data['BB_Lower'] = low.iloc[:, 0]
-                if not up.empty:
-                    data['BB_Upper'] = up.iloc[:, 0]
-        except Exception:
-            pass
+    data['SMA_50'] = ta.sma(data['Close'], length=50)
+    data['SMA_200'] = ta.sma(data['Close'], length=200)
+    data['RSI'] = ta.rsi(data['Close'], length=14)
+    bb = ta.bbands(data['Close'], length=20, std=2)
+    if bb is not None:
+        data['BB_Lower'] = bb.filter(like='BBL_').iloc[:, 0]
+        data['BB_Upper'] = bb.filter(like='BBU_').iloc[:, 0]
     return data
 
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
     score, reasons = 0, []
     last_row = data.iloc[-1]
-    sma200 = last_row.get('SMA_200')
-    if pd.notna(sma200) and current_price > sma200:
+    if current_price > last_row['SMA_200']:
         score += 30
         reasons.append("✅ Trend Rialzista (Sopra SMA 200)")
     else:
         reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
 
-    rsi = last_row.get('RSI')
+    rsi = last_row['RSI']
     if pd.notna(rsi):
         if rsi < 30:
             score += 30
@@ -503,8 +308,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
             score -= 10
             reasons.append("🛑 Ipercomprato (RSI > 70)")
 
-    bb_lower = last_row.get('BB_Lower', np.nan)
-    if pd.notna(bb_lower) and current_price <= bb_lower * 1.02:
+    if current_price <= last_row.get('BB_Lower', 0) * 1.02:
         score += 20
         reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
 
@@ -1113,7 +917,6 @@ def render_apk_download_box() -> None:
         )
         st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute per il browser o il file manager usato per il download.")
 def setup_sidebar() -> Dict[str, Any]:
-    render_auth_sidebar()
     st.sidebar.header("1. Selezione Asset")
 
     input_mode = st.sidebar.radio(
@@ -1201,11 +1004,8 @@ def setup_sidebar() -> Dict[str, Any]:
 # 7. MAIN ORCHESTRATOR
 # ==========================================
 def main():
-    init_auth_state()
     st.title("💎 BurryInvestingPro")
     inject_pwa_support()
-    if 'localhost' in get_app_base_url() or '127.0.0.1' in get_app_base_url():
-        st.warning("Configura APP_BASE_URL con l'URL pubblico della tua app per evitare errori nei link email di conferma.")
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -1224,71 +1024,32 @@ def main():
         st.session_state.portfolio_target_mode = "Ticker"
     if 'portfolio_targets' not in st.session_state:
         st.session_state.portfolio_targets = {}
-    if 'analysis_errors' not in st.session_state:
-        st.session_state.analysis_errors = []
 
     ui = setup_sidebar()
-    if not is_authenticated():
-        require_login_screen()
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
-            csv_df = pd.read_csv(ui["file"])
-            if 'Ticker' not in csv_df.columns:
-                st.error('Il CSV deve contenere una colonna Ticker.')
-                targets = []
-            else:
-                targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
+            targets = pd.read_csv(ui["file"])["Ticker"].tolist()[:MAX_CSV_ROWS]
 
         if targets:
             results: List[Dict[str, Any]] = []
-            analysis_errors: List[str] = []
-            normalized_targets: List[str] = []
-            for t in targets:
-                try:
-                    normalized_targets.append(normalize_ticker(t, ui["suffix"]))
-                except Exception as e:
-                    analysis_errors.append(f'{t}: {e}')
-            for t in normalized_targets:
-                try:
-                    raw = get_fundamental_data(t)
-                    if not raw:
-                        analysis_errors.append(f'{t}: nessun dato fondamentale disponibile')
-                        continue
+            tickers = [normalize_ticker(t, ui["suffix"]) for t in targets]
+
+            for t in tickers:
+                raw = get_fundamental_data(t)
+                if raw:
                     met = calculate_fundamental_metrics(raw)
                     if met:
                         results.append(met.to_ui_dict())
-                    else:
-                        analysis_errors.append(f'{t}: impossibile calcolare le metriche')
-                except Exception as e:
-                    analysis_errors.append(f'{t}: {e}')
             st.session_state.batch_results = pd.DataFrame(results)
-            st.session_state.analysis_errors = analysis_errors
             if results:
                 st.session_state.selected_ticker = results[0]["Ticker"]
-            else:
-                st.session_state.selected_ticker = None
-
-    if st.session_state.get('analysis_errors'):
-        with st.expander('⚠️ Diagnostica analisi', expanded=not bool(st.session_state.get('batch_results') is not None and not st.session_state.batch_results.empty)):
-            for err in st.session_state.analysis_errors:
-                st.write(f'- {err}')
 
     tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
 
     ticker = st.session_state.selected_ticker
-    if st.session_state.analysis_errors:
-        st.warning('Alcuni ticker non sono stati caricati correttamente: ' + ' | '.join(st.session_state.analysis_errors[:5]))
-    if ticker and st.session_state.batch_results is not None and not st.session_state.batch_results.empty and ticker in st.session_state.batch_results['Ticker'].values:
+    if ticker and st.session_state.batch_results is not None:
         row = st.session_state.batch_results[st.session_state.batch_results['Ticker'] == ticker].iloc[0]
-    elif st.session_state.batch_results is None or st.session_state.batch_results.empty:
-        st.info('Nessun dato disponibile. Verifica il ticker inserito, il mercato selezionato e la connessione ai dati Yahoo Finance.')
-        row = None
-    else:
-        st.info('Ticker selezionato non presente nei risultati correnti.')
-        row = None
-
-    if row is not None:
 
         # --- TAB FONDAMENTALI ---
         with tab_f:
@@ -1343,8 +1104,6 @@ def main():
                 )
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning(f'Dati tecnici non disponibili per {ticker}.')
             
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
