@@ -1,5 +1,6 @@
 import streamlit as st
 import yfinance as yf
+import requests
 from yahooquery import Ticker as YQ_Ticker
 import pandas as pd
 import numpy as np
@@ -32,6 +33,46 @@ MAX_CSV_ROWS = 100
 MAX_WORKERS = 3
 RISK_FREE_RATE = 0.04
 FX_TTL_SECONDS = 3600
+
+
+POLYGON_API_KEY = st.secrets.get("POLYGON_API_KEY", "zyRlRQ7vw4p5Q_nt_uvKkgBwCRepr1a3")
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_current_price_safe(ticker_symbol: str) -> float:
+    """
+    Recupera il prezzo con failover: Polygon -> YahooQuery -> yFinance.
+    """
+    symbol = ticker_symbol.upper().strip()
+    
+    # 1. TENTATIVO: Polygon (Ottimo per ticker USA)
+    if POLYGON_API_KEY and "." not in symbol:
+        try:
+            url = f"https://api.polygon.io/v2/last/trade/{symbol}?apiKey={POLYGON_API_KEY}"
+            resp = requests.get(url, timeout=5).json()
+            if resp.get("status") == "OK" and "results" in resp:
+                price = resp["results"].get("p")
+                if price: return float(price)
+        except Exception:
+            pass
+
+    # 2. TENTATIVO: YahooQuery (Ottimo per ETF Europei come VWCE.DE)
+    try:
+        yq = YQ_Ticker(symbol)
+        price_data = yq.price[symbol]
+        price = price_data.get('regularMarketPrice') or price_data.get('preMarketPrice')
+        if price: return float(price)
+    except Exception:
+        pass
+
+    # 3. TENTATIVO: yFinance (Metodo originale)
+    try:
+        t = yf.Ticker(symbol)
+        price = t.fast_info['last_price']
+        if price: return float(price)
+    except Exception:
+        pass
+        
+    return 0.0
 
 @st.cache_data(ttl=FX_TTL_SECONDS, show_spinner=False)
 def get_fx_rate(from_currency: str, to_currency: str) -> float:
