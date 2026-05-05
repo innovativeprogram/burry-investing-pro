@@ -2,14 +2,20 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except Exception:
+    ta = None
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
+import os
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
+from supabase import create_client, Client
 
 
 # ==========================================
@@ -23,7 +29,7 @@ DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 100.0
 TRADING_DAYS_YEAR = 252
 MAX_CSV_ROWS = 100
-MAX_WORKERS = 10
+MAX_WORKERS = 3
 RISK_FREE_RATE = 0.04
 FX_TTL_SECONDS = 3600
 
@@ -86,6 +92,256 @@ st.set_page_config(
 
 
 # ==========================================
+# 0.B AUTH SUPABASE
+# ==========================================
+SUPABASE_PROJECT_REF = "fuupxyksbaylznlboawy"
+SUPABASE_ANON_KEY_FALLBACK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1dXB4eWtzYmF5bHpubGJvYXd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4OTU4NzQsImV4cCI6MjA5MzQ3MTg3NH0.j6XW9WK2IZOFw0HLH-M4G-QGBl60fYLx_IJQL-nAMAY"
+SUPABASE_URL_FALLBACK = f"https://{SUPABASE_PROJECT_REF}.supabase.co"
+
+def get_app_base_url() -> str:
+    candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
+    for c in candidates:
+        if c and str(c).strip().startswith(('http://', 'https://')):
+            return str(c).strip().rstrip('/')
+    return 'http://localhost:8501'
+
+def get_email_redirect_url() -> str:
+    return get_app_base_url()
+
+
+def get_supabase_credentials() -> Tuple[str, str]:
+    url = os.getenv('SUPABASE_URL', SUPABASE_URL_FALLBACK)
+    key = os.getenv('SUPABASE_ANON_KEY', SUPABASE_ANON_KEY_FALLBACK)
+    try:
+        if 'SUPABASE_URL' in st.secrets and st.secrets['SUPABASE_URL']:
+            url = str(st.secrets['SUPABASE_URL']).strip()
+        if 'SUPABASE_ANON_KEY' in st.secrets and st.secrets['SUPABASE_ANON_KEY']:
+            key = str(st.secrets['SUPABASE_ANON_KEY']).strip()
+    except Exception:
+        pass
+    return url, key
+
+@st.cache_resource(show_spinner=False)
+def get_supabase_client() -> Client:
+    url, key = get_supabase_credentials()
+    return create_client(url, key)
+
+def init_auth_state() -> None:
+    if 'auth_user' not in st.session_state:
+        st.session_state.auth_user = None
+    if 'auth_session' not in st.session_state:
+        st.session_state.auth_session = None
+    if 'auth_error' not in st.session_state:
+        st.session_state.auth_error = None
+
+def get_logged_user_email() -> Optional[str]:
+    user = st.session_state.get('auth_user')
+    if not user:
+        return None
+    if isinstance(user, dict):
+        return user.get('email')
+    return getattr(user, 'email', None)
+
+def is_authenticated() -> bool:
+    return get_logged_user_email() is not None
+
+def get_logged_user_id() -> Optional[str]:
+    user = st.session_state.get('auth_user')
+    if not user:
+        return None
+    if isinstance(user, dict):
+        return user.get('id')
+    return getattr(user, 'id', None)
+
+def load_user_portfolio() -> None:
+    user_id = get_logged_user_id()
+    if not user_id:
+        return
+    try:
+        supabase = get_supabase_client()
+        res = supabase.table('portfolio_positions').select('*').eq('user_id', user_id).execute()
+        rows = getattr(res, 'data', None) or []
+    except Exception as e:
+        logger.warning(f'Load portfolio skipped: {e}')
+        return
+
+    st.session_state.portfolio_tickers = []
+    st.session_state.holdings = {}
+    st.session_state.holdings_quantity = {}
+    st.session_state.holdings_pmc = {}
+    st.session_state.holdings_currency = {}
+
+    for r in rows:
+        t = str(r.get('ticker', '')).upper().strip()
+        if not t:
+            continue
+        qty = float(r.get('quantity', 0) or 0)
+        pmc = float(r.get('pmc', 0) or 0)
+        cur = str(r.get('currency', 'USD')).upper().strip() or 'USD'
+        if t not in st.session_state.portfolio_tickers:
+            st.session_state.portfolio_tickers.append(t)
+        st.session_state.holdings_quantity[t] = qty
+        st.session_state.holdings_pmc[t] = pmc
+        st.session_state.holdings_currency[t] = cur
+        st.session_state.holdings[t] = qty * pmc
+
+def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> None:
+    user_id = get_logged_user_id()
+    if not user_id:
+        return
+    try:
+        supabase = get_supabase_client()
+        supabase.table('portfolio_positions').upsert(
+            {
+                'user_id': user_id,
+                'ticker': str(ticker).upper().strip(),
+                'quantity': float(quantity),
+                'pmc': float(pmc),
+                'currency': str(currency).upper().strip() or 'USD',
+            },
+            on_conflict='user_id,ticker'
+        ).execute()
+    except Exception as e:
+        logger.warning(f'Save portfolio skipped for {ticker}: {e}')
+
+def delete_user_portfolio_position(ticker: str) -> None:
+    user_id = get_logged_user_id()
+    if not user_id:
+        return
+    try:
+        supabase = get_supabase_client()
+        supabase.table('portfolio_positions').delete().eq('user_id', user_id).eq('ticker', str(ticker).upper().strip()).execute()
+    except Exception as e:
+        logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
+
+def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
+    user = getattr(auth_response, 'user', None)
+    session = getattr(auth_response, 'session', None)
+    return user, session
+
+def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
+    try:
+        supabase = get_supabase_client()
+        response = supabase.auth.sign_up({
+            'email': email.strip(),
+            'password': password,
+            'options': {'email_redirect_to': get_email_redirect_url()}
+        })
+        user, session = _extract_auth_payload(response)
+        if user is None:
+            return False, 'Registrazione non completata. Controlla eventuali restrizioni del progetto Supabase.'
+        st.session_state.auth_user = user
+        st.session_state.auth_session = session
+        if session is None:
+            return True, "Registrazione eseguita. Controlla la tua email per confermare l'account, se la conferma è attiva."
+        return True, 'Registrazione completata con accesso effettuato.'
+    except Exception as e:
+        return False, f'Registrazione fallita: {e}'
+
+def sign_in_with_supabase(email: str, password: str) -> Tuple[bool, str]:
+    try:
+        supabase = get_supabase_client()
+        response = supabase.auth.sign_in_with_password({
+            'email': email.strip(),
+            'password': password
+        })
+        user, session = _extract_auth_payload(response)
+        if user is None:
+            return False, 'Login non riuscito. Verifica email e password.'
+        st.session_state.auth_user = user
+        st.session_state.auth_session = session
+        return True, 'Login eseguito con successo.'
+    except Exception as e:
+        return False, f'Login fallito: {e}'
+
+def sign_out_from_supabase() -> Tuple[bool, str]:
+    try:
+        supabase = get_supabase_client()
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+        st.session_state.auth_user = None
+        st.session_state.auth_session = None
+        st.session_state.portfolio_loaded_from_db = False
+        return True, 'Logout eseguito con successo.'
+    except Exception as e:
+        return False, f'Logout fallito: {e}'
+
+def render_auth_sidebar() -> None:
+    st.sidebar.markdown('### 👤 Account')
+    current_email = get_logged_user_email()
+    if current_email:
+        st.sidebar.success(f'Connesso come: {current_email}')
+
+        with st.sidebar.expander('📁 Il mio portafoglio', expanded=False):
+            n_pos = len(st.session_state.get('portfolio_tickers', []))
+            st.write(f'Titoli in sessione: {n_pos}')
+
+            if st.button('Carica portafoglio salvato', use_container_width=True, key='load_saved_portfolio_btn'):
+                load_user_portfolio()
+                st.session_state.portfolio_loaded_from_db = True
+                st.rerun()
+
+            if st.button('Salva portafoglio attuale', use_container_width=True, key='save_current_portfolio_btn'):
+                for t in st.session_state.get('portfolio_tickers', []):
+                    qty = float(st.session_state.get('holdings_quantity', {}).get(t, 0.0))
+                    pmc = float(st.session_state.get('holdings_pmc', {}).get(t, 0.0))
+                    cur = st.session_state.get('holdings_currency', {}).get(t, 'USD')
+                    save_user_portfolio_position(t, qty, pmc, cur)
+                st.sidebar.success('Portafoglio salvato correttamente.')
+
+        if st.sidebar.button('🚪 Logout', use_container_width=True):
+            ok, msg = sign_out_from_supabase()
+            if ok:
+                st.sidebar.success(msg)
+                st.rerun()
+            else:
+                st.sidebar.error(msg)
+        st.sidebar.markdown('---')
+        return
+
+    auth_mode = st.sidebar.selectbox('Accesso', ['Login', 'Iscrizione'], key='auth_mode_select')
+    email = st.sidebar.text_input('Email', key='auth_email')
+    password = st.sidebar.text_input('Password', type='password', key='auth_password')
+
+    if auth_mode == 'Iscrizione':
+        password_confirm = st.sidebar.text_input('Conferma password', type='password', key='auth_password_confirm')
+        if st.sidebar.button('📝 Crea account', use_container_width=True):
+            if not email or '@' not in email:
+                st.sidebar.error('Inserisci una email valida.')
+            elif len(password) < 6:
+                st.sidebar.error('La password deve contenere almeno 6 caratteri.')
+            elif password != password_confirm:
+                st.sidebar.error('Le password non coincidono.')
+            else:
+                ok, msg = sign_up_with_supabase(email, password)
+                if ok:
+                    st.sidebar.success(msg)
+                    st.rerun()
+                else:
+                    st.sidebar.error(msg)
+    else:
+        if st.sidebar.button('🔐 Login', use_container_width=True):
+            if not email or not password:
+                st.sidebar.error('Inserisci email e password.')
+            else:
+                ok, msg = sign_in_with_supabase(email, password)
+                if ok:
+                    st.sidebar.success(msg)
+                    st.rerun()
+                else:
+                    st.sidebar.error(msg)
+
+    st.sidebar.caption('Auth gestita con Supabase email/password.')
+    st.sidebar.markdown('---')
+
+def require_login_screen() -> None:
+    st.title('💎 BurryInvestingPro')
+    st.info("Per usare l'app devi prima registrarti o accedere dal menu a tendina di sinistra.")
+    st.stop()
+
+# ==========================================
 # 1. MODELLI DATI (Dataclasses)
 # ==========================================
 @dataclass
@@ -130,9 +386,11 @@ class FundamentalMetrics:
 # 2. HELPER FUNCTIONS & VALIDAZIONE
 # ==========================================
 def sanitize_ticker(ticker: str) -> str:
-    clean = str(ticker).strip().upper()
-    if not re.match(r"^[A-Z0-9\-\.]+$", clean):
-        raise ValueError(f"Ticker contiene caratteri non validi: {clean}")
+    clean = str(ticker or '').strip().upper()
+    if not clean:
+        raise ValueError('Ticker vuoto')
+    if not re.match(r'^[A-Z0-9\-\.=]+$', clean):
+        raise ValueError(f'Ticker contiene caratteri non validi: {clean}')
     return clean
 
 
@@ -152,12 +410,15 @@ def normalize_ticker(ticker: str, suffix: str) -> str:
 # 3. DATA ENGINE: ANALISI FONDAMENTALE
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
-        if not info or 'symbol' not in info:
+        if not info:
             return None
+        if 'symbol' not in info:
+            info['symbol'] = symbol
         return {
             "info": info,
             "financials": stock.financials,
@@ -280,26 +541,49 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
-    data['SMA_50'] = ta.sma(data['Close'], length=50)
-    data['SMA_200'] = ta.sma(data['Close'], length=200)
-    data['RSI'] = ta.rsi(data['Close'], length=14)
-    bb = ta.bbands(data['Close'], length=20, std=2)
-    if bb is not None:
-        data['BB_Lower'] = bb.filter(like='BBL_').iloc[:, 0]
-        data['BB_Upper'] = bb.filter(like='BBU_').iloc[:, 0]
+    close = pd.to_numeric(data['Close'], errors='coerce')
+    data['SMA_50'] = close.rolling(50, min_periods=50).mean()
+    data['SMA_200'] = close.rolling(200, min_periods=200).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    data['RSI'] = 100 - (100 / (1 + rs))
+    ma20 = close.rolling(20, min_periods=20).mean()
+    std20 = close.rolling(20, min_periods=20).std(ddof=0)
+    data['BB_Lower'] = ma20 - 2 * std20
+    data['BB_Upper'] = ma20 + 2 * std20
+    if ta is not None:
+        try:
+            data['SMA_50'] = ta.sma(close, length=50)
+            data['SMA_200'] = ta.sma(close, length=200)
+            data['RSI'] = ta.rsi(close, length=14)
+            bb = ta.bbands(close, length=20, std=2)
+            if bb is not None:
+                low = bb.filter(like='BBL_')
+                up = bb.filter(like='BBU_')
+                if not low.empty:
+                    data['BB_Lower'] = low.iloc[:, 0]
+                if not up.empty:
+                    data['BB_Upper'] = up.iloc[:, 0]
+        except Exception:
+            pass
     return data
 
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
     score, reasons = 0, []
     last_row = data.iloc[-1]
-    if current_price > last_row['SMA_200']:
+    sma200 = last_row.get('SMA_200')
+    if pd.notna(sma200) and current_price > sma200:
         score += 30
         reasons.append("✅ Trend Rialzista (Sopra SMA 200)")
     else:
         reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
 
-    rsi = last_row['RSI']
+    rsi = last_row.get('RSI')
     if pd.notna(rsi):
         if rsi < 30:
             score += 30
@@ -308,7 +592,8 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
             score -= 10
             reasons.append("🛑 Ipercomprato (RSI > 70)")
 
-    if current_price <= last_row.get('BB_Lower', 0) * 1.02:
+    bb_lower = last_row.get('BB_Lower', np.nan)
+    if pd.notna(bb_lower) and current_price <= bb_lower * 1.02:
         score += 20
         reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
 
@@ -655,6 +940,7 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 # ==========================================
 # 5.F HELPER PORTAFOGLIO AVANZATO & PWA
 # ==========================================
+@st.cache_data(ttl=300, show_spinner=False)
 def get_latest_price(symbol: str) -> Optional[float]:
     df = get_technical_data(symbol)
     if df is not None and not df.empty and 'Close' in df.columns:
@@ -917,6 +1203,7 @@ def render_apk_download_box() -> None:
         )
         st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute per il browser o il file manager usato per il download.")
 def setup_sidebar() -> Dict[str, Any]:
+    render_auth_sidebar()
     st.sidebar.header("1. Selezione Asset")
 
     input_mode = st.sidebar.radio(
@@ -1004,8 +1291,11 @@ def setup_sidebar() -> Dict[str, Any]:
 # 7. MAIN ORCHESTRATOR
 # ==========================================
 def main():
+    init_auth_state()
     st.title("💎 BurryInvestingPro")
     inject_pwa_support()
+    if 'localhost' in get_app_base_url() or '127.0.0.1' in get_app_base_url():
+        st.warning("Configura APP_BASE_URL con l'URL pubblico della tua app per evitare errori nei link email di conferma.")
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
@@ -1024,92 +1314,114 @@ def main():
         st.session_state.portfolio_target_mode = "Ticker"
     if 'portfolio_targets' not in st.session_state:
         st.session_state.portfolio_targets = {}
+    if 'analysis_errors' not in st.session_state:
+        st.session_state.analysis_errors = []
+    if 'portfolio_loaded_from_db' not in st.session_state:
+        st.session_state.portfolio_loaded_from_db = False
 
     ui = setup_sidebar()
+    if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
+        load_user_portfolio()
+        st.session_state.portfolio_loaded_from_db = True
+    if not is_authenticated():
+        st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
-            targets = pd.read_csv(ui["file"])["Ticker"].tolist()[:MAX_CSV_ROWS]
+            csv_df = pd.read_csv(ui["file"])
+            if 'Ticker' not in csv_df.columns:
+                st.error('Il CSV deve contenere una colonna Ticker.')
+                targets = []
+            else:
+                targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
 
         if targets:
             results: List[Dict[str, Any]] = []
-            tickers = [normalize_ticker(t, ui["suffix"]) for t in targets]
-
-            for t in tickers:
-                raw = get_fundamental_data(t)
-                if raw:
+            analysis_errors: List[str] = []
+            normalized_targets: List[str] = []
+            for t in targets:
+                try:
+                    normalized_targets.append(normalize_ticker(t, ui["suffix"]))
+                except Exception as e:
+                    analysis_errors.append(f'{t}: {e}')
+            for t in normalized_targets:
+                try:
+                    raw = get_fundamental_data(t)
+                    if not raw:
+                        analysis_errors.append(f'{t}: nessun dato fondamentale disponibile')
+                        continue
                     met = calculate_fundamental_metrics(raw)
                     if met:
                         results.append(met.to_ui_dict())
+                    else:
+                        analysis_errors.append(f'{t}: impossibile calcolare le metriche')
+                except Exception as e:
+                    analysis_errors.append(f'{t}: {e}')
             st.session_state.batch_results = pd.DataFrame(results)
+            st.session_state.analysis_errors = analysis_errors
             if results:
                 st.session_state.selected_ticker = results[0]["Ticker"]
+            else:
+                st.session_state.selected_ticker = None
+
+    if st.session_state.get('analysis_errors'):
+        with st.expander('⚠️ Diagnostica analisi', expanded=not bool(st.session_state.get('batch_results') is not None and not st.session_state.batch_results.empty)):
+            for err in st.session_state.analysis_errors:
+                st.write(f'- {err}')
 
     tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
 
     ticker = st.session_state.selected_ticker
-    if ticker and st.session_state.batch_results is not None:
+    if st.session_state.analysis_errors:
+        st.warning('Alcuni ticker non sono stati caricati correttamente: ' + ' | '.join(st.session_state.analysis_errors[:5]))
+    if ticker and st.session_state.batch_results is not None and not st.session_state.batch_results.empty and ticker in st.session_state.batch_results['Ticker'].values:
         row = st.session_state.batch_results[st.session_state.batch_results['Ticker'] == ticker].iloc[0]
+    elif st.session_state.batch_results is None or st.session_state.batch_results.empty:
+        st.info('Nessun dato disponibile. Verifica il ticker inserito, il mercato selezionato e la connessione ai dati Yahoo Finance.')
+        row = None
+    else:
+        st.info('Ticker selezionato non presente nei risultati correnti.')
+        row = None
 
-        # --- TAB FONDAMENTALI ---
-        with tab_f:
+    # --- TAB FONDAMENTALI ---
+    with tab_f:
+        if row is None:
+            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per popolare i fondamentali.")
+            if st.session_state.batch_results is not None:
+                st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"], errors="ignore"))
+        else:
             st.info("💡 **Come leggere questa sezione:** Qui analizzi la qualità economica e finanziaria del business, non il movimento del prezzo. Le metriche principali ti aiutano a capire se l'azienda crea valore in modo efficiente, se cresce con equilibrio e se il debito resta sostenibile. **ROIC** misura quanto bene il management reinveste il capitale; **Free Cash Flow** indica il denaro realmente generato; **PEG Ratio** mette in relazione valutazione e crescita; **Interest Coverage** e **Debt/Equity** servono per controllare la solidità finanziaria. Nelle nuove aggiunte trovi anche **Revenue Growth**, **Net Margin** e **FCF Margin**: la prima misura la crescita del fatturato, la seconda la redditività finale, la terza la capacità di trasformare i ricavi in cassa vera. Questa tab va letta così: prima qualità del business, poi sostenibilità finanziaria, solo alla fine prezzo e multipli.")
-            
-            st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
-            
-            st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+            st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"], errors="ignore"))
+        st.markdown("---")
+        st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-        # --- TAB TECNICO ---
-        with tab_t:
+    # --- TAB TECNICO ---
+    with tab_t:
+        if row is None:
+            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per usare il grafico tecnico.")
+        else:
             st.info("💡 **Come leggere il grafico:** Questa tab non serve a dire se un'azienda è buona, ma a capire **quando** il mercato la sta premiando o penalizzando. La candela mostra il prezzo, la **SMA 200** identifica il trend di fondo e l'**RSI** misura se il movimento recente è troppo tirato o troppo depresso. Il **Timing Score** nasce dalla combinazione delle regole tecniche del programma: premio al prezzo sopra SMA 200, premio aggiuntivo in caso di ipervenduto RSI e ulteriore supporto quando il prezzo si avvicina alla banda bassa di Bollinger. Va quindi interpretato come un indicatore di contesto: punteggio alto significa setup tecnico più favorevole, non certezza di rialzo.")
-            
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 df_calc = calculate_technical_indicators(df_tech)
                 score, _ = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
                 st.metric("Timing Score", f"{score}/100")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                fig.add_trace(
-                    go.Candlestick(
-                        x=df_calc.index,
-                        open=df_calc['Open'],
-                        high=df_calc['High'],
-                        low=df_calc['Low'],
-                        close=df_calc['Close'],
-                        name="Prezzo"
-                    ),
-                    row=1,
-                    col=1
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_calc.index,
-                        y=df_calc['SMA_200'],
-                        name="SMA 200",
-                        line=dict(color='blue')
-                    ),
-                    row=1,
-                    col=1
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_calc.index,
-                        y=df_calc['RSI'],
-                        name="RSI",
-                        line=dict(color='purple')
-                    ),
-                    row=2,
-                    col=1
-                )
+                fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200", line=dict(color='blue')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+            else:
+                st.warning(f'Dati tecnici non disponibili per {ticker}.')
+        st.markdown("---")
+        st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-        # --- TAB QUANT ---
-        with tab_q:
+    # --- TAB QUANT ---
+    with tab_q:
+        if row is None:
+            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per usare il modulo quantitativo.")
+        else:
             st.info("💡 **Come interpretare i dati:** In questa tab il programma misura la qualità statistica del titolo e il suo profilo di rischio-rendimento. **Sharpe Ratio** valuta quanto rendimento ottieni per unità di rischio, **R-Squared** misura quanto il trend è lineare e pulito, mentre **Altman Z-Score** aiuta a identificare aziende potenzialmente fragili sul piano patrimoniale. Le nuove aggiunte più importanti sono i **risk metrics**: **Max Drawdown** per la perdita massima storica dal picco, **CAGR** per la crescita composta annua, **VaR 95%** per la perdita giornaliera attesa in scenari normali estremi e **CVaR 95%** per la severità media delle perdite oltre quel livello. Anche **Skewness** e **Kurtosis** sono utili: la prima indica l'asimmetria dei rendimenti, la seconda segnala la presenza di code estreme. La simulazione **Monte Carlo** non prevede il futuro, ma mostra un ventaglio di esiti possibili partendo dal comportamento storico del titolo, così puoi ragionare in termini probabilistici e non emotivi.")
             
             df_tech = get_technical_data(ticker)
@@ -1188,8 +1500,11 @@ def main():
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-        # --- TAB VERDETTO ---
-        with tab_v:
+    # --- TAB VERDETTO ---
+    with tab_v:
+        if row is None:
+            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per ottenere un verdetto.")
+        else:
             st.info("💡 **Come leggere il verdetto:** Questa tab sintetizza tutte le analisi precedenti in una decisione operativa, ma va letta con metodo. Il programma usa tre livelli: **modello Classico** con criteri essenziali, **modello Evoluto** con controlli aggiuntivi su leva e marginalità, e **modello Personalizzabile** che applica le soglie impostate nella sidebar. In parallelo viene calcolato lo **Smart Quant Score**, che unisce **Fundamental Score**, **Technical Score** e **Quant/Risk Score** per dare una misura complessiva del vantaggio statistico del setup. Il senso corretto del verdetto è questo: BUY indica coerenza forte tra qualità, rischio e timing; HOLD segnala qualità parziale o timing ancora incompleto; SELL o NO TRADE indicano che il margine di sicurezza non è sufficiente secondo il modello selezionato.")
             
             df_tech = get_technical_data(ticker)
@@ -1324,8 +1639,8 @@ def main():
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-        # --- TAB PORTAFOGLIO ---
-        with tab_p:
+    # --- TAB PORTAFOGLIO ---
+    with tab_p:
             st.info("💡 **Come usare questa sezione:** Qui costruisci il tuo **portafoglio reale** partendo dalle posizioni effettivamente detenute. Per ogni titolo inserisci **ticker**, **quantità/quote**, **PMC** e **valuta**; il sistema calcola automaticamente **importo investito**, **prezzo attuale**, **valore di mercato**, **P&L in euro o valuta locale**, **P&L %** e **peso percentuale**. Le nuove aggiunte più importanti sono la gestione di **quantità frazionate**, la **conversione FX reale** verso la valuta base del portafoglio, l'**analisi fiscale teorica**, la classificazione per **asset class**, **geografia** e **valuta**, oltre al **ribilanciamento automatico** rispetto ai target impostati. Questa tab va letta come una cabina di controllo: prima ricostruisci correttamente le posizioni, poi controlli concentrazione, rischio valutario, fiscalità teorica e scostamenti dai pesi obiettivo.")
             st.success("Versione Premium attiva: conversione FX reale integrata nei totali portafoglio.")
             st.markdown("""
@@ -1371,6 +1686,19 @@ def main():
                     t_clean = sanitize_ticker(manual_ticker)
                     if t_clean not in st.session_state.portfolio_tickers:
                         st.session_state.portfolio_tickers.append(t_clean)
+                        if t_clean not in st.session_state.holdings_quantity:
+                            st.session_state.holdings_quantity[t_clean] = 0.0
+                        if t_clean not in st.session_state.holdings_pmc:
+                            st.session_state.holdings_pmc[t_clean] = 0.0
+                        if t_clean not in st.session_state.holdings_currency:
+                            st.session_state.holdings_currency[t_clean] = 'USD'
+                        if is_authenticated():
+                            save_user_portfolio_position(
+                                t_clean,
+                                st.session_state.holdings_quantity[t_clean],
+                                st.session_state.holdings_pmc[t_clean],
+                                st.session_state.holdings_currency[t_clean]
+                            )
                         st.success(f"Aggiunto {t_clean} al portafoglio.")
                 else:
                     st.warning("Inserisci un ticker valido prima di aggiungere.")
@@ -1425,6 +1753,8 @@ def main():
                         key=f"currency_{t}"
                     )
                     st.session_state.holdings_currency[t] = cur
+                    if is_authenticated():
+                        save_user_portfolio_position(t, qty, pmc, cur)
 
                     price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
                     col.caption(
@@ -1443,6 +1773,8 @@ def main():
                             del st.session_state.holdings_quantity[t]
                         if t in st.session_state.holdings_pmc:
                             del st.session_state.holdings_pmc[t]
+                        if is_authenticated():
+                            delete_user_portfolio_position(t)
                         st.rerun()
 
                 st.session_state.holdings = holdings
