@@ -1,5 +1,6 @@
 import streamlit as st
 import yfinance as yf
+from yahooquery import Ticker as YQ_Ticker
 import pandas as pd
 import numpy as np
 try:
@@ -23,7 +24,6 @@ from supabase import create_client, Client
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 
 DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 100.0
@@ -333,10 +333,6 @@ def render_auth_sidebar() -> None:
     st.sidebar.caption('Auth gestita con Supabase email/password.')
     st.sidebar.markdown('---')
 
-def require_login_screen() -> None:
-    st.title('💎 BurryInvestingPro')
-    st.info("Per usare l'app devi prima registrarti o accedere dal menu a tendina di sinistra.")
-    st.stop()
 
 # ==========================================
 # 1. MODELLI DATI (Dataclasses)
@@ -390,7 +386,6 @@ def sanitize_ticker(ticker: str) -> str:
         raise ValueError(f'Ticker contiene caratteri non validi: {clean}')
     return clean
 
-
 def normalize_ticker(ticker: str, suffix: str) -> str:
     clean_ticker = sanitize_ticker(ticker)
     if "-" in clean_ticker:
@@ -404,29 +399,78 @@ def normalize_ticker(ticker: str, suffix: str) -> str:
 
 
 # ==========================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
+    # TENTATIVO 1: yfinance
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
-        if not info:
-            return None
-        if 'symbol' not in info:
-            info['symbol'] = symbol
+        if info and ('symbol' in info or 'shortName' in info):
+            if 'symbol' not in info:
+                info['symbol'] = symbol
+            return {
+                "info": info,
+                "financials": stock.financials,
+                "balance_sheet": stock.balance_sheet,
+                "cashflow": stock.cashflow,
+                "symbol": symbol
+            }
+    except Exception as e:
+        logger.info(f"yfinance fallito per {symbol}: {e}. Passo a YahooQuery.")
+
+    # TENTATIVO 2: YahooQuery
+    try:
+        yq = YQ_Ticker(symbol)
+        summary = yq.summary_detail.get(symbol, {})
+        price = yq.price.get(symbol, {})
+        financial_data = yq.financial_data.get(symbol, {})
+
+        if isinstance(summary, str): summary = {}
+        if isinstance(price, str): price = {}
+        if isinstance(financial_data, str): financial_data = {}
+
+        combined_info = {**summary, **price, **financial_data}
+        combined_info['symbol'] = symbol
+        
+        # Mappatura dei campi essenziali mancanti
+        if 'regularMarketPrice' in combined_info:
+            combined_info['currentPrice'] = combined_info['regularMarketPrice']
+
+        def format_yq_df(df_yq):
+            if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
+                if isinstance(df_yq.index, pd.MultiIndex):
+                    df_yq = df_yq.xs(symbol, level=0)
+                if 'asOfDate' in df_yq.columns:
+                    df_yq.set_index('asOfDate', inplace=True)
+                # Trasponiamo per allineare le date alle colonne (stile yfinance)
+                return df_yq.transpose()
+            return pd.DataFrame()
+
+        inc_stmt = format_yq_df(yq.income_statement())
+        bal_sheet = format_yq_df(yq.balance_sheet())
+        cash_flow = format_yq_df(yq.cash_flow())
+
+        # Mappiamo i nomi delle righe più critici se stiamo usando YQ
+        if not inc_stmt.empty:
+            inc_stmt.rename(index={'TotalRevenue': 'Total Revenue', 'PretaxIncome': 'Pretax Income', 'TaxProvision': 'Tax Provision', 'InterestExpense': 'Interest Expense'}, inplace=True)
+        if not bal_sheet.empty:
+            bal_sheet.rename(index={'TotalDebt': 'Total Debt', 'StockholdersEquity': 'Stockholders Equity', 'TotalAssets': 'Total Assets', 'CurrentAssets': 'Current Assets', 'CurrentLiabilities': 'Current Liabilities', 'RetainedEarnings': 'Retained Earnings'}, inplace=True)
+        if not cash_flow.empty:
+            cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow', 'CapitalExpenditure': 'Capital Expenditure'}, inplace=True)
+
         return {
-            "info": info,
-            "financials": stock.financials,
-            "balance_sheet": stock.balance_sheet,
-            "cashflow": stock.cashflow,
+            "info": combined_info,
+            "financials": inc_stmt,
+            "balance_sheet": bal_sheet,
+            "cashflow": cash_flow,
             "symbol": symbol
         }
 
     except Exception as e:
-        logger.error(f"Errore API Yahoo per {symbol}: {str(e)}")
+        logger.error(f"Tutte le API hanno fallito per i fondamentali di {symbol}: {str(e)}")
         return None
-
 
 def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[FundamentalMetrics]:
     try:
@@ -452,17 +496,17 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
         fin, bs, cf = raw_data["financials"], raw_data["balance_sheet"], raw_data["cashflow"]
 
-        op_cash = cf.loc['Operating Cash Flow'].iloc[0] if 'Operating Cash Flow' in cf.index else 0.0
-        cap_ex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index else 0.0
+        op_cash = cf.loc['Operating Cash Flow'].iloc[0] if 'Operating Cash Flow' in cf.index and not cf.empty else 0.0
+        cap_ex = cf.loc['Capital Expenditure'].iloc[0] if 'Capital Expenditure' in cf.index and not cf.empty else 0.0
         fcf = float(op_cash - abs(cap_ex))
 
-        total_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0.0
-        equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else np.nan
+        total_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index and not bs.empty else 0.0
+        equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index and not bs.empty else np.nan
         invested_cap = total_debt + equity
-        ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else 0.0
+        ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index and not fin.empty else 0.0
 
         tax_rate = DEFAULT_TAX_RATE
-        if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index:
+        if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index and not fin.empty:
             pretax_inc = fin.loc['Pretax Income'].iloc[0]
             if pretax_inc > 0:
                 tax_rate = max(0.0, min(1.0, fin.loc['Tax Provision'].iloc[0] / pretax_inc))
@@ -479,7 +523,7 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             peg = float(pe / (growth * 100))
             peg_src = "Estimated"
 
-        int_exp = fin.loc['Interest Expense'].iloc[0] if 'Interest Expense' in fin.index else 0.0
+        int_exp = fin.loc['Interest Expense'].iloc[0] if 'Interest Expense' in fin.index and not fin.empty else 0.0
         int_cov = float(ebit / abs(int_exp)) if int_exp != 0 else SAFE_INTEREST_COVERAGE
         total_revenue = info.get('totalRevenue')
         net_income = info.get('netIncomeToCommon')
@@ -521,19 +565,38 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
 
 # ==========================================
-# 4. DATA ENGINE: ANALISI TECNICA
+# 4. DATA ENGINE: ANALISI TECNICA CON FALLBACK
 # ==========================================
 @st.cache_data(ttl=900, show_spinner=False)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
+    # TENTATIVO 1: yfinance
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df.loc[:, ~df.columns.duplicated(keep='first')]
-        return df if len(df) >= 200 else None
-    except Exception:
-        return None
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.loc[:, ~df.columns.duplicated(keep='first')]
+            if len(df) >= 200:
+                return df
+    except Exception as e:
+        logger.info(f"yfinance tecnico fallito per {symbol}: {e}. Passo a YahooQuery.")
 
+    # TENTATIVO 2: YahooQuery
+    try:
+        t = YQ_Ticker(symbol)
+        df_yq = t.history(period="2y", interval="1d")
+        if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
+            if isinstance(df_yq.index, pd.MultiIndex):
+                df_yq = df_yq.xs(symbol, level=0)
+            # Capitalizza i nomi colonna (es. 'close' -> 'Close') per compatibilità yfinance
+            df_yq.columns = [str(c).capitalize() for c in df_yq.columns]
+            df_yq = df_yq.loc[:, ~df_yq.columns.duplicated(keep='first')]
+            if len(df_yq) >= 200:
+                return df_yq
+    except Exception as e:
+        logger.error(f"Tutte le API hanno fallito per l'analisi tecnica di {symbol}: {e}")
+
+    return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
@@ -567,7 +630,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             pass
     return data
-
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
     score, reasons = 0, []
@@ -612,21 +674,20 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Dict[str, Any]) -> Dict
     r_sq = model.score(x, cum_log_returns)
 
     z_score = "N/A"
-    if fund_data['info'].get('quoteType') != 'CRYPTOCURRENCY':
+    if fund_data and 'info' in fund_data and fund_data['info'].get('quoteType') != 'CRYPTOCURRENCY':
         try:
             bs, fin, info = fund_data["balance_sheet"], fund_data["financials"], fund_data["info"]
-            ta_val = bs.loc['Total Assets'].iloc[0]
-            if ta_val == 0:
-                raise ValueError("Total Assets è zero, impossibile calcolare Z-Score")
-            wc = (bs.loc['Current Assets'].iloc[0] - bs.loc['Current Liabilities'].iloc[0]) if 'Current Assets' in bs.index else 0
-            re = bs.loc['Retained Earnings'].iloc[0] if 'Retained Earnings' in bs.index else 0
-            ebit = fin.loc['EBIT'].iloc[0]
-            mc = info.get('marketCap') or 1  # Evita fallback fallaci a None
-            tl = bs.loc['Total Liabilities Net Minority Interest'].iloc[0]
-            if tl == 0:
-                raise ValueError("Total Liabilities è zero, impossibile calcolare Z-Score")
-            rev = info.get('totalRevenue', 0)
-            z_score = (1.2 * (wc / ta_val)) + (1.4 * (re / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val))
+            if not bs.empty and not fin.empty:
+                ta_val = bs.loc['Total Assets'].iloc[0] if 'Total Assets' in bs.index else 0
+                if ta_val > 0:
+                    wc = (bs.loc['Current Assets'].iloc[0] - bs.loc['Current Liabilities'].iloc[0]) if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index else 0
+                    re = bs.loc['Retained Earnings'].iloc[0] if 'Retained Earnings' in bs.index else 0
+                    ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else 0
+                    mc = info.get('marketCap') or 1
+                    tl = bs.loc['Total Liabilities Net Minority Interest'].iloc[0] if 'Total Liabilities Net Minority Interest' in bs.index else (bs.loc['Total Liabilities'].iloc[0] if 'Total Liabilities' in bs.index else 0)
+                    if tl > 0:
+                        rev = info.get('totalRevenue', 0)
+                        z_score = (1.2 * (wc / ta_val)) + (1.4 * (re / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val))
         except Exception:
             pass
 
@@ -876,7 +937,6 @@ def get_daily_returns_for_ticker(symbol: str) -> Optional[pd.Series]:
     returns.name = symbol
     return returns
 
-
 def build_portfolio_returns(
     tickers: List[str],
     weights_pct: Dict[str, float]
@@ -950,7 +1010,6 @@ def get_latest_price(symbol: str) -> Optional[float]:
         if price is not None:
             return float(price)
     return None
-
 
 def inject_pwa_support():
     st.markdown("""
