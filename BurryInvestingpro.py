@@ -29,7 +29,7 @@ DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 100.0
 TRADING_DAYS_YEAR = 252
 MAX_CSV_ROWS = 100
-MAX_WORKERS = 4
+MAX_WORKERS = 3
 RISK_FREE_RATE = 0.04
 FX_TTL_SECONDS = 3600
 
@@ -145,75 +145,6 @@ def get_logged_user_email() -> Optional[str]:
 def is_authenticated() -> bool:
     return get_logged_user_email() is not None
 
-def get_logged_user_id() -> Optional[str]:
-    user = st.session_state.get('auth_user')
-    if not user:
-        return None
-    if isinstance(user, dict):
-        return user.get('id')
-    return getattr(user, 'id', None)
-
-def load_user_portfolio() -> None:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return
-    try:
-        supabase = get_supabase_client()
-        res = supabase.table('portfolio_positions').select('*').eq('user_id', user_id).execute()
-        rows = getattr(res, 'data', None) or []
-    except Exception as e:
-        logger.warning(f'Load portfolio skipped: {e}')
-        return
-
-    st.session_state.portfolio_tickers = []
-    st.session_state.holdings = {}
-    st.session_state.holdings_quantity = {}
-    st.session_state.holdings_pmc = {}
-    st.session_state.holdings_currency = {}
-
-    for r in rows:
-        t = str(r.get('ticker', '')).upper().strip()
-        if not t:
-            continue
-        qty = float(r.get('quantity', 0) or 0)
-        pmc = float(r.get('pmc', 0) or 0)
-        cur = str(r.get('currency', 'USD')).upper().strip() or 'USD'
-        if t not in st.session_state.portfolio_tickers:
-            st.session_state.portfolio_tickers.append(t)
-        st.session_state.holdings_quantity[t] = qty
-        st.session_state.holdings_pmc[t] = pmc
-        st.session_state.holdings_currency[t] = cur
-        st.session_state.holdings[t] = qty * pmc
-
-def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> None:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return
-    try:
-        supabase = get_supabase_client()
-        supabase.table('portfolio_positions').upsert(
-            {
-                'user_id': user_id,
-                'ticker': str(ticker).upper().strip(),
-                'quantity': float(quantity),
-                'pmc': float(pmc),
-                'currency': str(currency).upper().strip() or 'USD',
-            },
-            on_conflict='user_id,ticker'
-        ).execute()
-    except Exception as e:
-        logger.warning(f'Save portfolio skipped for {ticker}: {e}')
-
-def delete_user_portfolio_position(ticker: str) -> None:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return
-    try:
-        supabase = get_supabase_client()
-        supabase.table('portfolio_positions').delete().eq('user_id', user_id).eq('ticker', str(ticker).upper().strip()).execute()
-    except Exception as e:
-        logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
-
 def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     user = getattr(auth_response, 'user', None)
     session = getattr(auth_response, 'session', None)
@@ -263,7 +194,6 @@ def sign_out_from_supabase() -> Tuple[bool, str]:
             pass
         st.session_state.auth_user = None
         st.session_state.auth_session = None
-        st.session_state.portfolio_loaded_from_db = False
         return True, 'Logout eseguito con successo.'
     except Exception as e:
         return False, f'Logout fallito: {e}'
@@ -273,24 +203,6 @@ def render_auth_sidebar() -> None:
     current_email = get_logged_user_email()
     if current_email:
         st.sidebar.success(f'Connesso come: {current_email}')
-
-        with st.sidebar.expander('📁 Il mio portafoglio', expanded=False):
-            n_pos = len(st.session_state.get('portfolio_tickers', []))
-            st.write(f'Titoli in sessione: {n_pos}')
-
-            if st.button('Carica portafoglio salvato', use_container_width=True, key='load_saved_portfolio_btn'):
-                load_user_portfolio()
-                st.session_state.portfolio_loaded_from_db = True
-                st.rerun()
-
-            if st.button('Salva portafoglio attuale', use_container_width=True, key='save_current_portfolio_btn'):
-                for t in st.session_state.get('portfolio_tickers', []):
-                    qty = float(st.session_state.get('holdings_quantity', {}).get(t, 0.0))
-                    pmc = float(st.session_state.get('holdings_pmc', {}).get(t, 0.0))
-                    cur = st.session_state.get('holdings_currency', {}).get(t, 'USD')
-                    save_user_portfolio_position(t, qty, pmc, cur)
-                st.sidebar.success('Portafoglio salvato correttamente.')
-
         if st.sidebar.button('🚪 Logout', use_container_width=True):
             ok, msg = sign_out_from_supabase()
             if ok:
@@ -410,7 +322,6 @@ def normalize_ticker(ticker: str, suffix: str) -> str:
 # 3. DATA ENGINE: ANALISI FONDAMENTALE
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
-@st.cache_data(ttl=900, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         stock = yf.Ticker(symbol)
@@ -940,7 +851,6 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 # ==========================================
 # 5.F HELPER PORTAFOGLIO AVANZATO & PWA
 # ==========================================
-@st.cache_data(ttl=300, show_spinner=False)
 def get_latest_price(symbol: str) -> Optional[float]:
     df = get_technical_data(symbol)
     if df is not None and not df.empty and 'Close' in df.columns:
@@ -1316,15 +1226,10 @@ def main():
         st.session_state.portfolio_targets = {}
     if 'analysis_errors' not in st.session_state:
         st.session_state.analysis_errors = []
-    if 'portfolio_loaded_from_db' not in st.session_state:
-        st.session_state.portfolio_loaded_from_db = False
 
     ui = setup_sidebar()
-    if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
-        load_user_portfolio()
-        st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
-        st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
+        require_login_screen()
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -1383,45 +1288,69 @@ def main():
         st.info('Ticker selezionato non presente nei risultati correnti.')
         row = None
 
-    # --- TAB FONDAMENTALI ---
-    with tab_f:
-        if row is None:
-            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per popolare i fondamentali.")
-            if st.session_state.batch_results is not None:
-                st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"], errors="ignore"))
-        else:
-            st.info("💡 **Come leggere questa sezione:** Qui analizzi la qualità economica e finanziaria del business, non il movimento del prezzo. Le metriche principali ti aiutano a capire se l'azienda crea valore in modo efficiente, se cresce con equilibrio e se il debito resta sostenibile. **ROIC** misura quanto bene il management reinveste il capitale; **Free Cash Flow** indica il denaro realmente generato; **PEG Ratio** mette in relazione valutazione e crescita; **Interest Coverage** e **Debt/Equity** servono per controllare la solidità finanziaria. Nelle nuove aggiunte trovi anche **Revenue Growth**, **Net Margin** e **FCF Margin**: la prima misura la crescita del fatturato, la seconda la redditività finale, la terza la capacità di trasformare i ricavi in cassa vera. Questa tab va letta così: prima qualità del business, poi sostenibilità finanziaria, solo alla fine prezzo e multipli.")
-            st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"], errors="ignore"))
-        st.markdown("---")
-        st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+    if row is not None:
 
-    # --- TAB TECNICO ---
-    with tab_t:
-        if row is None:
-            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per usare il grafico tecnico.")
-        else:
+        # --- TAB FONDAMENTALI ---
+        with tab_f:
+            st.info("💡 **Come leggere questa sezione:** Qui analizzi la qualità economica e finanziaria del business, non il movimento del prezzo. Le metriche principali ti aiutano a capire se l'azienda crea valore in modo efficiente, se cresce con equilibrio e se il debito resta sostenibile. **ROIC** misura quanto bene il management reinveste il capitale; **Free Cash Flow** indica il denaro realmente generato; **PEG Ratio** mette in relazione valutazione e crescita; **Interest Coverage** e **Debt/Equity** servono per controllare la solidità finanziaria. Nelle nuove aggiunte trovi anche **Revenue Growth**, **Net Margin** e **FCF Margin**: la prima misura la crescita del fatturato, la seconda la redditività finale, la terza la capacità di trasformare i ricavi in cassa vera. Questa tab va letta così: prima qualità del business, poi sostenibilità finanziaria, solo alla fine prezzo e multipli.")
+            
+            st.dataframe(st.session_state.batch_results.drop(columns=["_raw_data"]))
+            
+            st.markdown("---")
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+
+        # --- TAB TECNICO ---
+        with tab_t:
             st.info("💡 **Come leggere il grafico:** Questa tab non serve a dire se un'azienda è buona, ma a capire **quando** il mercato la sta premiando o penalizzando. La candela mostra il prezzo, la **SMA 200** identifica il trend di fondo e l'**RSI** misura se il movimento recente è troppo tirato o troppo depresso. Il **Timing Score** nasce dalla combinazione delle regole tecniche del programma: premio al prezzo sopra SMA 200, premio aggiuntivo in caso di ipervenduto RSI e ulteriore supporto quando il prezzo si avvicina alla banda bassa di Bollinger. Va quindi interpretato come un indicatore di contesto: punteggio alto significa setup tecnico più favorevole, non certezza di rialzo.")
+            
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
                 df_calc = calculate_technical_indicators(df_tech)
                 score, _ = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
                 st.metric("Timing Score", f"{score}/100")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200", line=dict(color='blue')), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
+                fig.add_trace(
+                    go.Candlestick(
+                        x=df_calc.index,
+                        open=df_calc['Open'],
+                        high=df_calc['High'],
+                        low=df_calc['Low'],
+                        close=df_calc['Close'],
+                        name="Prezzo"
+                    ),
+                    row=1,
+                    col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_calc.index,
+                        y=df_calc['SMA_200'],
+                        name="SMA 200",
+                        line=dict(color='blue')
+                    ),
+                    row=1,
+                    col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_calc.index,
+                        y=df_calc['RSI'],
+                        name="RSI",
+                        line=dict(color='purple')
+                    ),
+                    row=2,
+                    col=1
+                )
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning(f'Dati tecnici non disponibili per {ticker}.')
-        st.markdown("---")
-        st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
+            
+            st.markdown("---")
+            st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-    # --- TAB QUANT ---
-    with tab_q:
-        if row is None:
-            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per usare il modulo quantitativo.")
-        else:
+        # --- TAB QUANT ---
+        with tab_q:
             st.info("💡 **Come interpretare i dati:** In questa tab il programma misura la qualità statistica del titolo e il suo profilo di rischio-rendimento. **Sharpe Ratio** valuta quanto rendimento ottieni per unità di rischio, **R-Squared** misura quanto il trend è lineare e pulito, mentre **Altman Z-Score** aiuta a identificare aziende potenzialmente fragili sul piano patrimoniale. Le nuove aggiunte più importanti sono i **risk metrics**: **Max Drawdown** per la perdita massima storica dal picco, **CAGR** per la crescita composta annua, **VaR 95%** per la perdita giornaliera attesa in scenari normali estremi e **CVaR 95%** per la severità media delle perdite oltre quel livello. Anche **Skewness** e **Kurtosis** sono utili: la prima indica l'asimmetria dei rendimenti, la seconda segnala la presenza di code estreme. La simulazione **Monte Carlo** non prevede il futuro, ma mostra un ventaglio di esiti possibili partendo dal comportamento storico del titolo, così puoi ragionare in termini probabilistici e non emotivi.")
             
             df_tech = get_technical_data(ticker)
@@ -1500,11 +1429,8 @@ def main():
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-    # --- TAB VERDETTO ---
-    with tab_v:
-        if row is None:
-            st.info("Nessuna analisi caricata. Avvia una ricerca dalla sidebar per ottenere un verdetto.")
-        else:
+        # --- TAB VERDETTO ---
+        with tab_v:
             st.info("💡 **Come leggere il verdetto:** Questa tab sintetizza tutte le analisi precedenti in una decisione operativa, ma va letta con metodo. Il programma usa tre livelli: **modello Classico** con criteri essenziali, **modello Evoluto** con controlli aggiuntivi su leva e marginalità, e **modello Personalizzabile** che applica le soglie impostate nella sidebar. In parallelo viene calcolato lo **Smart Quant Score**, che unisce **Fundamental Score**, **Technical Score** e **Quant/Risk Score** per dare una misura complessiva del vantaggio statistico del setup. Il senso corretto del verdetto è questo: BUY indica coerenza forte tra qualità, rischio e timing; HOLD segnala qualità parziale o timing ancora incompleto; SELL o NO TRADE indicano che il margine di sicurezza non è sufficiente secondo il modello selezionato.")
             
             df_tech = get_technical_data(ticker)
@@ -1639,8 +1565,8 @@ def main():
             st.markdown("---")
             st.markdown("<p style='text-align: center; color: gray;'>creato e sviluppato da Innovative Program </p>", unsafe_allow_html=True)
 
-    # --- TAB PORTAFOGLIO ---
-    with tab_p:
+        # --- TAB PORTAFOGLIO ---
+        with tab_p:
             st.info("💡 **Come usare questa sezione:** Qui costruisci il tuo **portafoglio reale** partendo dalle posizioni effettivamente detenute. Per ogni titolo inserisci **ticker**, **quantità/quote**, **PMC** e **valuta**; il sistema calcola automaticamente **importo investito**, **prezzo attuale**, **valore di mercato**, **P&L in euro o valuta locale**, **P&L %** e **peso percentuale**. Le nuove aggiunte più importanti sono la gestione di **quantità frazionate**, la **conversione FX reale** verso la valuta base del portafoglio, l'**analisi fiscale teorica**, la classificazione per **asset class**, **geografia** e **valuta**, oltre al **ribilanciamento automatico** rispetto ai target impostati. Questa tab va letta come una cabina di controllo: prima ricostruisci correttamente le posizioni, poi controlli concentrazione, rischio valutario, fiscalità teorica e scostamenti dai pesi obiettivo.")
             st.success("Versione Premium attiva: conversione FX reale integrata nei totali portafoglio.")
             st.markdown("""
@@ -1686,19 +1612,6 @@ def main():
                     t_clean = sanitize_ticker(manual_ticker)
                     if t_clean not in st.session_state.portfolio_tickers:
                         st.session_state.portfolio_tickers.append(t_clean)
-                        if t_clean not in st.session_state.holdings_quantity:
-                            st.session_state.holdings_quantity[t_clean] = 0.0
-                        if t_clean not in st.session_state.holdings_pmc:
-                            st.session_state.holdings_pmc[t_clean] = 0.0
-                        if t_clean not in st.session_state.holdings_currency:
-                            st.session_state.holdings_currency[t_clean] = 'USD'
-                        if is_authenticated():
-                            save_user_portfolio_position(
-                                t_clean,
-                                st.session_state.holdings_quantity[t_clean],
-                                st.session_state.holdings_pmc[t_clean],
-                                st.session_state.holdings_currency[t_clean]
-                            )
                         st.success(f"Aggiunto {t_clean} al portafoglio.")
                 else:
                     st.warning("Inserisci un ticker valido prima di aggiungere.")
@@ -1753,8 +1666,6 @@ def main():
                         key=f"currency_{t}"
                     )
                     st.session_state.holdings_currency[t] = cur
-                    if is_authenticated():
-                        save_user_portfolio_position(t, qty, pmc, cur)
 
                     price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
                     col.caption(
@@ -1773,8 +1684,6 @@ def main():
                             del st.session_state.holdings_quantity[t]
                         if t in st.session_state.holdings_pmc:
                             del st.session_state.holdings_pmc[t]
-                        if is_authenticated():
-                            delete_user_portfolio_position(t)
                         st.rerun()
 
                 st.session_state.holdings = holdings
