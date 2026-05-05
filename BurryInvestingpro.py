@@ -44,7 +44,7 @@ def get_current_price_safe(ticker_symbol: str) -> float:
     """
     symbol = ticker_symbol.upper().strip()
     
-    # 1. TENTATIVO: Polygon (Ottimo per ticker USA)
+    # 1. TENTATIVO: Polygon (Solo per ticker USA per evitare limitazioni di mercato free)
     if POLYGON_API_KEY and "." not in symbol:
         try:
             url = f"https://api.polygon.io/v2/last/trade/{symbol}?apiKey={POLYGON_API_KEY}"
@@ -55,8 +55,9 @@ def get_current_price_safe(ticker_symbol: str) -> float:
         except Exception:
             pass
 
-    # 2. TENTATIVO: YahooQuery (Ottimo per ETF Europei come VWCE.DE)
+    # 2. TENTATIVO: YahooQuery (Ottimo per ETF Europei)
     try:
+        from yahooquery import Ticker as YQ_Ticker
         yq = YQ_Ticker(symbol)
         price_data = yq.price[symbol]
         price = price_data.get('regularMarketPrice') or price_data.get('preMarketPrice')
@@ -64,7 +65,7 @@ def get_current_price_safe(ticker_symbol: str) -> float:
     except Exception:
         pass
 
-    # 3. TENTATIVO: yFinance (Metodo originale)
+    # 3. TENTATIVO: yFinance (Backup finale)
     try:
         t = yf.Ticker(symbol)
         price = t.fast_info['last_price']
