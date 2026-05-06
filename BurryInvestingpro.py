@@ -218,13 +218,16 @@ def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, curre
         return
     try:
         supabase = get_supabase_client()
-        supabase.table('portfolio_positions').upsert({
-            'user_id': user_id,
-            'ticker': str(ticker).upper().strip(),
-            'quantity': float(quantity),
-            'pmc': float(pmc),
-            'currency': str(currency).upper().strip() or 'USD',
-        }).execute()
+        supabase.table('portfolio_positions').upsert(
+            {
+                'user_id': user_id,
+                'ticker': str(ticker).upper().strip(),
+                'quantity': float(quantity),
+                'pmc': float(pmc),
+                'currency': str(currency).upper().strip() or 'USD',
+            },
+            on_conflict='user_id,ticker'
+        ).execute()
     except Exception as e:
         logger.warning(f'Save portfolio skipped for {ticker}: {e}')
 
