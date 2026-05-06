@@ -1409,8 +1409,7 @@ def main():
     init_auth_state()
     st.title("💎 BurryInvestingPro")
     inject_pwa_support()
-    if 'localhost' in get_app_base_url() or '127.0.0.1' in get_app_base_url():
-        st.warning("Configura APP_BASE_URL con l'URL pubblico della tua app per evitare errori nei link email di conferma.")
+    
     if 'batch_results' not in st.session_state:
         st.session_state.batch_results = None
     if 'selected_ticker' not in st.session_state:
