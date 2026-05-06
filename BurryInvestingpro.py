@@ -1354,7 +1354,7 @@ def setup_sidebar() -> Dict[str, Any]:
 
     render_apk_download_box()
 
-    with st.sidebar.expander("Contatti", expanded=True):
+    with st.sidebar.expander("Contatti", expanded=False):
         st.write("Per supporto tecnico, collaborazioni o richieste:")
         st.link_button(
             "📧 Scrivimi via mail",
