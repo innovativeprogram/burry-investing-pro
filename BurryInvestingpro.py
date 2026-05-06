@@ -241,6 +241,16 @@ def delete_user_portfolio_position(ticker: str) -> None:
     except Exception as e:
         logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
 
+def delete_user_portfolio_position(ticker: str) -> None:
+    user_id = get_logged_user_id()
+    if not user_id:
+        return
+    try:
+        supabase = get_supabase_client()
+        supabase.table('portfolio_positions').delete().eq('user_id', user_id).eq('ticker', str(ticker).upper().strip()).execute()
+    except Exception as e:
+        logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
+
 def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     user = getattr(auth_response, 'user', None)
     session = getattr(auth_response, 'session', None)
