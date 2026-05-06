@@ -186,7 +186,7 @@ def load_user_portfolio() -> None:
         return
     try:
         supabase = get_supabase_client()
-        res = supabase.table('portfolio_positions').select('*').eq('user_id', user_id).execute()
+        res = supabase.table('portfoliopositions').select('*').eq('userid', user_id).execute()
         rows = getattr(res, 'data', None) or []
     except Exception as e:
         logger.warning(f'Load portfolio skipped: {e}')
@@ -215,21 +215,21 @@ def load_user_portfolio() -> None:
 def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> None:
     user_id = get_logged_user_id()
     if not user_id:
+        st.error("Nessun utente autenticato: impossibile salvare il portafoglio.")
         return
     try:
         supabase = get_supabase_client()
-        supabase.table('portfoliopositions').upsert(
-            {
-                'userid': user_id,
-                'ticker': str(ticker).upper().strip(),
-                'quantity': float(quantity),
-                'pmc': float(pmc),
-                'currency': str(currency).upper().strip() or 'USD',
-            },
-            on_conflict='userid,ticker'
-        ).execute()
+        res = supabase.table('portfoliopositions').upsert({
+            'userid': user_id,
+            'ticker': str(ticker).upper().strip(),
+            'quantity': float(quantity),
+            'pmc': float(pmc),
+            'currency': str(currency).upper().strip() or 'USD',
+        }).execute()
+        logger.info(f"Portfolio saved for {ticker}: {res}")
     except Exception as e:
-        logger.warning(f'Save portfolio skipped for {ticker}: {e}')
+        logger.exception("Errore salvataggio portafoglio")
+        st.error(f"Errore Supabase durante il salvataggio di {ticker}: {e}")
 
 def delete_user_portfolio_position(ticker: str) -> None:
     user_id = get_logged_user_id()
@@ -237,17 +237,7 @@ def delete_user_portfolio_position(ticker: str) -> None:
         return
     try:
         supabase = get_supabase_client()
-        supabase.table('portfolio_positions').delete().eq('user_id', user_id).eq('ticker', str(ticker).upper().strip()).execute()
-    except Exception as e:
-        logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
-
-def delete_user_portfolio_position(ticker: str) -> None:
-    user_id = get_logged_user_id()
-    if not user_id:
-        return
-    try:
-        supabase = get_supabase_client()
-        supabase.table('portfolio_positions').delete().eq('user_id', user_id).eq('ticker', str(ticker).upper().strip()).execute()
+        supabase.table('portfoliopositions').delete().eq('userid', user_id).eq('ticker', str(ticker).upper().strip()).execute()
     except Exception as e:
         logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
 
