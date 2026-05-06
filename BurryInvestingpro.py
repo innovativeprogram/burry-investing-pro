@@ -225,7 +225,7 @@ def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, curre
             'quantity': float(quantity),
             'pmc': float(pmc),
             'currency': str(currency).upper().strip() or 'USD',
-        }).execute()
+        }, on_conflict='userid,ticker').execute()
         logger.info(f"Portfolio saved for {ticker}: {res}")
     except Exception as e:
         logger.exception("Errore salvataggio portafoglio")
