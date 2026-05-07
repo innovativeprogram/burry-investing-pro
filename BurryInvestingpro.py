@@ -2027,8 +2027,8 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
 
 
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = 'Entrambi') -> str:
-    """[NEW] Wrapper sicuro: usa Gemini se configurato, altrimenti restituisce un messaggio utile."""
-    api_key = os.getenv('GEMINI_API_KEY') or safe_get_secret('GEMINI_API_KEY', None)
+    """[NEW] Wrapper robusto con retry/backoff e fallback modello."""
+    api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
             "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.\n\n"
@@ -2036,31 +2036,78 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
         )
 
+    import json
+    import time
+    import random
+
     try:
-        import json
         from google import genai
         from google.genai.types import GenerateContentConfig
 
         client = genai.Client(api_key=api_key)
         prompt = (
-            "Sei un analista finanziario AI integrato in una app Streamlit. "
-            "Usa solo i dati forniti nel contesto, non inventare dati mancanti. "
-            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: Sintesi, Punti di forza, Rischi, "
-            "Lettura del timing, Limiti dei dati.\n\n"
+            "Sei BurryAI, un analista finanziario AI integrato in una app Streamlit. "
+            "Usa solo i dati forniti nel contesto e la logica del programma, non inventare dati mancanti. "
+            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: "
+            "Sintesi, Punti di forza, Rischi, Lettura del timing, Limiti dei dati.\n\n"
             f"Modalità modello: {mode}\n"
             f"Contesto JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
             f"Domanda utente: {user_question}"
         )
-        resp = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=GenerateContentConfig(temperature=0.2, max_output_tokens=900),
+
+        candidate_models = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ]
+        last_error = None
+
+        for model_name in candidate_models:
+            for attempt in range(4):
+                try:
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=900,
+                        ),
+                    )
+                    answer = getattr(resp, "text", None)
+                    if answer and answer.strip():
+                        return answer.strip()
+                    return "Il modello non ha restituito testo utile."
+                except Exception as e:
+                    err = str(e)
+                    last_error = err
+                    transient = any(x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"])
+                    if transient and attempt < 3:
+                        wait_s = (2 ** attempt) + random.uniform(0.3, 1.2)
+                        time.sleep(wait_s)
+                        continue
+                    break
+
+        return (
+            "Servizio AI temporaneamente occupato. "
+            "Riprova tra poco. Ultimo dettaglio tecnico: "
+            f"{last_error}"
         )
-        answer = getattr(resp, 'text', None)
-        return answer.strip() if answer else 'Nessuna risposta generata dal modello.'
     except Exception as e:
-        logger.warning(f'Errore AI Gemini: {e}')
+        logger.warning(f"Errore AI Gemini: {e}")
         return f"Errore AI: {e}"
+
+
+def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
+    """[NEW] Contesto generico per BurryAi sidebar."""
+    symbol_clean = (symbol or "").upper().strip()
+    return {
+        "ticker": symbol_clean,
+        "asset_type": asset_type,
+        "mode": mode,
+        "note": (
+            "Usa la logica del programma per rispondere su azioni o ETF; "
+            "se i dati completi non sono disponibili, dichiaralo esplicitamente."
+        ),
+    }
 
 
 # ==========================================================================
@@ -2087,6 +2134,9 @@ def _init_session_state() -> None:
         'smart_weights': DEFAULT_SMART_WEIGHTS,
         'ai_ticker_chat_history': [],
         'ai_ticker_chat_last_symbol': None,
+        'burry_ai_history': [],
+        'burry_ai_symbol': '',
+        'burry_ai_asset_type': 'Azione',
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2153,6 +2203,52 @@ def main():
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors:
                 st.write(f'- {err}')
+
+    with st.sidebar:
+        st.markdown('---')
+        with st.expander('🤖 BurryAi', expanded=False):
+            st.caption('Chiedi chiarimenti su azioni o ETF usando la logica del programma.')
+
+            st.session_state.burry_ai_asset_type = st.selectbox(
+                'Tipo strumento',
+                ['Azione', 'ETF'],
+                index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1,
+                key='burry_ai_asset_type_select'
+            )
+
+            st.session_state.burry_ai_symbol = st.text_input(
+                'Ticker o nome',
+                value=st.session_state.get('burry_ai_symbol', ''),
+                key='burry_ai_symbol_input'
+            )
+
+            for msg in st.session_state.get('burry_ai_history', []):
+                with st.chat_message(msg.get('role', 'assistant')):
+                    st.markdown(msg.get('content', ''))
+
+            burry_ai_prompt = st.chat_input('Chiedi a BurryAi', key='burry_ai_prompt_sidebar')
+            if burry_ai_prompt:
+                ctx = build_burry_ai_context(
+                    st.session_state.get('burry_ai_symbol', ''),
+                    st.session_state.get('burry_ai_asset_type', 'Azione'),
+                    mode=st.session_state.get('model_mode', 'Entrambi')
+                )
+
+                st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
+
+                with st.chat_message('user'):
+                    st.markdown(burry_ai_prompt)
+
+                with st.chat_message('assistant'):
+                    with st.spinner('BurryAi sta rispondendo...'):
+                        reply = ask_gemini_ticker_chat(
+                            ctx,
+                            burry_ai_prompt,
+                            mode=st.session_state.get('model_mode', 'Entrambi')
+                        )
+                    st.markdown(reply)
+
+                st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
 
     tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(
         ["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"]
