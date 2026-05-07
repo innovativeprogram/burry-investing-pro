@@ -14,7 +14,6 @@ Il file mantiene la compatibilita' con la struttura UI originale e con
 la tabella Supabase 'portfoliopositions'.
 """
 
-import json
 import streamlit as st
 import yfinance as yf
 import requests
@@ -27,7 +26,6 @@ try:
 except Exception:
     ta = None
 
-from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -40,7 +38,6 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 
-from google.genai.types import GenerateContentConfig
 
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
@@ -97,156 +94,7 @@ def safe_get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
 # Se mancante, il provider Polygon viene semplicemente saltato.
 POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 
-GEMINI_API_KEY = safe_get_secret("GEMINI_API_KEY", default=None)
-@st.cache_resource(show_spinner=False)
-def get_gemini_client():
-    if not GEMINI_API_KEY:
-        return None
-    try:
-        return genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        logger.error(f"Errore inizializzazione Gemini client: {e}")
-        return None
-def ask_gemini_simple(prompt: str) -> str:
-    client = get_gemini_client()
-    if client is None:
-        return "Gemini non configurato: manca GEMINI_API_KEY."
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
-        return (response.text or "").strip() if hasattr(response, "text") else "Nessuna risposta testuale."
-    except Exception as e:
-        logger.exception("Errore chiamata Gemini")
-        return f"Errore Gemini: {e}"  
-        def build_ai_context_for_ticker(
-    ticker: str,
-    row,
-    score: int,
-    reasons: list,
-    qm: dict,
-    risk: dict,
-    mode: str,
-) -> dict:
-    if row is None:
-        return {}
-
-    return {
-        "ticker": ticker,
-        "company_name": row.get("Company Name"),
-        "price": row.get("Price"),
-        "currency": row.get("Currency"),
-        "verdict_mode": mode,
-        "fundamentals": {
-            "roic": row.get("ROIC"),
-            "peg_ratio": row.get("PEG Ratio"),
-            "peg_source": row.get("PEG Source"),
-            "pe_ratio": row.get("PE Ratio"),
-            "interest_coverage": row.get("Interest Coverage"),
-            "debt_to_equity": row.get("DebtEquity"),
-            "revenue_growth": row.get("Revenue Growth"),
-            "net_margin": row.get("Net Margin"),
-            "fcf_margin": row.get("FCF Margin"),
-            "free_cash_flow": row.get("Free Cash Flow"),
-        },
-        "technical": {
-            "timing_score": score,
-            "timing_reasons": reasons,
-        },
-        "quant": qm or {},
-        "risk": risk or {},
-    }      
-        
-def ask_gemini_ticker_analysis(context: dict, user_question: str) -> str:
-    client = get_gemini_client()
-    if client is None:
-        return "Gemini non configurato: manca GEMINI_API_KEY."
-
-    if not context:
-        return "Nessun contesto disponibile per l'analisi."
-
-    system_instruction = """
-Sei un analista finanziario AI integrato in una app Streamlit.
-Devi usare solo i dati presenti nel contesto fornito.
-Non inventare dati mancanti.
-Non dare consulenza finanziaria personalizzata.
-Rispondi in italiano chiaro e professionale.
-Struttura sempre la risposta in queste sezioni:
-1. Sintesi
-2. Punti di forza
-3. Rischi
-4. Lettura del timing e del quant
-5. Limiti dell'analisi
-"""
-
-    try:
-        prompt = f"""
-Contesto ticker:
-{json.dumps(context, ensure_ascii=False, default=str, indent=2)}
-
-Domanda utente:
-{user_question}
-"""
-
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=GenerateContentConfig(
-                system_instruction=system_instruction
-            ),
-        )
-        return (response.text or "").strip() if hasattr(response, "text") else "Nessuna risposta testuale."
-    except Exception as e:
-        logger.exception("Errore analisi Gemini ticker")
-        return f"Errore Gemini: {e}"
-        
-def ask_gemini_ticker_chat(context: dict, chat_history: list, user_question: str) -> str:
-    client = get_gemini_client()
-    if client is None:
-        return "Gemini non configurato: manca GEMINI_API_KEY."
-
-    if not context:
-        return "Nessun contesto disponibile per l'analisi."
-
-    system_instruction = """
-Sei un assistente AI finanziario integrato in una app Streamlit.
-Rispondi solo usando il contesto ticker fornito.
-Non inventare dati mancanti.
-Non fare consulenza finanziaria personalizzata.
-Rispondi in italiano in modo chiaro, breve e utile.
-Se il dato non è presente, dillo esplicitamente.
-"""
-
-    try:
-        history_text = "
-".join(
-            [f"{m['role'].upper()}: {m['content']}" for m in chat_history[-8:]]
-        )
-
-        prompt = f"""
-Contesto ticker:
-{json.dumps(context, ensure_ascii=False, default=str, indent=2)}
-
-Cronologia recente:
-{history_text}
-
-Nuova domanda utente:
-{user_question}
-"""
-
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=GenerateContentConfig(
-                system_instruction=system_instruction
-            ),
-        )
-        return (response.text or "").strip() if hasattr(response, "text") else "Nessuna risposta testuale."
-    except Exception as e:
-        logger.exception("Errore chat Gemini ticker")
-        return f"Errore Gemini: {e}"        
 # ==========================================================================
 # 0.B PRICE / FX / RISK-FREE PROVIDERS
 # ==========================================================================
@@ -2151,6 +1999,70 @@ def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series]
         return fallback_ticker, None, None, 'standalone'
 
 
+
+
+def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any],
+                                score: float, reasons: List[str], mode: str) -> Dict[str, Any]:
+    """[NEW] Costruisce un contesto compatto per l'assistente AI sul ticker."""
+    row_dict = row.to_dict() if row is not None and hasattr(row, 'to_dict') else dict(row or {})
+    return {
+        'ticker': ticker,
+        'mode': mode,
+        'timing_score': float(score or 0.0),
+        'timing_reasons': reasons or [],
+        'fundamentals': {
+            'company_name': row_dict.get('Company Name'),
+            'price': row_dict.get('Price'),
+            'roic': row_dict.get('ROIC'),
+            'peg_ratio': row_dict.get('PEG Ratio'),
+            'debt_to_equity': row_dict.get('Debt/Equity'),
+            'fcf_margin': row_dict.get('FCF Margin'),
+            'net_margin': row_dict.get('Net Margin'),
+            'revenue_growth': row_dict.get('Revenue Growth'),
+            'eps_growth': row_dict.get('EPS Growth'),
+        },
+        'quant': qm or {},
+        'risk': risk or {},
+    }
+
+
+def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = 'Entrambi') -> str:
+    """[NEW] Wrapper sicuro: usa Gemini se configurato, altrimenti restituisce un messaggio utile."""
+    api_key = os.getenv('GEMINI_API_KEY') or safe_get_secret('GEMINI_API_KEY', None)
+    if not api_key:
+        return (
+            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.\n\n"
+            f"Domanda ricevuta: {user_question}\n"
+            f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
+        )
+
+    try:
+        import json
+        from google import genai
+        from google.genai.types import GenerateContentConfig
+
+        client = genai.Client(api_key=api_key)
+        prompt = (
+            "Sei un analista finanziario AI integrato in una app Streamlit. "
+            "Usa solo i dati forniti nel contesto, non inventare dati mancanti. "
+            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: Sintesi, Punti di forza, Rischi, "
+            "Lettura del timing, Limiti dei dati.\n\n"
+            f"Modalità modello: {mode}\n"
+            f"Contesto JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
+            f"Domanda utente: {user_question}"
+        )
+        resp = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=GenerateContentConfig(temperature=0.2, max_output_tokens=900),
+        )
+        answer = getattr(resp, 'text', None)
+        return answer.strip() if answer else 'Nessuna risposta generata dal modello.'
+    except Exception as e:
+        logger.warning(f'Errore AI Gemini: {e}')
+        return f"Errore AI: {e}"
+
+
 # ==========================================================================
 # 7. MAIN
 # ==========================================================================
@@ -2169,19 +2081,17 @@ def _init_session_state() -> None:
         'analysis_errors': [],
         'portfolio_loaded_from_db': False,
         'standalone_ticker_input': '',
-        'ai_ticker_chat_history': [],
-        'ai_ticker_chat_last_symbol': None,
         'standalone_portfolio_pick': '',
         'risk_free_override': None,
         'base_currency': 'EUR',
         'smart_weights': DEFAULT_SMART_WEIGHTS,
+        'ai_ticker_chat_history': [],
+        'ai_ticker_chat_last_symbol': None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-            
-            'ai_ticker_chat_history': [],
-'ai_ticker_chat_last_symbol': None,
+
 
 def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     """[NEW] Esporta il portafoglio in CSV per backup/condivisione."""
@@ -2455,82 +2365,6 @@ def main():
             else:
                 score = 0
                 reasons = []
-st.markdown("### Spiegazione AI del verdetto")
-
-default_ai_question = (
-    f"Spiegami il verdetto su {ticker} come farebbe un analista prudente, "
-    "e dimmi i principali punti di forza e di debolezza."
-)
-
-ai_question = st.text_area(
-    "Domanda per l'AI",
-    value=default_ai_question,
-    height=100,
-    key="ai_ticker_question",
-)
-
-if st.button("Genera spiegazione AI", key="ai_ticker_explain_btn"):
-    ai_context = build_ai_context_for_ticker(
-        ticker=ticker,
-        row=row,
-        score=score,
-        reasons=reasons if 'reasons' in locals() else [],
-        qm=qm if 'qm' in locals() else {},
-        risk=risk if 'risk' in locals() else {},
-        mode=mode,
-    )
-
-    with st.spinner("L'AI sta analizzando il ticker..."):
-        ai_answer = ask_gemini_ticker_analysis(ai_context, ai_question)
-
-    st.session_state["last_ai_ticker_answer"] = ai_answer
-
-if st.session_state.get("last_ai_ticker_answer"):
-    st.markdown(st.session_state["last_ai_ticker_answer"])                
-st.markdown("### Chat AI sul ticker")
-
-if st.session_state.ai_ticker_chat_last_symbol != ticker:
-    st.session_state.ai_ticker_chat_history = []
-    st.session_state.ai_ticker_chat_last_symbol = ticker
-
-for message in st.session_state.ai_ticker_chat_history:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-chat_prompt = st.chat_input("Fai una domanda sul ticker attivo", key="ai_ticker_chat_input")
-
-if chat_prompt:
-    ai_context = build_ai_context_for_ticker(
-        ticker=ticker,
-        row=row,
-        score=score,
-        reasons=reasons,
-        qm=qm,
-        risk=risk,
-        mode=mode,
-    )
-
-    st.session_state.ai_ticker_chat_history.append({
-        "role": "user",
-        "content": chat_prompt
-    })
-
-    with st.chat_message("user"):
-        st.markdown(chat_prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("L'AI sta rispondendo..."):
-            ai_reply = ask_gemini_ticker_chat(
-                context=ai_context,
-                chat_history=st.session_state.ai_ticker_chat_history,
-                user_question=chat_prompt,
-            )
-        st.markdown(ai_reply)
-
-    st.session_state.ai_ticker_chat_history.append({
-        "role": "assistant",
-        "content": ai_reply
-    })
 
             # [FIN-FIX] Z-safe: usa is_non_traditional_asset invece di check string indiretto
             z_val = qm.get('Altman Z-Score', 0.0)
@@ -2621,6 +2455,44 @@ if chat_prompt:
                     st.warning("🟡 HOLD: Setup discreto secondo i parametri personalizzati.")
                 else:
                     st.error("🔴 SELL: Il titolo non soddisfa i criteri personalizzati.")
+
+            st.markdown('---')
+            st.subheader('Spiegazione AI')
+            ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
+
+            if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
+                st.session_state.ai_ticker_chat_history = []
+                st.session_state.ai_ticker_chat_last_symbol = ticker
+
+            if st.button('🧠 Spiega con AI', key=f'ai_explain_{ticker}'):
+                with st.spinner('Analisi AI in corso...'):
+                    ai_answer = ask_gemini_ticker_chat(
+                        ai_context,
+                        'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.',
+                        mode=mode,
+                    )
+                st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
+
+            if st.session_state.get('ai_ticker_chat_history'):
+                last_ai_msg = st.session_state.ai_ticker_chat_history[-1]
+                if last_ai_msg.get('role') == 'assistant':
+                    st.markdown(last_ai_msg.get('content', ''))
+
+            st.subheader('Chat AI sul ticker')
+            for msg in st.session_state.get('ai_ticker_chat_history', []):
+                with st.chat_message(msg.get('role', 'assistant')):
+                    st.markdown(msg.get('content', ''))
+
+            ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
+            if ai_user_prompt:
+                st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
+                with st.chat_message('user'):
+                    st.markdown(ai_user_prompt)
+                with st.chat_message('assistant'):
+                    with st.spinner("L'AI sta rispondendo..."):
+                        ai_reply = ask_gemini_ticker_chat(ai_context, ai_user_prompt, mode=mode)
+                    st.markdown(ai_reply)
+                st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
 
             if df_tech is not None and qm:
                 smart_w = st.session_state.get("smart_weights", DEFAULT_SMART_WEIGHTS)
