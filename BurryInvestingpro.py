@@ -2097,9 +2097,9 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
 
 
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
-    """[NEW] Contesto generico per BurryAi sidebar."""
+    """[NEW] Contesto BurryAi arricchito con risultati correnti e contesto live del verdetto."""
     symbol_clean = (symbol or "").upper().strip()
-    return {
+    context = {
         "ticker": symbol_clean,
         "asset_type": asset_type,
         "mode": mode,
@@ -2108,6 +2108,56 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
             "se i dati completi non sono disponibili, dichiaralo esplicitamente."
         ),
     }
+
+    try:
+        live_map = st.session_state.get('burry_ai_live_context', {}) or {}
+        if symbol_clean and symbol_clean in live_map:
+            context['live_program_analysis'] = live_map[symbol_clean]
+    except Exception as e:
+        logger.debug(f'BurryAi live context fallback: {e}')
+
+    try:
+        df = st.session_state.get('batch_results')
+        if df is not None and not df.empty and 'Ticker' in df.columns and symbol_clean:
+            row_match = df[df['Ticker'].astype(str).str.upper() == symbol_clean]
+            if not row_match.empty:
+                row = row_match.iloc[0]
+                row_dict = row.to_dict()
+                context['program_data'] = {
+                    'company_name': row_dict.get('Company Name'),
+                    'price': row_dict.get('Price'),
+                    'sector': row_dict.get('Sector'),
+                    'industry': row_dict.get('Industry'),
+                    'market_cap': row_dict.get('Market Cap'),
+                    'pe_ratio': row_dict.get('P/E'),
+                    'forward_pe': row_dict.get('Forward P/E'),
+                    'peg_ratio': row_dict.get('PEG Ratio'),
+                    'roic': row_dict.get('ROIC'),
+                    'roe': row_dict.get('ROE'),
+                    'gross_margin': row_dict.get('Gross Margin'),
+                    'operating_margin': row_dict.get('Operating Margin'),
+                    'net_margin': row_dict.get('Net Margin'),
+                    'fcf_margin': row_dict.get('FCF Margin'),
+                    'revenue_growth': row_dict.get('Revenue Growth'),
+                    'eps_growth': row_dict.get('EPS Growth'),
+                    'debt_to_equity': row_dict.get('Debt/Equity'),
+                    'current_ratio': row_dict.get('Current Ratio'),
+                    'quick_ratio': row_dict.get('Quick Ratio'),
+                    'altman_zscore': row_dict.get('Altman Z-Score'),
+                    'piotroski_fscore': row_dict.get('Piotroski F-Score'),
+                    'verdict': row_dict.get('Verdetto') or row_dict.get('Verdict'),
+                    'signal': row_dict.get('Signal'),
+                }
+    except Exception as e:
+        logger.debug(f'BurryAi context fallback su batch_results: {e}')
+
+    try:
+        selected = (st.session_state.get('selected_ticker') or '').upper().strip()
+        context['selected_ticker_match'] = bool(selected and selected == symbol_clean)
+    except Exception:
+        context['selected_ticker_match'] = False
+
+    return context
 
 
 # ==========================================================================
@@ -2137,6 +2187,7 @@ def _init_session_state() -> None:
         'burry_ai_history': [],
         'burry_ai_symbol': '',
         'burry_ai_asset_type': 'Azione',
+        'burry_ai_live_context': {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2207,7 +2258,7 @@ def main():
     with st.sidebar:
         st.markdown('---')
         with st.expander('🤖 BurryAi', expanded=False):
-            st.caption('Chiedi chiarimenti su azioni o ETF usando la logica del programma.')
+            st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti e la logica del programma.')
 
             st.session_state.burry_ai_asset_type = st.selectbox(
                 'Tipo strumento',
@@ -2229,7 +2280,7 @@ def main():
             burry_ai_prompt = st.chat_input('Chiedi a BurryAi', key='burry_ai_prompt_sidebar')
             if burry_ai_prompt:
                 ctx = build_burry_ai_context(
-                    st.session_state.get('burry_ai_symbol', ''),
+                    st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
                     st.session_state.get('burry_ai_asset_type', 'Azione'),
                     mode=st.session_state.get('model_mode', 'Entrambi')
                 )
@@ -2555,6 +2606,7 @@ def main():
             st.markdown('---')
             st.subheader('Spiegazione AI')
             ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
+            st.session_state.burry_ai_live_context[ticker] = ai_context
 
             if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
                 st.session_state.ai_ticker_chat_history = []
