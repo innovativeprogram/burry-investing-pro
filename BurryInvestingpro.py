@@ -1604,7 +1604,7 @@ def calculate_position_from_quantity(
     specificata, anche i totali sono convertiti.
     """
     current_price_native = get_latest_price(ticker)
-    native_cur = get_ticker_native_currency(ticker) or "USD"
+    native_cur = get_ticker_native_currency(ticker) or "EUR"
     user_cur = (user_currency or native_cur).upper().strip()
 
     invested = float(quantity * pmc)  # nella valuta utente
