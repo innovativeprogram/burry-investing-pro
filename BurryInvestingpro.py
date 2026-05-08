@@ -2045,9 +2045,8 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
         from google.genai.types import GenerateContentConfig
 
         client = genai.Client(api_key=api_key)
-        prompt = ( "
-                    
-        system_instructions = (
+        prompt = ( 
+                     
             "Agisci come analista finanziario rigoroso, prudente e argomentativo nello stile di Warren Buffett.\n"
             "Non sei un indovino, non fai previsioni certe, non prometti rendimenti, non inventi dati.\n"
             "Il tuo compito è interpretare in modo chiaro e approfondito i dati calcolati dall'applicazione.\n\n"
