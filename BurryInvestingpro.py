@@ -2036,8 +2036,7 @@ def ask_gemini_ticker_chat(
     if not api_key:
         return (
             "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets."
-            f"Domanda ricevuta: {user_question}
-"
+            f"Domanda ricevuta: {user_question}"
             f"Ticker: {context.get('ticker', 'N/A')} | Modalita': {mode}"
         )
     import json
