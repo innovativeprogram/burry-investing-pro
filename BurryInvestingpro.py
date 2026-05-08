@@ -2035,10 +2035,14 @@ def ask_gemini_ticker_chat(
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
-            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets."
-            f"Domanda ricevuta: {user_question}"
+            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.
+
+"
+            f"Domanda ricevuta: {user_question}
+"
             f"Ticker: {context.get('ticker', 'N/A')} | Modalita': {mode}"
         )
+
     import json
     import time
     import random
@@ -2057,43 +2061,65 @@ def ask_gemini_ticker_chat(
             "senza introdurre dati esterni o inventare numeri mancanti. "
             "Non fare previsioni magiche sul futuro: interpreta dati storici, indicatori "
             "e distribuzioni simulate spiegando chiaramente che si tratta di analisi "
-            "storica e scenari ipotetici, non certezze."
-            "Quando rispondi, ragiona in questo ordine:"
+            "storica e scenari ipotetici, non certezze.
+
+"
+            "Quando rispondi, ragiona in questo ordine:
+"
             "1. Qualita' del business (fondamentali): ROIC, margini, crescita di ricavi/EPS, "
-            "leva finanziaria, copertura interessi, Altman Z-Score, PEG, ecc."
-            "2. Profilo rischio/rendimento quantitativo: Sharpe ratio, Sortino, Calmar"
+            "leva finanziaria, copertura interessi, Altman Z-Score, PEG, ecc.
+"
+            "2. Profilo rischio/rendimento quantitativo: Sharpe ratio, Sortino, Calmar, "
             "volatilita' annua, Max Drawdown, CAGR, VaR/CVaR, skew/kurtosis, beta/alpha "
-            "rispetto al benchmark, correlazione"
+            "rispetto al benchmark, correlazione.
+"
             "3. Timing tecnico: timing_score del programma e motivazioni (RSI, SMA200, "
-            "bande di Bollinger, MACD, percentile del prezzo, Trend Slope, R-Squared)."
+            "bande di Bollinger, MACD, percentile del prezzo, Trend Slope, R-Squared).
+
+"
             "Se una metrica non e' disponibile nel contesto, dillo esplicitamente e NON "
-            "provare a stimarla o inventarla."
+            "provare a stimarla o inventarla.
+
+"
             "Rispondi in italiano, in modo chiaro, strutturato e ben argomentato "
-            "(non telegrafico), organizzando sempre l'output nelle seguenti sezioni:"
+            "(non telegrafico), organizzando sempre l'output nelle seguenti sezioni:
+"
             "- Sintesi: 3-6 frasi che riassumono qualita' del business, rischio/rendimento "
-            "quantitativo e lettura del timing."
+            "quantitativo e lettura del timing.
+"
             "- Analisi fondamentale: commenta ROIC, margini, crescita, leva, Z-Score, PEG, "
-            "spiegando in una frase cosa misura ogni indicatore citato e perche' e' rilevante"
-            "- Analisi quantitativa (Sharpe, CAGR, rischio): interpreta Sharpe, Sortino"
+            "spiegando in una frase cosa misura ogni indicatore citato e perche' e' rilevante.
+"
+            "- Analisi quantitativa (Sharpe, CAGR, rischio): interpreta Sharpe, Sortino, "
             "Calmar, Max Drawdown, volatilita', CAGR, VaR/CVaR, skew/kurtosis, beta/alpha "
-            "e correlazione, indicando cosa implicano per il profilo rischio/rendimento"
+            "e correlazione, indicando cosa implicano per il profilo rischio/rendimento.
+"
             "- Lettura del timing tecnico: spiega il timing_score e le sue motivazioni "
             "(RSI, SMA, Bollinger, MACD, percentile del prezzo, Trend Slope, R-Squared), "
-            "distinguendo tra prezzo interessante rispetto alla storia e trend/momentum."
+            "distinguendo tra prezzo interessante rispetto alla storia e trend/momentum.
+"
             "- Rischi e scenari avversi: elenca i principali rischi che emergono dai dati "
             "(drawdown storici, leva elevata, bassa qualita' del business, volatilita' alta, "
-            "ecc.)."
+            "ecc.).
+"
             "- Limiti dei dati e dell'analisi: chiarisci quali informazioni mancano o sono "
             "deboli, e ribadisci che non stai dando raccomandazioni personalizzate ne' "
-            "prevedendo con certezza cosa succedera'."
+            "prevedendo con certezza cosa succedera'.
+
+"
             "Quando citi un indicatore (es. Sharpe, CAGR, Sortino, Max Drawdown, Altman "
             "Z-Score, PEG), spiega in una frase che cosa misura e perche' e' importante "
-            "per chi investe."
+            "per chi investe.
+"
             "Adatta il tono al fatto che l'utente e' un investitore consapevole: "
-            "evita frasi marketing e usa valutazioni prudenziali basate sui numeri."
-            f"Modalita' modello: {mode}"
-            f"Contesto JSON:
-{json.dumps(context, ensure_ascii=False, default=str)}"
+            "evita frasi marketing e usa valutazioni prudenziali basate sui numeri.
+
+"
+            f"Modalita' modello: {mode}
+"
+            f"Contesto JSON: {json.dumps(context, ensure_ascii=False, default=str)}
+
+"
             f"Domanda utente: {user_question}"
         )
 
@@ -2236,8 +2262,7 @@ def ask_gemini_portfolio_chat(
 "
             f"Modalita' modello: {mode}
 "
-            f"Contesto JSON:
-{json.dumps(context, ensure_ascii=False, default=str)}
+            f"Contesto JSON: {json.dumps(context, ensure_ascii=False, default=str)}
 
 "
             f"Domanda utente: {user_question}"
@@ -2283,8 +2308,8 @@ def ask_gemini_portfolio_chat(
         )
 
     except Exception as e:
-        logger.warning(f"Errore AI Gemini portfolio: {e}")
-        return f"Errore AI portfolio: {e}"
+        logger.warning(f"Errore AI Gemini Portfolio: {e}")
+        return f"Errore AI: {e}"
 
 
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
