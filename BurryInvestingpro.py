@@ -2045,9 +2045,8 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
         from google.genai.types import GenerateContentConfig
 
         client = genai.Client(api_key=api_key)
-        prompt = (
-                    # --- [RIGA DA MODIFICARE: SOSTITUZIONE PROMPT E CONFIGURAZIONE] ---
-        
+        prompt = ( "
+                    
         system_instructions = (
             "Agisci come analista finanziario rigoroso, prudente e argomentativo nello stile di Warren Buffett.\n"
             "Non sei un indovino, non fai previsioni certe, non prometti rendimenti, non inventi dati.\n"
