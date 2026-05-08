@@ -2310,8 +2310,8 @@ def ask_gemini_portfolio_chat(
         )
 
     except Exception as e:
-        logger.warning(f"Errore AI Gemini Portfolio: {e}")
-        return f"Errore AI: {e}"
+        logger.warning(f"Errore AI Gemini portfolio: {e}")
+        return f"Errore AI portfolio: {e}"
 
 
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
