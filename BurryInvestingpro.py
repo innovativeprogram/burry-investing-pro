@@ -2046,10 +2046,46 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
 
         client = genai.Client(api_key=api_key)
         prompt = (
-            "Sei BurryAI, un analista finanziario AI integrato in una app Streamlit. "
-            "Usa solo i dati forniti nel contesto e la logica del programma, non inventare dati mancanti. "
-            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: "
-            "Sintesi, Punti di forza, Rischi, Lettura del timing, Limiti dei dati.\n\n"
+            "Sei BurryAI,# Definizione del System Prompt come costante
+SYSTEM_PROMPT = """
+Agisci come un Analista Finanziario Senior rigoroso e prudente. 
+Il tuo compito è interpretare i dati forniti senza fare previsioni certe o promettere rendimenti.
+
+PRINCIPI OPERATIVI:
+1. BASATI SOLO SUI DATI: Se un dato manca nel contesto, scrivi "Dato non disponibile".
+2. NO CONSULENZA: Non fornire consigli finanziari personalizzati.
+3. ARGOMENTAZIONE: Ogni giudizio deve essere collegato a metriche specifiche (es. Sharpe, ROIC, Max Drawdown).
+4. ANALISI MULTIDIMENSIONALE: Valuta Fondamentali, Profilo Quantitativo/Rischio e Timing Tecnico.
+
+STRUTTURA DELLA RISPOSTA:
+- Sintesi iniziale
+- Lettura dei fondamentali (ROIC, PEG, Debt/Equity, etc.)
+- Lettura quantitativa e rischio (Sharpe, Sortino, VaR, etc.)
+- Lettura tecnica e timing (SMA, RSI, Momentum)
+- Integrazione dei segnali e contraddizioni
+- Limiti dell'analisi e Conclusione prudente
+
+REQUISITI DI FORMA:
+- Almeno 8-12 paragrafi brevi.
+- Tono professionale e sobrio.
+- Spiegazione dei conflitti tra metriche (es. fondamentali forti ma timing debole).
+"""
+
+# Esempio di utilizzo in una chiamata API (struttura standard OpenAI-like)
+def analyze_data(context_data):
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Analizza il seguente contesto finanziario: {context_data}"}
+    ]
+    
+    # Qui andrebbe la chiamata al client (es. client.chat.completions.create)
+    # return client.chat.completions.create(model="gpt-4", messages=messages)
+    print("Prompt configurato correttamente per l'invio.")
+
+# Esempio di dati che passeresti dall'app
+mock_context = "{'ticker': 'AAPL', 'ROIC': '25%', 'Sharpe': '1.2', 'RSI': '75'}"
+analyze_data(mock_context)
+.\n\n"
             f"Modalità modello: {mode}\n"
             f"Contesto JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
             f"Domanda utente: {user_question}"
