@@ -2046,7 +2046,9 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
 
         client = genai.Client(api_key=api_key)
         prompt = ( 
-                     
+    try:
+        # --- DEFINIZIONE ISTRUZIONI DI SISTEMA ---
+        system_instructions = (
             "Agisci come analista finanziario rigoroso, prudente e argomentativo nello stile di Warren Buffett.\n"
             "Non sei un indovino, non fai previsioni certe, non prometti rendimenti, non inventi dati.\n"
             "Il tuo compito è interpretare in modo chiaro e approfondito i dati calcolati dall'applicazione.\n\n"
@@ -2054,16 +2056,10 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             "1. DEVI BASARTI SOLO SUI DATI FORNITI nel Contesto JSON. Se un dato manca, scrivi 'Non disponibile'.\n"
             "2. Non citare notizie esterne o macro non presenti nel contesto.\n"
             "3. Produci una risposta approfondita (almeno 8-12 paragrafi brevi).\n"
-            "4. Ogni giudizio deve citare una metrica specifica e spiegarne il perché.\n\n"
-            "STRUTTURA RISPOSTA:\n"
-            "1. Sintesi iniziale\n"
-            "2. Lettura dei fondamentali (Redditività, Margini, Leva)\n"
-            "3. Lettura quantitativa e rischio (Sharpe, Drawdown, VaR)\n"
-            "4. Lettura tecnica e timing (Trend, Momentum)\n"
-            "5. Integrazione dei segnali e Conclusione operativa prudente\n"
-            "6. Limiti dell'analisi"
+            "4. Ogni giudizio deve citare una metrica specifica e spiegarne il perché."
         )
 
+        # --- DEFINIZIONE USER PROMPT ---
         user_prompt = (
             f"Analizza il seguente contesto prodotto dall'app per il simbolo: {symbol}\n\n"
             f"MODALITÀ ANALISI: {mode}\n"
@@ -2074,37 +2070,39 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             "- Se trovi conflitti tra segnali fondamentali e tecnici, evidenziali."
         )
 
-        candidate_models = ["gemini-1.5-pro", "gemini-1.5-flash"] # Suggerito Pro per analisi profonde
+        candidate_models = ["gemini-1.5-pro", "gemini-1.5-flash"]
         last_error = None
 
         for model_name in candidate_models:
             for attempt in range(4):
                 try:
-                    # Usiamo il sistema di istruzioni e il prompt utente separati per maggiore efficacia
                     resp = client.models.generate_content(
                         model=model_name,
                         contents=user_prompt,
                         config=GenerateContentConfig(
                             system_instruction=system_instructions,
-                            temperature=0.2, # Rigore analitico
-                            max_output_tokens=2000, # Aumentato per permettere l'analisi approfondita
+                            temperature=0.2,
+                            max_output_tokens=2000,
                         ),
                     )
                     answer = getattr(resp, "text", None)
                     if answer and answer.strip():
                         return answer.strip()
+                    
+                except Exception as e:
+                    last_error = str(e)
+                    # Logica di retry per errori temporanei
+                    if any(x in last_error for x in ["503", "UNAVAILABLE", "429"]):
+                        time.sleep(2 ** attempt)
+                        continue
+                    break
 
-    """[NEW] Contesto BurryAi arricchito con risultati correnti e contesto live del verdetto."""
-    symbol_clean = (symbol or "").upper().strip()
-    context = {
-        "ticker": symbol_clean,
-        "asset_type": asset_type,
-        "mode": mode,
-        "note": (
-            "Usa la logica del programma per rispondere su azioni o ETF; "
-            "se i dati completi non sono disponibili, dichiaralo esplicitamente."
-        ),
-    }
+        return f"Servizio AI occupato. Ultimo errore: {last_error}"
+
+    except Exception as e:
+        # QUESTA È LA PARTE CHE MANCAVA O ERA POSIZIONATA MALE
+        logger.warning(f"Errore generale AI Gemini: {e}")
+        return f"Errore critico AI: {e}"
 
     try:
         live_map = st.session_state.get('burry_ai_live_context', {}) or {}
