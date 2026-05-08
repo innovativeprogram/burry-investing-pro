@@ -2026,14 +2026,21 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
     }
 
 
-def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = 'Entrambi') -> str:
-    """[NEW] Wrapper robusto con retry/backoff e fallback modello."""
+def ask_gemini_ticker_chat(
+    context: Dict[str, Any],
+    user_question: str,
+    mode: str = "Entrambi",
+) -> str:
+    """[NEW] Wrapper robusto con retry/backoff e fallback modello, con prompt piu' argomentato e data-driven per il singolo ticker."""
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
-            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.\n\n"
-            f"Domanda ricevuta: {user_question}\n"
-            f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
+            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.
+
+"
+            f"Domanda ricevuta: {user_question}
+"
+            f"Ticker: {context.get('ticker', 'N/A')} | Modalita': {mode}"
         )
 
     import json
@@ -2045,13 +2052,75 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
         from google.genai.types import GenerateContentConfig
 
         client = genai.Client(api_key=api_key)
+
         prompt = (
-            "Sei BurryAI, un analista finanziario AI integrato in una app Streamlit. "
-            "Usa solo i dati forniti nel contesto e la logica del programma, non inventare dati mancanti. "
-            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: "
-            "Sintesi, Punti di forza, Rischi, Lettura del timing, Limiti dei dati.\n\n"
-            f"Modalità modello: {mode}\n"
-            f"Contesto JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
+            "Sei BurryAI, un analista finanziario quantitativo prudente integrato "
+            "nell'app BurryInvestingPro. "
+            "Usa SOLO i dati presenti nel contesto JSON e la logica del programma "
+            "(fondamentali, metriche quantitative, analisi tecnica, timing_score, ecc.), "
+            "senza introdurre dati esterni o inventare numeri mancanti. "
+            "Non fare previsioni magiche sul futuro: interpreta dati storici, indicatori "
+            "e distribuzioni simulate spiegando chiaramente che si tratta di analisi "
+            "storica e scenari ipotetici, non certezze.
+
+"
+            "Quando rispondi, ragiona in questo ordine:
+"
+            "1. Qualita' del business (fondamentali): ROIC, margini, crescita di ricavi/EPS, "
+            "leva finanziaria, copertura interessi, Altman Z-Score, PEG, ecc.
+"
+            "2. Profilo rischio/rendimento quantitativo: Sharpe ratio, Sortino, Calmar, "
+            "volatilita' annua, Max Drawdown, CAGR, VaR/CVaR, skew/kurtosis, beta/alpha "
+            "rispetto al benchmark, correlazione.
+"
+            "3. Timing tecnico: timing_score del programma e motivazioni (RSI, SMA200, "
+            "bande di Bollinger, MACD, percentile del prezzo, Trend Slope, R-Squared).
+
+"
+            "Se una metrica non e' disponibile nel contesto, dillo esplicitamente e NON "
+            "provare a stimarla o inventarla.
+
+"
+            "Rispondi in italiano, in modo chiaro, strutturato e ben argomentato "
+            "(non telegrafico), organizzando sempre l'output nelle seguenti sezioni:
+"
+            "- Sintesi: 3-6 frasi che riassumono qualita' del business, rischio/rendimento "
+            "quantitativo e lettura del timing.
+"
+            "- Analisi fondamentale: commenta ROIC, margini, crescita, leva, Z-Score, PEG, "
+            "spiegando in una frase cosa misura ogni indicatore citato e perche' e' rilevante.
+"
+            "- Analisi quantitativa (Sharpe, CAGR, rischio): interpreta Sharpe, Sortino, "
+            "Calmar, Max Drawdown, volatilita', CAGR, VaR/CVaR, skew/kurtosis, beta/alpha "
+            "e correlazione, indicando cosa implicano per il profilo rischio/rendimento.
+"
+            "- Lettura del timing tecnico: spiega il timing_score e le sue motivazioni "
+            "(RSI, SMA, Bollinger, MACD, percentile del prezzo, Trend Slope, R-Squared), "
+            "distinguendo tra prezzo interessante rispetto alla storia e trend/momentum.
+"
+            "- Rischi e scenari avversi: elenca i principali rischi che emergono dai dati "
+            "(drawdown storici, leva elevata, bassa qualita' del business, volatilita' alta, "
+            "ecc.).
+"
+            "- Limiti dei dati e dell'analisi: chiarisci quali informazioni mancano o sono "
+            "deboli, e ribadisci che non stai dando raccomandazioni personalizzate ne' "
+            "prevedendo con certezza cosa succedera'.
+
+"
+            "Quando citi un indicatore (es. Sharpe, CAGR, Sortino, Max Drawdown, Altman "
+            "Z-Score, PEG), spiega in una frase che cosa misura e perche' e' importante "
+            "per chi investe.
+"
+            "Adatta il tono al fatto che l'utente e' un investitore consapevole: "
+            "evita frasi marketing e usa valutazioni prudenziali basate sui numeri.
+
+"
+            f"Modalita' modello: {mode}
+"
+            f"Contesto JSON:
+{json.dumps(context, ensure_ascii=False, default=str)}
+
+"
             f"Domanda utente: {user_question}"
         )
 
@@ -2059,7 +2128,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
         ]
-        last_error = None
+        last_error: Optional[str] = None
 
         for model_name in candidate_models:
             for attempt in range(4):
@@ -2069,7 +2138,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                         contents=prompt,
                         config=GenerateContentConfig(
                             temperature=0.2,
-                            max_output_tokens=900,
+                            max_output_tokens=1100,
                         ),
                     )
                     answer = getattr(resp, "text", None)
@@ -2079,7 +2148,9 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                 except Exception as e:
                     err = str(e)
                     last_error = err
-                    transient = any(x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"])
+                    transient = any(
+                        x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
+                    )
                     if transient and attempt < 3:
                         wait_s = (2 ** attempt) + random.uniform(0.3, 1.2)
                         time.sleep(wait_s)
@@ -2091,15 +2162,162 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             "Riprova tra poco. Ultimo dettaglio tecnico: "
             f"{last_error}"
         )
+
     except Exception as e:
         logger.warning(f"Errore AI Gemini: {e}")
         return f"Errore AI: {e}"
 
 
+def ask_gemini_portfolio_chat(
+    context: Dict[str, Any],
+    user_question: str,
+    mode: str = "Entrambi",
+) -> str:
+    """[NEW] Wrapper robusto con retry/backoff e fallback modello, con prompt piu' argomentato e data-driven per l'analisi di portafoglio."""
+    api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
+    if not api_key:
+        return (
+            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.
+
+"
+            f"Domanda ricevuta: {user_question}
+"
+            f"Portafoglio: {context.get('portfolio_name', 'N/A')} | Modalita': {mode}"
+        )
+
+    import json
+    import time
+    import random
+
+    try:
+        from google import genai
+        from google.genai.types import GenerateContentConfig
+
+        client = genai.Client(api_key=api_key)
+
+        prompt = (
+            "Sei BurryAI, un analista finanziario quantitativo prudente integrato "
+            "nell'app BurryInvestingPro. In questa richiesta devi analizzare un PORTAFOGLIO, "
+            "non un singolo titolo. Usa SOLO i dati presenti nel contesto JSON e la logica "
+            "del programma, senza introdurre dati esterni, senza inventare metriche mancanti "
+            "e senza comportarti come un mago che sa cosa succedera' in futuro. "
+            "Devi interpretare esclusivamente i dati storici, le metriche di rischio/rendimento, "
+            "la composizione del portafoglio, le concentrazioni e gli eventuali segnali tecnici "
+            "aggregati disponibili nel contesto.
+
+"
+            "Quando rispondi, analizza SEMPRE questi blocchi logici, se presenti nel contesto:
+"
+            "1. Struttura del portafoglio: pesi, concentrazione per titolo/settore/area, numero "
+            "di posizioni, eventuale esposizione eccessiva a pochi asset.
+"
+            "2. Rischio/rendimento aggregato: CAGR, rendimento annualizzato, volatilita', Sharpe, "
+            "Sortino, Calmar, Max Drawdown, VaR/CVaR, beta, alpha, correlazione col benchmark, "
+            "downside deviation e qualunque altra metrica quantitativa disponibile.
+"
+            "3. Qualita' complessiva delle partecipazioni: redditivita', leva, crescita, valutazioni, "
+            "solidita' finanziaria e qualunque metrica fondamentale aggregata o per-posizione disponibile.
+"
+            "4. Timing e regime di mercato del portafoglio: timing score aggregati, stato del trend, "
+            "momentum, distanza da medie mobili, segnali RSI/MACD/Bollinger o analoghi se disponibili.
+
+"
+            "Se una metrica non e' disponibile, dichiaralo esplicitamente e non stimarla. "
+            "Non trasformare dati incompleti in conclusioni forti.
+
+"
+            "Rispondi in italiano, in modo chiaro, strutturato e ben argomentato, con queste sezioni:
+"
+            "- Sintesi del portafoglio: 4-7 frasi che descrivano qualita', concentrazione, "
+            "profilo rischio/rendimento e lettura generale del momento.
+"
+            "- Struttura e concentrazione: commenta distribuzione dei pesi, diversificazione, "
+            "eventuali concentrazioni e rischio specifico. Se trovi indicatori come HHI, ENS o simili, "
+            "spiegali in una frase e interpretali.
+"
+            "- Analisi quantitativa del portafoglio: interpreta Sharpe, Sortino, Calmar, CAGR, "
+            "volatilita', Max Drawdown, VaR/CVaR, beta, alpha, correlazione e ogni altra metrica disponibile, "
+            "spiegando per ciascun indicatore cosa misura e cosa implica per un investitore.
+"
+            "- Analisi delle partecipazioni sottostanti: se il contesto lo consente, spiega se il portafoglio "
+            "e' trainato da societa' di alta qualita', da titoli piu' speculativi, da fattori growth/value, "
+            "da leva elevata o da business difensivi.
+"
+            "- Timing e rischi operativi: spiega se il portafoglio appare in fase tirata, neutrale o interessante "
+            "in base agli indicatori tecnici disponibili; separa sempre la lettura del trend dalla valutazione del rischio.
+"
+            "- Criticita' e scenari avversi: elenca i principali punti deboli emersi dai dati, come eccessiva "
+            "concentrazione, drawdown severi, correlazione troppo alta col benchmark, bassa qualita' media, "
+            "rischio valutario o volatilita' elevata.
+"
+            "- Limiti dell'analisi: chiarisci che questa non e' una previsione certa, non e' consulenza personalizzata "
+            "e dipende interamente dai dati disponibili nel contesto dell'app.
+
+"
+            "Quando citi indicatori come Sharpe, Sortino, Calmar, CAGR, Max Drawdown, beta, alpha, VaR, CVaR, "
+            "correlazione, HHI o ENS, spiega sempre in una frase che cosa misurano e perche' sono utili.
+"
+            "Mantieni un tono professionale, prudente, tecnico ma comprensibile. Evita slogan, evita linguaggio promozionale, "
+            "evita frasi assolute come 'salira'' o 'scendera''.
+
+"
+            f"Modalita' modello: {mode}
+"
+            f"Contesto JSON:
+{json.dumps(context, ensure_ascii=False, default=str)}
+
+"
+            f"Domanda utente: {user_question}"
+        )
+
+        candidate_models = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ]
+        last_error: Optional[str] = None
+
+        for model_name in candidate_models:
+            for attempt in range(4):
+                try:
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=1300,
+                        ),
+                    )
+                    answer = getattr(resp, "text", None)
+                    if answer and answer.strip():
+                        return answer.strip()
+                    return "Il modello non ha restituito testo utile."
+                except Exception as e:
+                    err = str(e)
+                    last_error = err
+                    transient = any(
+                        x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
+                    )
+                    if transient and attempt < 3:
+                        wait_s = (2 ** attempt) + random.uniform(0.3, 1.2)
+                        time.sleep(wait_s)
+                        continue
+                    break
+
+        return (
+            "Servizio AI temporaneamente occupato. "
+            "Riprova tra poco. Ultimo dettaglio tecnico: "
+            f"{last_error}"
+        )
+
+    except Exception as e:
+        logger.warning(f"Errore AI Gemini Portfolio: {e}")
+        return f"Errore AI: {e}"
+
+
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
-    """[NEW] Contesto generico per BurryAi sidebar."""
+    """[NEW] Contesto BurryAi arricchito con risultati correnti e contesto live del verdetto."""
     symbol_clean = (symbol or "").upper().strip()
-    return {
+    context = {
         "ticker": symbol_clean,
         "asset_type": asset_type,
         "mode": mode,
@@ -2108,6 +2326,56 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
             "se i dati completi non sono disponibili, dichiaralo esplicitamente."
         ),
     }
+
+    try:
+        live_map = st.session_state.get('burry_ai_live_context', {}) or {}
+        if symbol_clean and symbol_clean in live_map:
+            context['live_program_analysis'] = live_map[symbol_clean]
+    except Exception as e:
+        logger.debug(f'BurryAi live context fallback: {e}')
+
+    try:
+        df = st.session_state.get('batch_results')
+        if df is not None and not df.empty and 'Ticker' in df.columns and symbol_clean:
+            row_match = df[df['Ticker'].astype(str).str.upper() == symbol_clean]
+            if not row_match.empty:
+                row = row_match.iloc[0]
+                row_dict = row.to_dict()
+                context['program_data'] = {
+                    'company_name': row_dict.get('Company Name'),
+                    'price': row_dict.get('Price'),
+                    'sector': row_dict.get('Sector'),
+                    'industry': row_dict.get('Industry'),
+                    'market_cap': row_dict.get('Market Cap'),
+                    'pe_ratio': row_dict.get('P/E'),
+                    'forward_pe': row_dict.get('Forward P/E'),
+                    'peg_ratio': row_dict.get('PEG Ratio'),
+                    'roic': row_dict.get('ROIC'),
+                    'roe': row_dict.get('ROE'),
+                    'gross_margin': row_dict.get('Gross Margin'),
+                    'operating_margin': row_dict.get('Operating Margin'),
+                    'net_margin': row_dict.get('Net Margin'),
+                    'fcf_margin': row_dict.get('FCF Margin'),
+                    'revenue_growth': row_dict.get('Revenue Growth'),
+                    'eps_growth': row_dict.get('EPS Growth'),
+                    'debt_to_equity': row_dict.get('Debt/Equity'),
+                    'current_ratio': row_dict.get('Current Ratio'),
+                    'quick_ratio': row_dict.get('Quick Ratio'),
+                    'altman_zscore': row_dict.get('Altman Z-Score'),
+                    'piotroski_fscore': row_dict.get('Piotroski F-Score'),
+                    'verdict': row_dict.get('Verdetto') or row_dict.get('Verdict'),
+                    'signal': row_dict.get('Signal'),
+                }
+    except Exception as e:
+        logger.debug(f'BurryAi context fallback su batch_results: {e}')
+
+    try:
+        selected = (st.session_state.get('selected_ticker') or '').upper().strip()
+        context['selected_ticker_match'] = bool(selected and selected == symbol_clean)
+    except Exception:
+        context['selected_ticker_match'] = False
+
+    return context
 
 
 # ==========================================================================
@@ -2137,6 +2405,7 @@ def _init_session_state() -> None:
         'burry_ai_history': [],
         'burry_ai_symbol': '',
         'burry_ai_asset_type': 'Azione',
+        'burry_ai_live_context': {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2207,7 +2476,7 @@ def main():
     with st.sidebar:
         st.markdown('---')
         with st.expander('🤖 BurryAi', expanded=False):
-            st.caption('Chiedi chiarimenti su azioni o ETF usando la logica del programma.')
+            st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti e la logica del programma.')
 
             st.session_state.burry_ai_asset_type = st.selectbox(
                 'Tipo strumento',
@@ -2229,7 +2498,7 @@ def main():
             burry_ai_prompt = st.chat_input('Chiedi a BurryAi', key='burry_ai_prompt_sidebar')
             if burry_ai_prompt:
                 ctx = build_burry_ai_context(
-                    st.session_state.get('burry_ai_symbol', ''),
+                    st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
                     st.session_state.get('burry_ai_asset_type', 'Azione'),
                     mode=st.session_state.get('model_mode', 'Entrambi')
                 )
@@ -2555,6 +2824,7 @@ def main():
             st.markdown('---')
             st.subheader('Spiegazione AI')
             ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
+            st.session_state.burry_ai_live_context[ticker] = ai_context
 
             if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
                 st.session_state.ai_ticker_chat_history = []
