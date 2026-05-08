@@ -1,17 +1,4 @@
 
-========================================================
-Versione corretta e potenziata del file BurryInvestingpro.py.
-
-Tutti i punti di modifica sono marcati con tag:
-  [BUGFIX]    -> correzione di errore esistente
-  [SECURITY]  -> miglioramento di sicurezza
-  [REFACTOR]  -> riorganizzazione tecnica senza cambio di logica
-  [NEW]       -> funzionalita' aggiunta
-  [FIN-FIX]   -> correzione di logica finanziaria
-
-Il file mantiene la compatibilita' con la struttura UI originale e con
-la tabella Supabase 'portfoliopositions'.
-"""
 
 import streamlit as st
 import yfinance as yf
