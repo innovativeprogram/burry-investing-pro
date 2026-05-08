@@ -2035,14 +2035,11 @@ def ask_gemini_ticker_chat(
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
-            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.
-
-"
+            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets."
             f"Domanda ricevuta: {user_question}
 "
             f"Ticker: {context.get('ticker', 'N/A')} | Modalita': {mode}"
         )
-
     import json
     import time
     import random
@@ -3269,4 +3266,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
