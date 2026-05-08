@@ -1,5 +1,4 @@
-"""
-BurryInvestingPro - VERSIONE REVISIONATA (rev. 2026-05)
+
 ========================================================
 Versione corretta e potenziata del file BurryInvestingpro.py.
 
