@@ -2046,57 +2046,56 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
 
         client = genai.Client(api_key=api_key)
         prompt = (
-            "Sei BurryAI, un analista finanziario AI integrato in una app Streamlit. "
-            "Usa solo i dati forniti nel contesto e la logica del programma, non inventare dati mancanti. "
-            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: "
-            "Sintesi, Punti di forza, Rischi, Lettura del timing, Limiti dei dati.\n\n"
-            f"Modalità modello: {mode}\n"
-            f"Contesto JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
-            f"Domanda utente: {user_question}"
+                    # --- [RIGA DA MODIFICARE: SOSTITUZIONE PROMPT E CONFIGURAZIONE] ---
+        
+        system_instructions = (
+            "Agisci come analista finanziario rigoroso, prudente e argomentativo nello stile di Warren Buffett.\n"
+            "Non sei un indovino, non fai previsioni certe, non prometti rendimenti, non inventi dati.\n"
+            "Il tuo compito è interpretare in modo chiaro e approfondito i dati calcolati dall'applicazione.\n\n"
+            "REGOLE RIGIDE:\n"
+            "1. DEVI BASARTI SOLO SUI DATI FORNITI nel Contesto JSON. Se un dato manca, scrivi 'Non disponibile'.\n"
+            "2. Non citare notizie esterne o macro non presenti nel contesto.\n"
+            "3. Produci una risposta approfondita (almeno 8-12 paragrafi brevi).\n"
+            "4. Ogni giudizio deve citare una metrica specifica e spiegarne il perché.\n\n"
+            "STRUTTURA RISPOSTA:\n"
+            "1. Sintesi iniziale\n"
+            "2. Lettura dei fondamentali (Redditività, Margini, Leva)\n"
+            "3. Lettura quantitativa e rischio (Sharpe, Drawdown, VaR)\n"
+            "4. Lettura tecnica e timing (Trend, Momentum)\n"
+            "5. Integrazione dei segnali e Conclusione operativa prudente\n"
+            "6. Limiti dell'analisi"
         )
 
-        candidate_models = [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-        ]
+        user_prompt = (
+            f"Analizza il seguente contesto prodotto dall'app per il simbolo: {symbol}\n\n"
+            f"MODALITÀ ANALISI: {mode}\n"
+            f"CONTESTO JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
+            f"DOMANDA UTENTE: {user_question}\n\n"
+            "ISTRUZIONI ADDIZIONALI:\n"
+            "- Commenta esplicitamente: redditività, leva finanziaria, margini, rendimento corretto per il rischio, drawdown e rischio di coda.\n"
+            "- Se trovi conflitti tra segnali fondamentali e tecnici, evidenziali."
+        )
+
+        candidate_models = ["gemini-1.5-pro", "gemini-1.5-flash"] # Suggerito Pro per analisi profonde
         last_error = None
 
         for model_name in candidate_models:
             for attempt in range(4):
                 try:
+                    # Usiamo il sistema di istruzioni e il prompt utente separati per maggiore efficacia
                     resp = client.models.generate_content(
                         model=model_name,
-                        contents=prompt,
+                        contents=user_prompt,
                         config=GenerateContentConfig(
-                            temperature=0.2,
-                            max_output_tokens=900,
+                            system_instruction=system_instructions,
+                            temperature=0.2, # Rigore analitico
+                            max_output_tokens=2000, # Aumentato per permettere l'analisi approfondita
                         ),
                     )
                     answer = getattr(resp, "text", None)
                     if answer and answer.strip():
                         return answer.strip()
-                    return "Il modello non ha restituito testo utile."
-                except Exception as e:
-                    err = str(e)
-                    last_error = err
-                    transient = any(x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"])
-                    if transient and attempt < 3:
-                        wait_s = (2 ** attempt) + random.uniform(0.3, 1.2)
-                        time.sleep(wait_s)
-                        continue
-                    break
 
-        return (
-            "Servizio AI temporaneamente occupato. "
-            "Riprova tra poco. Ultimo dettaglio tecnico: "
-            f"{last_error}"
-        )
-    except Exception as e:
-        logger.warning(f"Errore AI Gemini: {e}")
-        return f"Errore AI: {e}"
-
-
-def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
     """[NEW] Contesto BurryAi arricchito con risultati correnti e contesto live del verdetto."""
     symbol_clean = (symbol or "").upper().strip()
     context = {
