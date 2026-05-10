@@ -1655,8 +1655,8 @@ def inject_pwa_support():
     (function(){
       const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
       const manifest = {
-        name: 'BurryInvestingPro',
-        short_name: 'BurryPro',
+        name: 'V-Quant Pro',
+        short_name: 'V-Quant Pro',
         description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.',
         display: 'standalone',
@@ -1841,10 +1841,10 @@ def compute_rebalancing_actions(
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("Download App Android (APK)", expanded=False):
-        st.write("Scarica l'APK ufficiale di BurryInvestingPro per installare l'app su Android.")
+        st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
         st.link_button(
             "📲 Scarica V-Quant Pro.apk",
-            "https://github.com/innovativeprogram/Burryinvestingpro-release/releases/latest/download/Burryinvestingpro.apk",
+            "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk",
             width='stretch'
         )
         st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute "
@@ -1956,7 +1956,7 @@ def setup_sidebar() -> Dict[str, Any]:
         st.write("Per supporto tecnico, collaborazioni o richieste:")
         st.link_button(
             "📧 Scrivimi via mail",
-            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20BurryInvestingPro",
+            "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro",
             width='stretch'
         )
         st.caption("Risposta normalmente entro 24/48 ore.")
