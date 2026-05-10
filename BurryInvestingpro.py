@@ -36,23 +36,24 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 
-# IMPORT AI DEDICATO - SPOSATO DAL FILE ORIGINALE
-# from burry_ai_prompts import (
-from burry_ai_prompts import (
-    SYSTEM_PROMPT,
-    USER_PROMPT_TEMPLATE,
-    build_ai_messages,
-    ask_gemini_ticker_chat,
-    build_burry_ai_context,
-    build_ai_context_for_ticker
-)
+# AI Module - FUNZIONA AUTOMATICAMENTE
+try:
+    from burry_ai_prompts import (
+        build_ai_context_for_ticker,
+        ask_gemini_ticker_chat, 
+        build_burry_ai_context
+    )
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+    def build_ai_context_for_ticker(*args, **kwargs): return {}
+    def ask_gemini_ticker_chat(*args, **kwargs): return "AI non disponibile - carica burry_ai_prompts.py"
+    def build_burry_ai_context(*args, **kwargs): return {}
 
-# [TUTTA LA LOGICA ORIGINALE DEL FILE RIMANE IDENTICA]
-# ... resto del codice del file originale senza le funzioni AI ...
-
-# Dove prima c'era la logica AI inline, ora basta chiamare:
-# aicontext = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
-# aianswer = ask_gemini_ticker_chat(aicontext, "Spiegami questo titolo", mode)
+# [IL RESTO DEL TUO CODICE ORIGINALE RIMANE IDENTICO]
+# Costanti e funzioni originali...
+DEFAULT_TAX_RATE = 0.26
+# ... continua con tutto il resto del tuo codice originale fino alla fine)
 
 
 # ==========================================================================
