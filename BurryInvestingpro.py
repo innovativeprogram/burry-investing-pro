@@ -1978,31 +1978,19 @@ Sviluppato con passione da Innovative Program.
         st.markdown("""
 ### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
 
-#### 1. Titolare del Trattamento
+#### 1. Conservazione dei Dati 
+Tutti i dati sensibili, inclusi i dati di autenticazione (email e password) e le configurazioni del tuo portafoglio, sono **detenuti e gestiti in modo sicuro da Supabase. 
+#### Supabase è una piattaforma di database di livello enterprise che garantisce la crittografia dei dati a riposo e in transito.
+Le password sono archiviate tramite hashing sicuro e non sono mai accessibili in chiaro agli amministratori di V-QUANT PRO.
 
-Il sito v-quantpro.it è gestito da Innovative Program.
+#### 2. Analisi Finanziaria e Cookie
+Questo sito utilizza  Google AdSense per la visualizzazione di annunci pubblicitari e cookie tecnici per il corretto funzionamento della Dashboard.
+Google utilizza i cookie per pubblicare annunci basati sulle tue visite precedenti.
+Puoi gestire le preferenze sugli annunci visitando le impostazioni di Google.
 
-Per qualsiasi richiesta relativa ai tuoi dati, puoi contattarci all'indirizzo:
+#### 3. Diritti dell'Utente
 
-innovativeprogram@proton.me
-
-#### 2. Dati Raccolti
-
-L'applicazione non richiede la registrazione di dati sensibili.
-
-I dati relativi ai portafogli finanziari inseriti dagli utenti sono memorizzati in modo sicuro tramite il provider Supabase.
-
-Non vendiamo né cediamo dati personali a terze parti.
-
-#### 3. Cookie e Pubblicità (Google AdSense)
-
-Questo sito utilizza Google AdSense per mostrare annunci pubblicitari.
-
-I fornitori di terze parti, tra cui Google, utilizzano i cookie per pubblicare annunci sulla base delle precedenti visite dell'utente a questo sito web o ad altri siti web.
-
-L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di pubblicare annunci per i tuoi utenti in base alla loro visita a questo sito e/o ad altri siti Internet.
-
-Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
+Poiché i dati sono detenuti su infrastruttura Supabase, puoi richiedere in ogni momento la cancellazione totale del tuo account e dei dati associati attraverso le impostazioni del profilo o contattandoci..
 
 #### 4. Esclusione di Responsabilità
 
