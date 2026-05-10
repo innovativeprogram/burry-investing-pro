@@ -2925,62 +2925,57 @@ if __name__ == "__main__":
 # NUOVE SEZIONI SIDEBAR
 # =============================================================================
 
-if choice == "Chi Siamo":
+    elif choice == "Chi Siamo":
+        st.title("👤 Chi Siamo")
+        st.markdown("""
+        ### Benvenuti su V-QUANT PRO
+        **V-QUANT PRO** è una piattaforma avanzata di analisi finanziaria indipendente, progettata per l'investitore moderno che esige trasparenza e rigore analitico.
+        
+        La nostra missione è fornire strumenti quantitativi di livello professionale per il monitoraggio del **Margine di Sicurezza** e delle performance di portafoglio (ETF, crypto e singoli titoli azionari. Crediamo che la gestione consapevole dei dati sia l'unico modo per ottenere risultati sostenibili sui mercati finanziari.
+        
+        **Cosa ci distingue:**
+        * **Analisi Indipendente:** Nessun conflitto di interesse, solo dati puri.
+        * **Approccio Quantitativo:** Utilizziamo modelli statistici per Alpha, Beta e correlazioni.
+        * **Trasparenza:** Ogni metrica è calcolata per offrire una visione chiara del rischio.
+        
+        **⚠️ Disclaimer Legale:**
+        V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
+        """)
+        
+        *Sviluppato e curato da Innovative Program.*
+        """)
 
-    st.title("Chi Siamo")
-
-    st.markdown("""
-# Benvenuti su V-QUANT PRO
-
-V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
-
-La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF globali (come VWCE e VGGF) e singoli titoli azionari.
-
-Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
-
-## Cosa facciamo:
-- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
-- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
-- Strumenti di supporto decisionale basati su modelli matematici
-
-Sviluppato con passione da Innovative Program.
-""")
 
 
-elif choice == "Privacy & Cookie Policy":
+    elif choice == "Privacy & Cookie Policy":
+        st.title("⚖️ Privacy & Cookie Policy")
+        st.markdown("""
+        La presente informativa descrive le modalità di trattamento dei dati in conformità al GDPR (Regolamento UE 2016/679).
+        
+        **1. Titolare del Trattamento**
+        Il sito v-quantpro.it è gestito da Innovative Program. Contatto: `innovativeprogram@proton.me`.
+        
+        **2. Gestione Account e Dati (Supabase)**
+        La gestione degli account utente, l'autenticazione e l'archiviazione sicura dei dati di portafoglio sono affidate a **Supabase**, un'infrastruttura cloud di livello enterprise. 
+        * Le password sono criptate e non sono accessibili agli amministratori del sito.
+        * I dati dei portafogli sono memorizzati in database protetti e accessibili solo tramite autenticazione sicura.
+        
+        **3. Google AdSense e Cookie di Terze Parti**
+        Utilizziamo **Google AdSense** per la pubblicazione di annunci pubblicitari.
+        * Google utilizza cookie per pubblicare annunci basati sulle visite precedenti degli utenti.
+        * Gli utenti possono gestire o disattivare i cookie pubblicitari visitando la pagina [Impostazioni annunci di Google](https://www.google.com/settings/ads).
+        
+        **4. Diritti dell'Utente**
+        In ogni momento, l'utente può richiedere la cancellazione del proprio account e di tutti i dati associati contattando il supporto tecnico.
+        
+        **5. Esclusione di Responsabilità**
+        V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
 
-    st.title("Privacy & Cookie Policy")
+        st.markdown("---")
+        st.warning("""
+        **AVVERTENZA:** I contenuti di questa dashboard hanno carattere puramente informativo e non costituiscono consulenza finanziaria. 
+        Le performance passate non sono garanzia di rendimenti futuri.
+        """)
+        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
 
-    st.markdown("""
-## Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
-
-### 1. Titolare del Trattamento
-
-Il sito v-quantpro.it è gestito da Innovative Program.
-
-Per qualsiasi richiesta relativa ai tuoi dati, puoi contattarci all'indirizzo:
-
-innovativeprogram@proton.me
-
-### 2. Dati Raccolti
-
-L'applicazione non richiede la registrazione di dati sensibili.
-
-I dati relativi ai portafogli finanziari inseriti dagli utenti sono memorizzati in modo sicuro tramite il provider Supabase.
-
-Non vendiamo né cediamo dati personali a terze parti.
-
-### 3. Cookie e Pubblicità (Google AdSense)
-
-Questo sito utilizza Google AdSense per mostrare annunci pubblicitari.
-
-I fornitori di terze parti, tra cui Google, utilizzano i cookie per pubblicare annunci sulla base delle precedenti visite dell'utente a questo sito web o ad altri siti web.
-
-L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di pubblicare annunci per i tuoi utenti in base alla loro visita a questo sito e/o ad altri siti Internet.
-
-Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
-
-### 4. Sicurezza
-
-Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
-""")
+        """)
