@@ -1652,7 +1652,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'BurryInvestingPro',
         short_name: 'BurryPro',
@@ -2135,6 +2135,12 @@ def main():
 
                 st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
 
+                # [BUGFIX] Costruzione della memoria contestuale per l'IA (BurryAi Sidebar)
+                conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
+                for m in st.session_state.burry_ai_history[:-1]:
+                    conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
+                enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
+
                 with st.chat_message('user'):
                     st.markdown(burry_ai_prompt)
 
@@ -2142,7 +2148,7 @@ def main():
                     with st.spinner('BurryAi sta rispondendo...'):
                         reply = ask_gemini_ticker_chat(
                             ctx,
-                            burry_ai_prompt,
+                            enriched_prompt,
                             mode=st.session_state.get('model_mode', 'Entrambi')
                         )
                     st.markdown(reply)
@@ -2482,11 +2488,18 @@ def main():
             ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
             if ai_user_prompt:
                 st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
+                
+                # [BUGFIX] Costruzione della memoria contestuale per l'IA (Ticker Chat principale)
+                conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
+                for m in st.session_state.ai_ticker_chat_history[:-1]:
+                    conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
+                enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {ai_user_prompt}"
+
                 with st.chat_message('user'):
                     st.markdown(ai_user_prompt)
                 with st.chat_message('assistant'):
                     with st.spinner("L'AI sta rispondendo..."):
-                        ai_reply = ask_gemini_ticker_chat(ai_context, ai_user_prompt, mode=mode)
+                        ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode=mode)
                     st.markdown(ai_reply)
                 st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
 
