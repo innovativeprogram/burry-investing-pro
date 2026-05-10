@@ -2030,7 +2030,7 @@ Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tr
         """)
         
         # Sostituisci il link con il tuo link personale PayPal.me o il codice del pulsante
-        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://www.paypal.me/TUO_USERNAME", width="stretch")
+        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
         
         st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
       
