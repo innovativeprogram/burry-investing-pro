@@ -2910,7 +2910,7 @@ def main():
         st.markdown("---")
         st.markdown("creato e sviluppato da Innovative Program", unsafe_allow_html=True)
 
-elif choice == "Download App Android":
+if choice == "Download App Android":
     st.title("📱 Download App Android")
     st.markdown("""
     Scarica l'APK ufficiale di V-QUANT PRO per Android utilizzando il link qui sotto.
@@ -2925,7 +2925,7 @@ elif choice == "Download App Android":
     </a>
     """, unsafe_allow_html=True)
 
-elif choice == "Chi Siamo":
+if choice == "Chi Siamo":
     st.title("ℹ️ Chi Siamo")
     st.markdown("""
     ## V-QUANT PRO
@@ -2947,7 +2947,7 @@ elif choice == "Chi Siamo":
     Tutte le analisi fornite hanno esclusivamente scopo informativo ed educativo e non costituiscono consulenza finanziaria.
     """)
 
-elif choice == "Privacy & Cookie Policy":
+if choice == "Privacy & Cookie Policy":
     st.title("🔒 Privacy & Cookie Policy")
     st.markdown("""
     ## Informativa Privacy e Cookie Policy
@@ -2998,7 +2998,7 @@ elif choice == "Privacy & Cookie Policy":
     Per richieste relative alla privacy è possibile contattare gli sviluppatori tramite la sezione Contatti.
     """)
 
-elif choice == "Contatti":
+if choice == "Contatti":
     st.title("📧 Contatti")
 
 
