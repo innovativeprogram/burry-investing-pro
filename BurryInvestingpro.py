@@ -2980,7 +2980,7 @@ def main():
             st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
 
         st.markdown("---")
-        st.markdown("creato e sviluppato da Innovative Program", unsafe_allow_html=True)
+        st.markdown("Creato e sviluppato da Innovative Program", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
