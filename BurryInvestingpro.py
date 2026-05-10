@@ -2013,6 +2013,27 @@ V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L
 Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
 
         """)
+        
+                 
+    # =============================================================================
+    # Sostienici
+    # =============================================================================    
+    
+            elif choice == "Sostieni il Progetto":
+        st.title("☕ Sostieni V-QUANT PRO")
+        st.markdown("""
+        ### Perché una donazione?
+        V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
+        Mantenere l'infrastruttura, aggiornare i dati in tempo reale e sviluppare nuove funzionalità ha dei costi vivi.
+        
+        Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
+        """)
+        
+        # Sostituisci il link con il tuo link personale PayPal.me o il codice del pulsante
+        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://www.paypal.me/TUO_USERNAME", width="stretch")
+        
+        st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
+      
 
 
     with st.sidebar.expander("Contatti", expanded=False):
