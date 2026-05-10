@@ -17,13 +17,15 @@ la tabella Supabase 'portfoliopositions'.
 import streamlit as st
 import yfinance as yf
 import requests
-from yahooquery import Ticker as YQTicker
+from yahooquery import Ticker as YQ_Ticker
 import pandas as pd
 import numpy as np
+
 try:
-    import pandasta as ta
+    import pandas_ta as ta
 except Exception:
     ta = None
+
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -35,18 +37,14 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
+from burry_ai_prompts import (
+    build_ai_context_for_ticker,
+    ask_gemini_ticker_chat,
+    build_burry_ai_context,
+    SYSTEM_PROMPT,
+    USER_PROMPT_TEMPLATE,
+)
 
-# AI Module - FUNZIONA AUTOMATICAMENTE
-try:
-    # AI Module disabilitato temporaneamente - aggiungi burry_ai_prompts.py dopo
-try:
-    from burry_ai_prompts import build_ai_context_for_ticker, ask_gemini_ticker_chat, build_burry_ai_context
-    AI_AVAILABLE = True
-except ImportError:
-    AI_AVAILABLE = False
-    def build_ai_context_for_ticker(*args, **kwargs): return {}
-    def ask_gemini_ticker_chat(*args, **kwargs): return "AI disponibile dopo caricamento burry_ai_prompts.py"
-    def build_burry_ai_context(*args, **kwargs): return {}
 
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
