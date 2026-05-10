@@ -4,7 +4,7 @@
 
 La sicurezza dei dati dei nostri utenti è la nostra massima priorità. Se ritieni di aver trovato una vulnerabilità di sicurezza in questo progetto, ti preghiamo di non aprire una 'Issue' pubblica.
 
-Invia invece una segnalazione dettagliata a: **security@tuodominio.it** (sostituire con la propria email).
+Invia invece una segnalazione dettagliata a: **innovativeprogram@proton.me**
 
 ## Gestione dei Dati (Supabase)
 Tutti i dati sensibili relativi agli account sono gestiti tramite l'infrastruttura di Supabase. 
