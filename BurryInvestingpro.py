@@ -1971,6 +1971,9 @@ Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabi
 - Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
 - Strumenti di supporto decisionale basati su modelli matematici
 
+### ⚠️ Disclaimer Legale
+        V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
+
 Sviluppato con passione da Innovative Program.
         """)
 
@@ -2008,7 +2011,10 @@ L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di 
 
 Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
 
-#### 4. Sicurezza
+#### 4. Esclusione di Responsabilità
+        V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
+
+#### 5. Sicurezza
 
 Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
         """)
