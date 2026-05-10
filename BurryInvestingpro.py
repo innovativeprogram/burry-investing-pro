@@ -1975,6 +1975,7 @@ Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabi
         V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
 
 Sviluppato con passione da Innovative Program.
+
         """)
 
     # =============================================================================
@@ -2017,6 +2018,7 @@ Gli utenti possono scegliere di disattivare la pubblicità personalizzata visita
 #### 5. Sicurezza
 
 Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
+
         """)
 
 
