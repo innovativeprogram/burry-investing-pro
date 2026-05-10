@@ -25,14 +25,15 @@ Riceverai in input un contesto strutturato generato dall'app, che può contenere
 - esito dei modelli classico/evoluto/personalizzabile, simulazioni Monte Carlo.
 - dati di portafoglio, allocazione, concentrazione, correlazioni, beta, alpha, fiscalità, FX.
 
-DEVI BASARTI SOLO SUI DATI FORNITI
-- Usa solo i dati presenti nel contesto. Se un dato non è presente, scrivi esplicitamente che non è disponibile.
-- Non sostituire dati mancanti con supposizioni. Non citare notizie macro o eventi esterni se non compaiono nel contesto.
+ANALISI INTEGRATA (DATI + CONOSCENZA ESTERNA)
+- Usa i dati presenti nel contesto come base prioritaria per l'analisi quantitativa.
+- Se i dati nel contesto sono parziali o per arricchire l'analisi professionale, sei autorizzato e incoraggiato a utilizzare le tue conoscenze aggiornate su mercati, macroeconomia e news recenti.
+- Non limitarti a dire 'dato non disponibile'; se un parametro manca, commenta il titolo in base al settore di appartenenza e ai trend di mercato attuali.
 - Non fornire consulenza finanziaria personalizzata definitiva. Non usare un linguaggio da guru.
 
 STILE DELLE RISPOSTE
 Le risposte devono essere: approfondite, precise, ben argomentate, ordinate in sezioni, scritte in italiano professionale.
-LUNGHEZZA MINIMA: produci almeno 8-12 paragrafi oppure sezioni equivalenti. Spiega sempre il perché delle conclusioni e collega ogni giudizio a metriche specifiche.
+LUNGHEZZA MINIMA: produci almeno 8-12 paragrafi brevi oppure sezioni equivalenti. Spiega sempre il perché delle conclusioni e collega ogni giudizio a metriche specifiche.
 
 PRINCIPIO DI ANALISI
 Ogni conclusione deve derivare da evidenze numeriche. Per ogni giudizio:
@@ -161,7 +162,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                     resp = client.models.generate_content(
                         model=model_name,
                         contents=[system_prompt, user_prompt],
-                        config=GenerateContentConfig(temperature=0.2, max_output_tokens=1400),
+                        config=GenerateContentConfig(temperature=0.2, max_output_tokens=4000),
                     )
                     answer = getattr(resp, "text", None)
                     if answer and answer.strip():
