@@ -313,14 +313,7 @@ def calculate_tax_with_loss_offset(
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(
-    page_title="V-Quant Pro",
-    page_icon="💲",
-    layout="wide"
-)
 
-# ==========================================================================
-# MENU NAVIGAZIONE
-# ==========================================================================
 menu_options = [
     "Dashboard Portafoglio",
     "Download App Android",
@@ -330,8 +323,10 @@ menu_options = [
 ]
 
 choice = st.sidebar.selectbox("Navigazione", menu_options)
-
-
+    page_title="V-Quant Pro",
+    page_icon="💲",
+    layout="wide"
+)
 
 
 # ==========================================================================
@@ -2931,18 +2926,65 @@ if __name__ == "__main__":
   
 
 
-# ==========================================================================
-# PAGINE MENU
-# ==========================================================================
-
-if choice == "Download App Android":
-    st.sidebar.success("Sezione Download selezionata")
+# =============================================================================
+# NUOVE SEZIONI SIDEBAR
+# =============================================================================
 
 elif choice == "Chi Siamo":
-    st.sidebar.success("Sezione Chi Siamo selezionata")
+
+    st.title("Chi Siamo")
+
+    st.markdown("""
+# Benvenuti su V-QUANT PRO
+
+V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
+
+La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF globali (come VWCE e VGGF) e singoli titoli azionari.
+
+Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
+
+## Cosa facciamo:
+- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
+- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
+- Strumenti di supporto decisionale basati su modelli matematici
+
+Sviluppato con passione da Innovative Program.
+""")
 
 elif choice == "Privacy & Cookie Policy":
-    st.sidebar.success("Sezione Privacy selezionata")
 
-elif choice == "Contatti":
-    st.sidebar.success("Sezione Contatti selezionata")
+    st.title("Privacy & Cookie Policy")
+
+    st.markdown("""
+## Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
+
+### 1. Titolare del Trattamento
+
+Il sito v-quantpro.it è gestito da Innovative Program.
+
+Per qualsiasi richiesta relativa ai tuoi dati, puoi contattarci all'indirizzo:
+
+innovativeprogram@proton.me
+
+### 2. Dati Raccolti
+
+L'applicazione non richiede la registrazione di dati sensibili.
+
+I dati relativi ai portafogli finanziari inseriti dagli utenti sono memorizzati in modo sicuro tramite il provider Supabase.
+
+Non vendiamo né cediamo dati personali a terze parti.
+
+### 3. Cookie e Pubblicità (Google AdSense)
+
+Questo sito utilizza Google AdSense per mostrare annunci pubblicitari.
+
+I fornitori di terze parti, tra cui Google, utilizzano i cookie per pubblicare annunci sulla base delle precedenti visite dell'utente a questo sito web o ad altri siti web.
+
+L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di pubblicare annunci per i tuoi utenti in base alla loro visita a questo sito e/o ad altri siti Internet.
+
+Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
+
+### 4. Sicurezza
+
+Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
+""")
