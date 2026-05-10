@@ -1,4 +1,4 @@
-# BurryInvestingPro
+# V-Quant Pro
 
 App Streamlit con analisi fondamentale, tecnica, quant e gestione portafoglio.
 
