@@ -1973,7 +1973,7 @@ Sviluppato con passione da Innovative Program.
     # =============================================================================
     # PRIVACY POLICY
     # =============================================================================
-    with st.sidebar.expander("🔒 Privacy & Cookie Policy", expanded=False):
+    with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
 
         st.markdown("""
 ### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
@@ -2019,7 +2019,7 @@ Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tr
     # Sostienici
     # =============================================================================    
     
-    with st.sidebar.expander("☕ Sostieni V-QUANT PRO", expanded=False):
+    with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
             
         st.markdown("""
         ### Perché una donazione?
