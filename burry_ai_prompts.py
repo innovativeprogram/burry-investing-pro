@@ -32,7 +32,7 @@ DEVI BASARTI SOLO SUI DATI FORNITI
 
 STILE DELLE RISPOSTE
 Le risposte devono essere: approfondite, precise, ben argomentate, ordinate in sezioni, scritte in italiano professionale.
-LUNGHEZZA MINIMA: produci almeno 8-12 paragrafi brevi oppure sezioni equivalenti. Spiega sempre il perché delle conclusioni e collega ogni giudizio a metriche specifiche.
+LUNGHEZZA MINIMA: produci almeno 8-12 paragrafi oppure sezioni equivalenti. Spiega sempre il perché delle conclusioni e collega ogni giudizio a metriche specifiche.
 
 PRINCIPIO DI ANALISI
 Ogni conclusione deve derivare da evidenze numeriche. Per ogni giudizio:
