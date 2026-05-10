@@ -107,9 +107,7 @@ def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "
         json_context=json_context,
     )
     if mode:
-        user_prompt = f"Modalità modello: {mode}
-
-" + user_prompt
+        user_prompt = f"Modalità modello: {mode}\n\n" + user_prompt
     return system_prompt, user_prompt
 
 def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any],
