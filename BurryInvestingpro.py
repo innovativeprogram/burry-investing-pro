@@ -318,14 +318,20 @@ st.set_page_config(
     layout="wide"
 )
 
-
-
-
 # ==========================================================================
 # MENU NAVIGAZIONE
 # ==========================================================================
-menu_options = ["Dashboard Portafoglio", "Download App Android", "Chi Siamo", "Privacy & Cookie Policy", "Contatti"]
+menu_options = [
+    "Dashboard Portafoglio",
+    "Download App Android",
+    "Chi Siamo",
+    "Privacy & Cookie Policy",
+    "Contatti"
+]
+
 choice = st.sidebar.selectbox("Navigazione", menu_options)
+
+
 
 
 # ==========================================================================
@@ -2926,72 +2932,17 @@ if __name__ == "__main__":
 
 
 # ==========================================================================
-# SEZIONI LEGALI / NAVIGAZIONE
+# PAGINE MENU
 # ==========================================================================
 
 if choice == "Download App Android":
-    st.title("📱 Download App Android")
-    st.markdown("Scarica l'app Android ufficiale di V-QUANT PRO.")
-
-    st.markdown("""
-    <a href="https://www.mediafire.com/" target="_blank">
-        <button style="background-color:#00cc66;color:white;padding:12px 24px;border:none;border-radius:10px;font-size:16px;cursor:pointer;">
-            📥 Scarica APK Android
-        </button>
-    </a>
-    """, unsafe_allow_html=True)
+    st.sidebar.success("Sezione Download selezionata")
 
 elif choice == "Chi Siamo":
-    st.title("ℹ️ Chi Siamo")
-
-    st.markdown("""
-    ## V-QUANT PRO
-
-    V-QUANT PRO è una piattaforma di analisi quantitativa e finanziaria sviluppata da Innovative Program.
-
-    Funzionalità principali:
-    - Analisi fondamentale
-    - Analisi tecnica
-    - Simulazioni Monte Carlo
-    - Portfolio management
-    - Analisi AI
-
-    Tutte le informazioni hanno finalità esclusivamente informative ed educative.
-    """)
+    st.sidebar.success("Sezione Chi Siamo selezionata")
 
 elif choice == "Privacy & Cookie Policy":
-    st.title("🔒 Privacy & Cookie Policy")
-
-    st.markdown("""
-    ## Privacy e Cookie Policy
-
-    Questa applicazione utilizza cookie tecnici e servizi di terze parti.
-
-    ### Google AdSense
-
-    Google e i partner pubblicitari possono utilizzare cookie per personalizzare gli annunci pubblicitari.
-
-    Gli utenti possono modificare le preferenze annunci tramite:
-    https://www.google.com/settings/ads
-
-    ### GDPR
-
-    In conformità al GDPR (Regolamento UE 2016/679), gli utenti possono richiedere:
-    - accesso ai dati
-    - modifica dei dati
-    - cancellazione dei dati
-
-    I dati vengono utilizzati esclusivamente per il funzionamento della piattaforma e per servizi pubblicitari.
-    """)
+    st.sidebar.success("Sezione Privacy selezionata")
 
 elif choice == "Contatti":
-    st.title("📧 Contatti")
-
-    st.markdown("""
-    ## Contatti
-
-    Innovative Program
-
-    Email:
-    innovativprogram@gmail.com
-    """)
+    st.sidebar.success("Sezione Contatti selezionata")
