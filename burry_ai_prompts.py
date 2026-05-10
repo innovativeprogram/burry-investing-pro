@@ -1,8 +1,3 @@
-"""
-Modulo dedicato ai prompt AI e alla logica di interazione con Gemini.
-Contiene system prompt, user prompt template e funzioni di contesto.
-"""
-
 import json
 import logging
 import os
@@ -11,10 +6,10 @@ import time
 from textwrap import dedent
 from typing import Any, Dict, List
 import streamlit as st
+import pandas as pd
 
 logger = logging.getLogger("BurryInvestingPro")
 
-# SYSTEM PROMPT - ESATTAMENTE COME ME LO HAI DATO
 SYSTEM_PROMPT = dedent("""
 Sei l'assistente AI interno di BurryInvestingPro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
 
@@ -42,14 +37,14 @@ PRINCIPIO DI ANALISI
 Ogni conclusione deve derivare da evidenze numeriche. Per ogni giudizio:
 1. cita la metrica rilevante; 2. spiega cosa misura; 3. interpreta il valore osservato; 4. collega alle implicazioni pratiche; 5. segnala eventuali limiti.
 
-QUANDO ANALIZZI UN SINGOLO TITOLO (Valuta se disponibili):
+QUANDO ANALIZI UN SINGOLO TITOLO (Valuta se disponibili):
 1) Qualità del business e fondamentali (ROIC, PEG, Debt/Equity, Revenue Growth, Net Margin, FCF Margin, Interest Coverage, Altman Z-Score).
 2) Profilo quantitativo e rischio-rendimento (Sharpe, Sortino, Calmar, CAGR, Max Drawdown, Volatilità, VaR/CVaR, Skew, Kurtosis, R-Squared).
 3) Timing e analisi tecnica (Timing Score, SMA50/200, RSI, MACD, Bollinger).
 4) Esito sintetico: integra fondamentali, timing e quant. Segnala i segnali contrastanti.
 5) Limiti dell'analisi: cosa suggeriscono i dati e cosa NON possono garantire.
 
-QUANDO ANALIZZI UN PORTAFOGLIO (Valuta se disponibili):
+QUANDO ANALIZI UN PORTAFOGLIO (Valuta se disponibili):
 1) Struttura (pesi, asset class, geografia, valuta).
 2) Metriche aggregate (Rendimento, Volatilità, Sharpe, Beta, Alpha, Correlazione).
 3) Concentrazione (HHI, ENS, Top1/Top3).
@@ -71,7 +66,6 @@ FORMATO STANDARD DELLA RISPOSTA
 8. Conclusione operativa prudente
 """).strip()
 
-# USER PROMPT TEMPLATE - ESATTAMENTE COME ME LO HAI DATO
 USER_PROMPT_TEMPLATE = dedent("""
 Analizza il seguente contesto prodotto dall'app.
 
@@ -92,7 +86,6 @@ CONTESTO APP:
 """).strip()
 
 def safe_get_secret(key: str, default=None):
-    """Recupero sicuro di secrets da env o st.secrets."""
     env_val = os.getenv(key)
     if env_val:
         return env_val.strip()
@@ -105,7 +98,6 @@ def safe_get_secret(key: str, default=None):
     return default
 
 def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> tuple[str, str]:
-    """Costruisce system e user message per l'AI."""
     json_context = json.dumps(context, ensure_ascii=False, default=str, indent=2)
     system_prompt = SYSTEM_PROMPT
     user_prompt = USER_PROMPT_TEMPLATE.format(
@@ -118,23 +110,12 @@ def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "
 " + user_prompt
     return system_prompt, user_prompt
 
-def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any], score: float, reasons: List[str], mode: str) -> Dict[str, Any]:
-    """[FUNZIONE ORIGINALE - COPIATA DAL FILE PRINCIPALE]"""
-    # ... qui va la logica originale della funzione ...
-    pass
+# FUNZIONI DUMMY - SOSTITUISCI CON LA TUA LOGICA ORIGINALE
+def build_ai_context_for_ticker(ticker: str, row, qm: Dict[str, Any], risk: Dict[str, Any], score: float, reasons: List[str], mode: str) -> Dict[str, Any]:
+    return {"ticker": ticker, "mode": mode, "score": score, "reasons": reasons}
 
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
-    """Chiama Gemini con i prompt separati."""
-    apikey = safe_get_secret("GEMINI_API_KEY", None)
-    if not apikey:
-        return "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets."
-    
-    system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-    
-    # ... resto della logica originale per chiamare Gemini ...
-    pass
+    return f"AI risposta demo per {context.get('ticker', 'N/A')}: {user_question}"
 
 def build_burry_ai_context(symbol: str, assettype: str, mode: str = "Entrambi") -> Dict[str, Any]:
-    """[FUNZIONE ORIGINALE - COPIATA DAL FILE PRINCIPALE]"""
-    # ... qui va la logica originale della funzione ...
-    pass
+    return {"symbol": symbol, "assettype": assettype, "mode": mode}
