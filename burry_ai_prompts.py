@@ -7,6 +7,7 @@ from textwrap import dedent
 from typing import Any, Dict, List
 
 import streamlit as st
+import pandas as pd
 
 logger = logging.getLogger("BurryInvestingPro")
 
