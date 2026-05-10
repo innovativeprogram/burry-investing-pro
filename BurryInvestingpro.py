@@ -17,15 +17,13 @@ la tabella Supabase 'portfoliopositions'.
 import streamlit as st
 import yfinance as yf
 import requests
-from yahooquery import Ticker as YQ_Ticker
+from yahooquery import Ticker as YQTicker
 import pandas as pd
 import numpy as np
-
 try:
-    import pandas_ta as ta
+    import pandasta as ta
 except Exception:
     ta = None
-
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -37,13 +35,23 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
+
+# IMPORT AI DEDICATO - SPOSATO DAL FILE ORIGINALE
 from burry_ai_prompts import (
-    build_ai_context_for_ticker,
-    ask_gemini_ticker_chat,
-    build_burry_ai_context,
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
+    build_ai_messages,
+    ask_gemini_ticker_chat,
+    build_burry_ai_context,
+    build_ai_context_for_ticker
 )
+
+# [TUTTA LA LOGICA ORIGINALE DEL FILE RIMANE IDENTICA]
+# ... resto del codice del file originale senza le funzioni AI ...
+
+# Dove prima c'era la logica AI inline, ora basta chiamare:
+# aicontext = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
+# aianswer = ask_gemini_ticker_chat(aicontext, "Spiegami questo titolo", mode)
 
 
 # ==========================================================================
