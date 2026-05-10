@@ -4,15 +4,6 @@
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 
-Tutti i punti di modifica sono marcati con tag:
-  [BUGFIX]    -> correzione di errore esistente
-  [SECURITY]  -> miglioramento di sicurezza
-  [REFACTOR]  -> riorganizzazione tecnica senza cambio di logica
-  [NEW]       -> funzionalita' aggiunta
-  [FIN-FIX]   -> correzione di logica finanziaria
-
-Il file mantiene la compatibilita' con la struttura UI originale e con
-la tabella Supabase 'portfoliopositions'.
 """
 
 import streamlit as st
@@ -1962,7 +1953,7 @@ def setup_sidebar() -> Dict[str, Any]:
 
 V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
 
-La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF globali (come VWCE e VGGF) e singoli titoli azionari.
+La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF , Crypto e singoli titoli azionari ed obbligazionari.
 
 Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
 
