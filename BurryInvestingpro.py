@@ -1972,7 +1972,8 @@ Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabi
 - Strumenti di supporto decisionale basati su modelli matematici
 
 ### ⚠️ Disclaimer Legale
-        V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
+
+V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
 
 Sviluppato con passione da Innovative Program.
 
@@ -2013,7 +2014,8 @@ L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di 
 Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
 
 #### 4. Esclusione di Responsabilità
-        V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
+
+V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
 
 #### 5. Sicurezza
 
