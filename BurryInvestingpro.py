@@ -37,6 +37,7 @@ from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 
 # IMPORT AI DEDICATO - SPOSATO DAL FILE ORIGINALE
+# from burry_ai_prompts import (
 from burry_ai_prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
