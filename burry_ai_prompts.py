@@ -118,4 +118,4 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
     return f"AI risposta demo per {context.get('ticker', 'N/A')}: {user_question}"
 
 def build_burry_ai_context(symbol: str, assettype: str, mode: str = "Entrambi") -> Dict[str, Any]:
-    return {"symbol": symbol, "assettype": assettype, "mode": mode} 
+    return {"symbol": symbol, "assettype": assettype, "mode": mode}
