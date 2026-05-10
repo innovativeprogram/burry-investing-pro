@@ -135,8 +135,8 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
         'risk': risk or {},
     }
 
-def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = 'Entrambi') -> str:
-    """[NEW] Wrapper robusto con retry/backoff e fallback modello."""
+def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
+    """Wrapper robusto con retry/backoff e fallback modello."""
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
@@ -145,29 +145,14 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
         )
 
-    import json
-    import time
-    import random
-
     try:
         from google import genai
         from google.genai.types import GenerateContentConfig
 
         client = genai.Client(api_key=api_key)
-        prompt = (
-            "Sei BurryAI, un analista finanziario AI integrato in una app Streamlit. "
-            "Usa solo i dati forniti nel contesto e la logica del programma, non inventare dati mancanti. "
-            "Rispondi in italiano in modo chiaro e sintetico, con sezioni: "
-            "Sintesi, Punti di forza, Rischi, Lettura del timing, Limiti dei dati.\n\n"
-            f"Modalità modello: {mode}\n"
-            f"Contesto JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
-            f"Domanda utente: {user_question}"
-        )
+        system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
 
-        candidate_models = [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-        ]
+        candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
         last_error = None
 
         for model_name in candidate_models:
@@ -176,10 +161,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                     resp = client.models.generate_content(
                         model=model_name,
                         contents=[system_prompt, user_prompt],
-                        config=GenerateContentConfig(
-                            temperature=0.2,
-                            max_output_tokens=900,
-                        ),
+                        config=GenerateContentConfig(temperature=0.2, max_output_tokens=1400),
                     )
                     answer = getattr(resp, "text", None)
                     if answer and answer.strip():
@@ -195,11 +177,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                         continue
                     break
 
-        return (
-            "Servizio AI temporaneamente occupato. "
-            "Riprova tra poco. Ultimo dettaglio tecnico: "
-            f"{last_error}"
-        )
+        return "Servizio AI temporaneamente occupato. Riprova tra poco. Ultimo dettaglio tecnico: " + str(last_error)
     except Exception as e:
         logger.warning(f"Errore AI Gemini: {e}")
         return f"Errore AI: {e}"
