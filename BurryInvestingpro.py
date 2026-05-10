@@ -313,6 +313,16 @@ def calculate_tax_with_loss_offset(
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(
+
+menu_options = [
+    "Dashboard Portafoglio",
+    "Download App Android",
+    "Chi Siamo",
+    "Privacy & Cookie Policy",
+    "Contatti"
+]
+
+choice = st.sidebar.selectbox("Navigazione", menu_options)
     page_title="V-Quant Pro",
     page_icon="💲",
     layout="wide"
@@ -1839,69 +1849,7 @@ def compute_rebalancing_actions(
 # ==========================================================================
 # 6. UI: SIDEBAR
 # ==========================================================================
-def render_apk_download_box():
-
-    # =============================================================================
-    # CHI SIAMO
-    # =============================================================================
-    with st.sidebar.expander("ℹ️ Chi Siamo", expanded=False):
-
-        st.markdown("""
-### Benvenuti su V-QUANT PRO
-
-V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
-
-La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF globali (come VWCE e VGGF) e singoli titoli azionari.
-
-Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
-
-### Cosa facciamo:
-- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
-- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
-- Strumenti di supporto decisionale basati su modelli matematici
-
-Sviluppato con passione da Innovative Program.
-        """)
-
-    # =============================================================================
-    # PRIVACY POLICY
-    # =============================================================================
-    with st.sidebar.expander("🔒 Privacy & Cookie Policy", expanded=False):
-
-        st.markdown("""
-### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
-
-#### 1. Titolare del Trattamento
-
-Il sito v-quantpro.it è gestito da Innovative Program.
-
-Per qualsiasi richiesta relativa ai tuoi dati, puoi contattarci all'indirizzo:
-
-innovativeprogram@proton.me
-
-#### 2. Dati Raccolti
-
-L'applicazione non richiede la registrazione di dati sensibili.
-
-I dati relativi ai portafogli finanziari inseriti dagli utenti sono memorizzati in modo sicuro tramite il provider Supabase.
-
-Non vendiamo né cediamo dati personali a terze parti.
-
-#### 3. Cookie e Pubblicità (Google AdSense)
-
-Questo sito utilizza Google AdSense per mostrare annunci pubblicitari.
-
-I fornitori di terze parti, tra cui Google, utilizzano i cookie per pubblicare annunci sulla base delle precedenti visite dell'utente a questo sito web o ad altri siti web.
-
-L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di pubblicare annunci per i tuoi utenti in base alla loro visita a questo sito e/o ad altri siti Internet.
-
-Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
-
-#### 4. Sicurezza
-
-Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
-        """)
- -> None:
+def render_apk_download_box() -> None:
     with st.sidebar.expander("Download App Android (APK)", expanded=False):
         st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
         st.link_button(
@@ -2976,3 +2924,67 @@ def main():
 if __name__ == "__main__":
     main()
   
+
+
+# =============================================================================
+# NUOVE SEZIONI SIDEBAR
+# =============================================================================
+
+elif choice == "Chi Siamo":
+
+    st.title("Chi Siamo")
+
+    st.markdown("""
+# Benvenuti su V-QUANT PRO
+
+V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
+
+La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF globali (come VWCE e VGGF) e singoli titoli azionari.
+
+Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
+
+## Cosa facciamo:
+- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
+- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
+- Strumenti di supporto decisionale basati su modelli matematici
+
+Sviluppato con passione da Innovative Program.
+""")
+
+elif choice == "Privacy & Cookie Policy":
+
+    st.title("Privacy & Cookie Policy")
+
+    st.markdown("""
+## Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
+
+### 1. Titolare del Trattamento
+
+Il sito v-quantpro.it è gestito da Innovative Program.
+
+Per qualsiasi richiesta relativa ai tuoi dati, puoi contattarci all'indirizzo:
+
+innovativeprogram@proton.me
+
+### 2. Dati Raccolti
+
+L'applicazione non richiede la registrazione di dati sensibili.
+
+I dati relativi ai portafogli finanziari inseriti dagli utenti sono memorizzati in modo sicuro tramite il provider Supabase.
+
+Non vendiamo né cediamo dati personali a terze parti.
+
+### 3. Cookie e Pubblicità (Google AdSense)
+
+Questo sito utilizza Google AdSense per mostrare annunci pubblicitari.
+
+I fornitori di terze parti, tra cui Google, utilizzano i cookie per pubblicare annunci sulla base delle precedenti visite dell'utente a questo sito web o ad altri siti web.
+
+L'utilizzo dei cookie per la pubblicità consente a Google e ai suoi partner di pubblicare annunci per i tuoi utenti in base alla loro visita a questo sito e/o ad altri siti Internet.
+
+Gli utenti possono scegliere di disattivare la pubblicità personalizzata visitando la pagina Impostazioni annunci di Google.
+
+### 4. Sicurezza
+
+Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
+""")
