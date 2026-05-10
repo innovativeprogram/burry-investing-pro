@@ -313,7 +313,16 @@ def calculate_tax_with_loss_offset(
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(
+    page_title="V-Quant Pro",
+    page_icon="💲",
+    layout="wide"
+)
 
+
+
+# =============================================================================
+# MENU SIDEBAR
+# =============================================================================
 menu_options = [
     "Dashboard Portafoglio",
     "Download App Android",
@@ -323,11 +332,6 @@ menu_options = [
 ]
 
 choice = st.sidebar.selectbox("Navigazione", menu_options)
-    page_title="V-Quant Pro",
-    page_icon="💲",
-    layout="wide"
-)
-
 
 # ==========================================================================
 # 0.D AUTH SUPABASE  [SECURITY]
@@ -2930,7 +2934,7 @@ if __name__ == "__main__":
 # NUOVE SEZIONI SIDEBAR
 # =============================================================================
 
-elif choice == "Chi Siamo":
+if choice == "Chi Siamo":
 
     st.title("Chi Siamo")
 
@@ -2950,6 +2954,7 @@ Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabi
 
 Sviluppato con passione da Innovative Program.
 """)
+
 
 elif choice == "Privacy & Cookie Policy":
 
