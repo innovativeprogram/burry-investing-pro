@@ -4,15 +4,6 @@
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 
-Tutti i punti di modifica sono marcati con tag:
-  [BUGFIX]    -> correzione di errore esistente
-  [SECURITY]  -> miglioramento di sicurezza
-  [REFACTOR]  -> riorganizzazione tecnica senza cambio di logica
-  [NEW]       -> funzionalita' aggiunta
-  [FIN-FIX]   -> correzione di logica finanziaria
-
-Il file mantiene la compatibilita' con la struttura UI originale e con
-la tabella Supabase 'portfoliopositions'.
 """
 
 import streamlit as st
@@ -313,7 +304,16 @@ def calculate_tax_with_loss_offset(
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(
+    page_title="V-Quant Pro",
+    page_icon="💲",
+    layout="wide"
+)
 
+
+
+# =============================================================================
+# MENU SIDEBAR
+# =============================================================================
 menu_options = [
     "Dashboard Portafoglio",
     "Download App Android",
@@ -323,11 +323,6 @@ menu_options = [
 ]
 
 choice = st.sidebar.selectbox("Navigazione", menu_options)
-    page_title="V-Quant Pro",
-    page_icon="💲",
-    layout="wide"
-)
-
 
 # ==========================================================================
 # 0.D AUTH SUPABASE  [SECURITY]
@@ -2930,7 +2925,7 @@ if __name__ == "__main__":
 # NUOVE SEZIONI SIDEBAR
 # =============================================================================
 
-elif choice == "Chi Siamo":
+if choice == "Chi Siamo":
 
     st.title("Chi Siamo")
 
@@ -2950,6 +2945,7 @@ Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabi
 
 Sviluppato con passione da Innovative Program.
 """)
+
 
 elif choice == "Privacy & Cookie Policy":
 
