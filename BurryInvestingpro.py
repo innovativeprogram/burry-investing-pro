@@ -2019,8 +2019,8 @@ Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tr
     # Sostienici
     # =============================================================================    
     
-            elif choice == "Sostieni il Progetto":
-        st.title("☕ Sostieni V-QUANT PRO")
+    with st.sidebar.expander("☕ Sostieni V-QUANT PRO", expanded=False):
+            
         st.markdown("""
         ### Perché una donazione?
         V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
