@@ -313,8 +313,8 @@ def calculate_tax_with_loss_offset(
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(
-    page_title="BurryInvestingPro",
-    page_icon="💎",
+    page_title="V-Quant Pro",
+    page_icon="💲",
     layout="wide"
 )
 
@@ -1843,7 +1843,7 @@ def render_apk_download_box() -> None:
     with st.sidebar.expander("Download App Android (APK)", expanded=False):
         st.write("Scarica l'APK ufficiale di BurryInvestingPro per installare l'app su Android.")
         st.link_button(
-            "📲 Scarica Burryinvestingpro.apk",
+            "📲 Scarica V-Quant Pro.apk",
             "https://github.com/innovativeprogram/Burryinvestingpro-release/releases/latest/download/Burryinvestingpro.apk",
             width='stretch'
         )
@@ -2051,7 +2051,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
 def main():
     init_auth_state()
     _init_session_state()
-    st.title("💎 BurryInvestingPro")
+    st.title("💲 V-Quant Pro")
     inject_pwa_support()
 
     ui = setup_sidebar()
