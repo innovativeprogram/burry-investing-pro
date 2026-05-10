@@ -1,7 +1,8 @@
 """
-BurryInvestingPro - VERSIONE REVISIONATA (rev. 2026-05)
-========================================================
-Versione corretta e potenziata del file BurryInvestingpro.py.
+# Copyright (c) 2026 InnovativeProgram
+# Tutti i diritti riservati. 
+# Proprietà intellettuale di [Canio Tedesco].
+# La copia o distribuzione non autorizzata è severamente vietata.
 
 Tutti i punti di modifica sono marcati con tag:
   [BUGFIX]    -> correzione di errore esistente
