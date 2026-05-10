@@ -38,23 +38,15 @@ from supabase import create_client, Client
 
 # AI Module - FUNZIONA AUTOMATICAMENTE
 try:
-    from burry_ai_prompts import (
-        build_ai_context_for_ticker,
-        ask_gemini_ticker_chat, 
-        build_burry_ai_context
-    )
+    # AI Module disabilitato temporaneamente - aggiungi burry_ai_prompts.py dopo
+try:
+    from burry_ai_prompts import build_ai_context_for_ticker, ask_gemini_ticker_chat, build_burry_ai_context
     AI_AVAILABLE = True
 except ImportError:
     AI_AVAILABLE = False
     def build_ai_context_for_ticker(*args, **kwargs): return {}
-    def ask_gemini_ticker_chat(*args, **kwargs): return "AI non disponibile - carica burry_ai_prompts.py"
+    def ask_gemini_ticker_chat(*args, **kwargs): return "AI disponibile dopo caricamento burry_ai_prompts.py"
     def build_burry_ai_context(*args, **kwargs): return {}
-
-# [IL RESTO DEL TUO CODICE ORIGINALE RIMANE IDENTICO]
-# Costanti e funzioni originali...
-DEFAULT_TAX_RATE = 0.26
-# ... continua con tutto il resto del tuo codice originale fino alla fine)
-
 
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
