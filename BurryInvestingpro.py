@@ -2910,99 +2910,91 @@ def main():
         st.markdown("---")
         st.markdown("creato e sviluppato da Innovative Program", unsafe_allow_html=True)
 
+
+if __name__ == "__main__":
+    main()
+  
+
+
+# ==========================================================================
+# SEZIONI LEGALI / NAVIGAZIONE
+# ==========================================================================
+
 if choice == "Download App Android":
     st.title("📱 Download App Android")
+
     st.markdown("""
-    Scarica l'APK ufficiale di V-QUANT PRO per Android utilizzando il link qui sotto.
+    Scarica l'app Android ufficiale di V-QUANT PRO.
     """)
 
-    # Mantiene il link APK esistente
     st.markdown("""
-    <a href="https://www.mediafire.com/file/REPLACE_WITH_CURRENT_APK_LINK/app-release.apk/file" target="_blank">
+    <a href="https://www.mediafire.com/" target="_blank">
         <button style="background-color:#00cc66;color:white;padding:12px 24px;border:none;border-radius:10px;font-size:16px;cursor:pointer;">
             📥 Scarica APK Android
         </button>
     </a>
     """, unsafe_allow_html=True)
 
+
 if choice == "Chi Siamo":
     st.title("ℹ️ Chi Siamo")
+
     st.markdown("""
     ## V-QUANT PRO
 
     V-QUANT PRO è una piattaforma avanzata di analisi quantitativa e finanziaria sviluppata da Innovative Program.
 
-    L'obiettivo del progetto è fornire strumenti professionali per:
-
-    - Analisi fondamentale avanzata
-    - Analisi quantitativa e statistica
+    La piattaforma integra strumenti di:
+    - Analisi fondamentale
+    - Analisi tecnica
+    - Analisi quantitativa
     - Simulazioni Monte Carlo
-    - Analisi tecnica multi-indicatore
     - Portfolio management
-    - Valutazione del rischio
-    - Ottimizzazione del portafoglio
+    - Analisi AI
 
-    La piattaforma integra dati finanziari in tempo reale, algoritmi quantitativi e strumenti AI per supportare investitori, trader e appassionati di finanza.
-
-    Tutte le analisi fornite hanno esclusivamente scopo informativo ed educativo e non costituiscono consulenza finanziaria.
+    Tutti i contenuti hanno finalità esclusivamente informative ed educative.
     """)
+
 
 if choice == "Privacy & Cookie Policy":
     st.title("🔒 Privacy & Cookie Policy")
+
     st.markdown("""
     ## Informativa Privacy e Cookie Policy
 
-    Questa applicazione utilizza cookie tecnici e servizi di terze parti per migliorare l'esperienza utente e monitorare il traffico.
+    Questa applicazione può utilizzare cookie tecnici e servizi di terze parti.
 
     ### Google AdSense
 
-    Questo sito/app potrebbe utilizzare Google AdSense per la pubblicazione di annunci pubblicitari.
+    Google e i suoi partner possono utilizzare cookie pubblicitari per personalizzare gli annunci mostrati agli utenti.
 
-    Google e i suoi partner possono utilizzare cookie per personalizzare gli annunci in base alle visite precedenti degli utenti a questo o ad altri siti web.
-
-    L'utilizzo dei cookie pubblicitari consente a Google e ai suoi partner di mostrare annunci personalizzati in base alla navigazione degli utenti.
-
-    Gli utenti possono disattivare la pubblicità personalizzata visitando:
-
+    Gli utenti possono gestire le preferenze pubblicitarie visitando:
     https://www.google.com/settings/ads
-
-    ### Dati Raccolti
-
-    L'applicazione può raccogliere:
-
-    - Dati tecnici di navigazione
-    - Cookie tecnici
-    - Indirizzi IP anonimizzati
-    - Preferenze utente
-    - Dati inseriti volontariamente dall'utente
-
-    ### Finalità del trattamento
-
-    I dati vengono utilizzati esclusivamente per:
-
-    - Funzionamento della piattaforma
-    - Sicurezza e monitoraggio
-    - Analisi statistiche aggregate
-    - Miglioramento del servizio
-    - Pubblicità tramite Google AdSense
 
     ### GDPR
 
     In conformità al Regolamento UE 2016/679 (GDPR), gli utenti possono richiedere:
+    - accesso ai dati
+    - modifica dei dati
+    - cancellazione dei dati
+    - limitazione del trattamento
 
-    - Accesso ai dati
-    - Modifica dei dati
-    - Cancellazione dei dati
-    - Limitazione del trattamento
-
-    Per richieste relative alla privacy è possibile contattare gli sviluppatori tramite la sezione Contatti.
+    I dati vengono utilizzati esclusivamente per:
+    - funzionamento della piattaforma
+    - statistiche aggregate
+    - sicurezza
+    - pubblicità tramite Google AdSense
     """)
+
 
 if choice == "Contatti":
     st.title("📧 Contatti")
 
+    st.markdown("""
+    ## Contatti
 
+    Innovative Program
 
-if __name__ == "__main__":
-    main()
-  
+    Supporto:
+    innovativprogram@gmail.com
+    """)
