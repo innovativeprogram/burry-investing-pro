@@ -1,0 +1,15 @@
+name: Keep-Alive
+
+on:
+  schedule:
+    # Esegue il job ogni 5 ore (0, 5, 10, 15, 20, ecc.)
+    - cron: '0 */5 * * *'
+  workflow_dispatch: 
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the app
+        run: curl -I https://vquantpro.streamlit.app/
+        
