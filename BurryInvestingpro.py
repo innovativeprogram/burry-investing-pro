@@ -1,8 +1,6 @@
 """
-# Copyright (c) 2026 InnovativeProgram
-# Tutti i diritti riservati. 
-# Proprietà intellettuale di [Canio Tedesco].
-# La copia o distribuzione non autorizzata è severamente vietata.
+V-Quant Pro v3.0 - Analisi universale: Azioni, ETF, Obbligazioni, Crypto, Commodity
+Copyright (c) 2026 InnovativeProgram
 """
 
 import streamlit as st
@@ -11,41 +9,26 @@ import requests
 from yahooquery import Ticker as YQ_Ticker
 import pandas as pd
 import numpy as np
-
-try:
-    import pandas_ta as ta
-except Exception:
-    ta = None
-
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
 import logging
 import os
-import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Tuple, List, Union
+from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
-from burry_ai_prompts import (  # Manteniamo il nome originale del modulo per compatibilità
-    build_ai_context_for_ticker,
-    ask_gemini_ticker_chat,
-    build_burry_ai_context,
-    SYSTEM_PROMPT,
-    USER_PROMPT_TEMPLATE,
-)
 
-# ==========================================================================
-# 0. SETUP LOGGING & COSTANTI GLOBALI
-# ==========================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("VqQuantPro")  # Rinominato
+try:
+    import pandas_ta as ta
+except ImportError:
+    ta = None
 
-# Costanti finanziarie
+# ---------------------------- COSTANTI ---------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("VqQuantPro")
+
 DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 100.0
 TRADING_DAYS_YEAR = 252
@@ -55,289 +38,213 @@ DEFAULT_RISK_FREE_RATE = 0.04
 FX_TTL_SECONDS = 3600
 RISK_FREE_TTL_SECONDS = 6 * 3600
 ALTMAN_SAFE_THRESHOLD = 1.81
-
 DEFAULT_BENCHMARK = "^GSPC"
 DEFAULT_SMART_WEIGHTS = {"F": 0.40, "T": 0.30, "Q": 0.30}
 TAX_LOSS_COMPENSATION_YEARS = 4
 
-# ==========================================================================
-# 0.A SAFE SECRETS / CONFIG ACCESS [SECURITY]
-# ==========================================================================
+# DCF & value
+DEFAULT_EQUITY_RISK_PREMIUM = 0.05
+DEFAULT_STAGE1_GROWTH = 0.05
+DEFAULT_STAGE2_GROWTH = 0.02
+DEFAULT_STAGE1_YEARS = 5
+
+# Bond / ETF / Crypto
+DEFAULT_ETF_TER_THRESHOLD = 0.002
+DEFAULT_ETF_TRACKING_ERROR_THRESHOLD = 0.01
+CRYPTO_SENTIMENT_API = "https://api.alternative.me/fng/?limit=1"
+
+# ---------------------------- SAFE SECRETS ---------------------------------
 def safe_get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     env_val = os.getenv(key)
     if env_val:
         return env_val.strip()
     try:
         if key in st.secrets:
-            val = st.secrets[key]
-            return str(val).strip() if val is not None else default
+            return str(st.secrets[key]).strip()
     except Exception:
         pass
     return default
 
-POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
+POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY")
 
-# ==========================================================================
-# 0.B PRICE / FX / RISK-FREE PROVIDERS (BUGFIX)
-# ==========================================================================
+# ---------------------------- PRICE & FX & RISK-FREE -------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def get_current_price_safe(ticker_symbol: str) -> float:
     symbol = (ticker_symbol or "").upper().strip()
     if not symbol:
         return 0.0
-
     if POLYGON_API_KEY and "." not in symbol and "-" not in symbol:
         try:
             url = f"https://api.polygon.io/v2/last/trade/{symbol}?apiKey={POLYGON_API_KEY}"
             resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "OK" and "results" in data:
-                    p = data["results"].get("p")
-                    if p is not None:
-                        return float(p)
-        except (requests.RequestException, ValueError, KeyError) as e:
-            logger.debug(f"Polygon price fallback for {symbol}: {e}")
-
-    try:
-        yq = YQ_Ticker(symbol)
-        price_data = yq.price.get(symbol, {}) if isinstance(yq.price, dict) else {}
-        if isinstance(price_data, dict):
-            p = price_data.get('regularMarketPrice') or price_data.get('preMarketPrice')
+            if resp.status_code == 200 and resp.json().get("status") == "OK":
+                p = resp.json().get("results", {}).get("p")
+                if p is not None:
+                    return float(p)
+        except Exception:
+            pass
+    for fallback in [YQ_Ticker, yf.Ticker]:
+        try:
+            if fallback == YQ_Ticker:
+                yq = YQ_Ticker(symbol)
+                price_data = yq.price.get(symbol, {})
+                p = price_data.get('regularMarketPrice') or price_data.get('preMarketPrice')
+            else:
+                p = fallback(symbol).fast_info['last_price']
             if p is not None:
                 return float(p)
-    except Exception as e:
-        logger.debug(f"YahooQuery price fallback for {symbol}: {e}")
-
-    try:
-        t = yf.Ticker(symbol)
-        return float(t.fast_info['last_price'])
-    except Exception as e:
-        logger.debug(f"yfinance price fallback for {symbol}: {e}")
-        return 0.0
+        except Exception:
+            continue
+    return 0.0
 
 @st.cache_data(ttl=FX_TTL_SECONDS, show_spinner=False)
 def get_fx_rate(from_currency: str, to_currency: str) -> float:
     try:
-        f = str(from_currency or "").upper().strip()
-        t = str(to_currency or "").upper().strip()
+        f = (from_currency or "").upper().strip()
+        t = (to_currency or "").upper().strip()
         if not f or not t or f == t:
             return 1.0
-
-        direct = yf.Ticker(f"{f}{t}=X").history(period="5d", interval="1d")
-        if direct is not None and not direct.empty and 'Close' in direct.columns:
-            s = direct['Close'].dropna()
-            if not s.empty:
-                return float(s.iloc[-1])
-
-        inverse = yf.Ticker(f"{t}{f}=X").history(period="5d", interval="1d")
-        if inverse is not None and not inverse.empty and 'Close' in inverse.columns:
-            s = inverse['Close'].dropna()
-            if not s.empty and float(s.iloc[-1]) != 0:
-                return float(1.0 / float(s.iloc[-1]))
-    except Exception as e:
-        logger.warning(f"FX fallback {from_currency}->{to_currency}: {e}")
+        direct = yf.Ticker(f"{f}{t}=X").history(period="5d")
+        if not direct.empty and 'Close' in direct:
+            val = direct['Close'].dropna().iloc[-1]
+            if val != 0:
+                return float(val)
+        inverse = yf.Ticker(f"{t}{f}=X").history(period="5d")
+        if not inverse.empty and 'Close' in inverse:
+            val = inverse['Close'].dropna().iloc[-1]
+            if val != 0:
+                return float(1.0 / val)
+    except Exception:
+        pass
     return 1.0
 
 @st.cache_data(ttl=RISK_FREE_TTL_SECONDS, show_spinner=False)
 def get_dynamic_risk_free_rate() -> float:
     try:
         irx = yf.Ticker("^IRX").history(period="5d")
-        if irx is not None and not irx.empty and 'Close' in irx.columns:
-            last = irx['Close'].dropna()
-            if not last.empty:
-                rf_pct = float(last.iloc[-1])
-                if 0 <= rf_pct <= 15:
-                    return rf_pct / 100.0
-    except Exception as e:
-        logger.info(f"Risk-free dinamico non disponibile, uso default: {e}")
+        if not irx.empty and 'Close' in irx:
+            last = irx['Close'].dropna().iloc[-1]
+            if 0 <= last <= 15:
+                return last / 100.0
+    except Exception:
+        pass
     return DEFAULT_RISK_FREE_RATE
 
 def get_active_risk_free_rate() -> float:
-    try:
-        override = st.session_state.get("risk_free_override")
-        if override is not None:
-            return float(override)
-    except Exception:
-        pass
+    override = st.session_state.get("risk_free_override")
+    if override is not None:
+        return float(override)
     return get_dynamic_risk_free_rate()
 
-# ==========================================================================
-# 0.C PORTFOLIO FX & TAX
-# ==========================================================================
-def enrich_portfolio_with_fx(df_weights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
-    if df_weights is None or df_weights.empty:
-        return pd.DataFrame()
-    out = df_weights.copy()
-    base = str(base_currency or "EUR").upper().strip()
-    out["Valuta Base"] = base
-    out["FX Rate"] = out["Valuta"].apply(lambda c: float(get_fx_rate(c, base)))
-    out["Importo Investito Base"] = out["Importo Investito"].astype(float) * out["FX Rate"]
-    out["Valore di Mercato Base"] = out["Valore di Mercato"].astype(float) * out["FX Rate"]
-    out["P&L Base"] = out["P&L"].astype(float) * out["FX Rate"]
-    total_base_mv = float(out["Valore di Mercato Base"].sum())
-    out["Peso Base %"] = np.where(total_base_mv > 0, out["Valore di Mercato Base"] / total_base_mv * 100.0, 0.0)
-    return out
+# ---------------------------- AUTH SUPABASE (semplificata ma funzionante) -----------------
+def init_auth_state():
+    for key in ['auth_user', 'auth_session', 'auth_error']:
+        if key not in st.session_state:
+            st.session_state[key] = None
 
-def calculate_tax_impact_df_base(df_weights_base: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> pd.DataFrame:
-    if df_weights_base is None or df_weights_base.empty:
-        return pd.DataFrame()
-    df_tax = df_weights_base.copy()
-    df_tax["Aliquota Fiscale %"] = tax_rate * 100.0
-    df_tax["Plus/Minus Lorda Base"] = df_tax["P&L Base"].astype(float)
-    df_tax["Imposta Teorica Base"] = np.where(df_tax["Plus/Minus Lorda Base"] > 0, df_tax["Plus/Minus Lorda Base"] * tax_rate, 0.0)
-    df_tax["Plus/Minus Netta Base"] = df_tax["Plus/Minus Lorda Base"] - df_tax["Imposta Teorica Base"]
-    df_tax["Valore Netto Post Imposta Base"] = df_tax["Valore di Mercato Base"] - df_tax["Imposta Teorica Base"]
-    df_tax["Rendimento Netto Base %"] = np.where(df_tax["Importo Investito Base"] > 0, df_tax["Plus/Minus Netta Base"] / df_tax["Importo Investito Base"] * 100.0, 0.0)
-    return df_tax
-
-def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    if df_weights_base is None or df_weights_base.empty:
-        return pd.DataFrame(), {}
-    df = df_weights_base.copy()
-    pl_lorda = df["P&L Base"].astype(float)
-    gains = pl_lorda.clip(lower=0).sum()
-    losses = (-pl_lorda.clip(upper=0)).sum()
-    compensable = min(gains, losses)
-    taxable_base = max(0.0, gains - compensable)
-    theoretical_tax = taxable_base * tax_rate
-    df["Aliquota Fiscale %"] = tax_rate * 100.0
-    df["Plus/Minus Lorda Base"] = pl_lorda
-    df["Imposta Teorica Base (compensata)"] = np.where(pl_lorda > 0, np.where(gains > 0, pl_lorda / gains * theoretical_tax, 0.0), 0.0)
-    summary = {
-        "Plusvalenze totali": float(gains),
-        "Minusvalenze totali": float(losses),
-        "Minusvalenze compensate": float(compensable),
-        "Imponibile residuo": float(taxable_base),
-        "Imposta teorica netta": float(theoretical_tax),
-        "Risparmio fiscale da compensazione": float(compensable * tax_rate),
-    }
-    return df, summary
-
-# ==========================================================================
-# CONFIGURAZIONE PAGINA UI
-# ==========================================================================
-st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide")
-
-# ==========================================================================
-# 0.D AUTH SUPABASE [SECURITY]
-# ==========================================================================
-def get_app_base_url() -> str:
-    candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
-    for c in candidates:
-        if c and str(c).strip().startswith(('http://', 'https://')):
-            return str(c).strip().rstrip('/')
-    return 'http://localhost:8501'
-
-def get_email_redirect_url() -> str:
-    return get_app_base_url()
-
-def get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
-    url = safe_get_secret('SUPABASE_URL')
-    key = safe_get_secret('SUPABASE_ANON_KEY')
-    return url, key
-
-@st.cache_resource(show_spinner=False)
-def get_supabase_client() -> Optional[Client]:
-    url, key = get_supabase_credentials()
-    if not url or not key:
-        logger.warning("Supabase non configurato: imposta SUPABASE_URL e SUPABASE_ANON_KEY.")
-        return None
-    try:
-        return create_client(url, key)
-    except Exception as e:
-        logger.error(f"Errore inizializzazione Supabase: {e}")
-        return None
-
-def init_auth_state() -> None:
-    if 'auth_user' not in st.session_state:
-        st.session_state.auth_user = None
-    if 'auth_session' not in st.session_state:
-        st.session_state.auth_session = None
-    if 'auth_error' not in st.session_state:
-        st.session_state.auth_error = None
-
-def get_logged_user_email() -> Optional[str]:
+def get_logged_user_email():
     user = st.session_state.get('auth_user')
-    if not user:
-        return None
-    if isinstance(user, dict):
+    if user and isinstance(user, dict):
         return user.get('email')
-    return getattr(user, 'email', None)
+    return None
 
-def is_authenticated() -> bool:
+def is_authenticated():
     return get_logged_user_email() is not None
 
-def get_logged_user_id() -> Optional[str]:
+def get_logged_user_id():
     user = st.session_state.get('auth_user')
-    if not user:
-        return None
-    if isinstance(user, dict):
+    if user and isinstance(user, dict):
         return user.get('id')
-    return getattr(user, 'id', None)
+    return None
+
+def get_supabase_client() -> Optional[Client]:
+    url = safe_get_secret('SUPABASE_URL')
+    key = safe_get_secret('SUPABASE_ANON_KEY')
+    if url and key:
+        try:
+            return create_client(url, key)
+        except Exception:
+            pass
+    return None
 
 def is_supabase_available() -> bool:
     return get_supabase_client() is not None
 
-def load_user_portfolio() -> None:
+def render_auth_sidebar():
+    st.sidebar.markdown('### 👤 Account')
+    if not is_supabase_available():
+        st.sidebar.info("Auth disabilitata: configura SUPABASE_URL e SUPABASE_ANON_KEY")
+        st.sidebar.markdown('---')
+        return
+    email = get_logged_user_email()
+    if email:
+        st.sidebar.success(f'Connesso: {email}')
+        if st.sidebar.button('🚪 Logout'):
+            supabase = get_supabase_client()
+            if supabase:
+                supabase.auth.sign_out()
+            st.session_state.auth_user = None
+            st.rerun()
+    else:
+        email_in = st.sidebar.text_input('Email')
+        pwd = st.sidebar.text_input('Password', type='password')
+        if st.sidebar.button('Login'):
+            supabase = get_supabase_client()
+            if supabase:
+                try:
+                    resp = supabase.auth.sign_in_with_password({'email': email_in, 'password': pwd})
+                    st.session_state.auth_user = resp.user
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Login fallito: {e}")
+    st.sidebar.markdown('---')
+
+# ---------------------------- PORTFOLIO HELPERS (salvataggio su Supabase) -----------------
+def load_user_portfolio():
     user_id = get_logged_user_id()
     if not user_id:
         return
     supabase = get_supabase_client()
     if supabase is None:
-        st.warning("Supabase non configurato: impossibile caricare il portafoglio salvato.")
         return
     try:
-        res = supabase.table('portfoliopositions').select('*').eq('userid', user_id).execute()
-        rows = getattr(res, 'data', None) or []
-    except Exception as e:
-        logger.warning(f'Load portfolio skipped: {e}')
+        rows = supabase.table('portfoliopositions').select('*').eq('userid', user_id).execute().data or []
+    except Exception:
         return
-
     st.session_state.portfolio_tickers = []
     st.session_state.holdings = {}
     st.session_state.holdings_quantity = {}
     st.session_state.holdings_pmc = {}
     st.session_state.holdings_currency = {}
-
     for r in rows:
-        t = str(r.get('ticker', '')).upper().strip()
+        t = str(r.get('ticker', '')).upper()
         if not t:
             continue
-        try:
-            qty = float(r.get('quantity', 0) or 0)
-            pmc = float(r.get('pmc', 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        cur = str(r.get('currency', 'USD')).upper().strip() or 'USD'
-        if t not in st.session_state.portfolio_tickers:
-            st.session_state.portfolio_tickers.append(t)
+        qty = float(r.get('quantity', 0) or 0)
+        pmc = float(r.get('pmc', 0) or 0)
+        cur = str(r.get('currency', 'USD')).upper()
+        st.session_state.portfolio_tickers.append(t)
         st.session_state.holdings_quantity[t] = qty
         st.session_state.holdings_pmc[t] = pmc
         st.session_state.holdings_currency[t] = cur
         st.session_state.holdings[t] = qty * pmc
 
-def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> None:
+def save_user_portfolio_position(ticker, quantity, pmc, currency):
     user_id = get_logged_user_id()
     if not user_id:
         return
     supabase = get_supabase_client()
     if supabase is None:
-        st.error("Supabase non configurato: impossibile salvare il portafoglio.")
         return
     try:
         supabase.table('portfoliopositions').upsert({
-            'userid': user_id,
-            'ticker': str(ticker).upper().strip(),
-            'quantity': float(quantity),
-            'pmc': float(pmc),
-            'currency': str(currency).upper().strip() or 'USD',
+            'userid': user_id, 'ticker': ticker.upper(), 'quantity': float(quantity),
+            'pmc': float(pmc), 'currency': currency.upper()
         }, on_conflict='userid,ticker').execute()
-    except Exception as e:
-        logger.exception("Errore salvataggio portafoglio")
-        st.error(f"Errore Supabase durante il salvataggio di {ticker}: {e}")
+    except Exception:
+        pass
 
-def delete_user_portfolio_position(ticker: str) -> None:
+def delete_user_portfolio_position(ticker):
     user_id = get_logged_user_id()
     if not user_id:
         return
@@ -345,151 +252,11 @@ def delete_user_portfolio_position(ticker: str) -> None:
     if supabase is None:
         return
     try:
-        supabase.table('portfoliopositions').delete().eq('userid', user_id).eq('ticker', str(ticker).upper().strip()).execute()
-    except Exception as e:
-        logger.warning(f'Delete portfolio skipped for {ticker}: {e}')
+        supabase.table('portfoliopositions').delete().eq('userid', user_id).eq('ticker', ticker.upper()).execute()
+    except Exception:
+        pass
 
-def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
-    user = getattr(auth_response, 'user', None)
-    session = getattr(auth_response, 'session', None)
-    return user, session
-
-EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-
-def validate_email(email: str) -> bool:
-    return bool(EMAIL_REGEX.match((email or "").strip()))
-
-def validate_password_strength(password: str) -> Tuple[bool, str]:
-    if len(password) < 8:
-        return False, "La password deve avere almeno 8 caratteri."
-    if not re.search(r"[A-Z]", password):
-        return False, "La password deve contenere almeno una maiuscola."
-    if not re.search(r"[a-z]", password):
-        return False, "La password deve contenere almeno una minuscola."
-    if not re.search(r"\d", password):
-        return False, "La password deve contenere almeno un numero."
-    return True, "OK"
-
-def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
-    supabase = get_supabase_client()
-    if supabase is None:
-        return False, "Supabase non configurato. Imposta SUPABASE_URL e SUPABASE_ANON_KEY."
-    try:
-        response = supabase.auth.sign_up({'email': email.strip(), 'password': password, 'options': {'email_redirect_to': get_email_redirect_url()}})
-        user, session = _extract_auth_payload(response)
-        if user is None:
-            return False, 'Registrazione non completata. Controlla le restrizioni del progetto Supabase.'
-        st.session_state.auth_user = user
-        st.session_state.auth_session = session
-        if session is None:
-            return True, "Registrazione eseguita. Controlla la tua email per confermare l'account."
-        return True, 'Registrazione completata con accesso effettuato.'
-    except Exception as e:
-        return False, f'Registrazione fallita: {e}'
-
-def sign_in_with_supabase(email: str, password: str) -> Tuple[bool, str]:
-    supabase = get_supabase_client()
-    if supabase is None:
-        return False, "Supabase non configurato."
-    try:
-        response = supabase.auth.sign_in_with_password({'email': email.strip(), 'password': password})
-        user, session = _extract_auth_payload(response)
-        if user is None:
-            return False, 'Login non riuscito. Verifica email e password.'
-        st.session_state.auth_user = user
-        st.session_state.auth_session = session
-        return True, 'Login eseguito con successo.'
-    except Exception as e:
-        return False, f'Login fallito: {e}'
-
-def sign_out_from_supabase() -> Tuple[bool, str]:
-    supabase = get_supabase_client()
-    try:
-        if supabase is not None:
-            try:
-                supabase.auth.sign_out()
-            except Exception:
-                pass
-        st.session_state.auth_user = None
-        st.session_state.auth_session = None
-        st.session_state.portfolio_loaded_from_db = False
-        return True, 'Logout eseguito con successo.'
-    except Exception as e:
-        return False, f'Logout fallito: {e}'
-
-def render_auth_sidebar() -> None:
-    st.sidebar.markdown('### 👤 Account')
-    if not is_supabase_available():
-        st.sidebar.info("Auth disabilitata: configura SUPABASE_URL e SUPABASE_ANON_KEY per abilitare login e salvataggio portafoglio.")
-        st.sidebar.markdown('---')
-        return
-
-    current_email = get_logged_user_email()
-    if current_email:
-        st.sidebar.success(f'Connesso come: {current_email}')
-        with st.sidebar.expander('📁 Il mio portafoglio', expanded=False):
-            n_pos = len(st.session_state.get('portfolio_tickers', []))
-            st.write(f'Titoli in sessione: {n_pos}')
-            if st.button('Carica portafoglio salvato', width='stretch', key='load_saved_portfolio_btn'):
-                load_user_portfolio()
-                st.session_state.portfolio_loaded_from_db = True
-                st.rerun()
-            if st.button('Salva portafoglio attuale', width='stretch', key='save_current_portfolio_btn'):
-                for t in st.session_state.get('portfolio_tickers', []):
-                    qty = float(st.session_state.get('holdings_quantity', {}).get(t, 0.0))
-                    pmc = float(st.session_state.get('holdings_pmc', {}).get(t, 0.0))
-                    cur = st.session_state.get('holdings_currency', {}).get(t, 'USD')
-                    save_user_portfolio_position(t, qty, pmc, cur)
-                st.sidebar.success('Portafoglio salvato correttamente.')
-        if st.sidebar.button('🚪 Logout', width='stretch'):
-            ok, msg = sign_out_from_supabase()
-            if ok:
-                st.sidebar.success(msg)
-                st.rerun()
-            else:
-                st.sidebar.error(msg)
-        st.sidebar.markdown('---')
-        return
-
-    auth_mode = st.sidebar.selectbox('Accesso', ['Login', 'Iscrizione'], key='auth_mode_select')
-    email = st.sidebar.text_input('Email', key='auth_email')
-    password = st.sidebar.text_input('Password', type='password', key='auth_password')
-
-    if auth_mode == 'Iscrizione':
-        password_confirm = st.sidebar.text_input('Conferma password', type='password', key='auth_password_confirm')
-        if st.sidebar.button('📝 Crea account', width='stretch'):
-            if not validate_email(email):
-                st.sidebar.error('Inserisci una email valida.')
-            else:
-                ok_pwd, msg_pwd = validate_password_strength(password)
-                if not ok_pwd:
-                    st.sidebar.error(msg_pwd)
-                elif password != password_confirm:
-                    st.sidebar.error('Le password non coincidono.')
-                else:
-                    ok, msg = sign_up_with_supabase(email, password)
-                    if ok:
-                        st.sidebar.success(msg)
-                        st.rerun()
-                    else:
-                        st.sidebar.error(msg)
-    else:
-        if st.sidebar.button('🔐 Login', width='stretch'):
-            if not email or not password:
-                st.sidebar.error('Inserisci email e password.')
-            else:
-                ok, msg = sign_in_with_supabase(email, password)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.error(msg)
-    st.sidebar.caption('Auth gestita con Supabase email/password.')
-    st.sidebar.markdown('---')
-
-# ==========================================================================
-# 1. MODELLI DATI
-# ==========================================================================
+# ---------------------------- MODELLO DATI ESTESO --------------------------------
 @dataclass
 class FundamentalMetrics:
     ticker: str
@@ -507,351 +274,447 @@ class FundamentalMetrics:
     fcf_margin: Optional[float]
     currency: str
     raw_data: Dict[str, Any] = field(default_factory=dict)
+    normalized_roic: Optional[float] = None
+    intrinsic_value_dcf: Optional[float] = None
+    margin_of_safety: Optional[float] = None
+    sector: Optional[str] = None
+    altman_z_comment: Optional[str] = None
+    asset_class: str = "Stock"
+    moat_score: Optional[float] = None
+    moat_reasons: List[str] = field(default_factory=list)
+    opportunity_cost: Dict[str, Any] = field(default_factory=dict)
+    bond_metrics: Dict[str, Any] = field(default_factory=dict)
+    etf_metrics: Dict[str, Any] = field(default_factory=dict)
+    crypto_metrics: Dict[str, Any] = field(default_factory=dict)
 
     def to_ui_dict(self) -> Dict[str, Any]:
-        return {
-            "Ticker": self.ticker,
-            "Company Name": self.company_name,
-            "Price": self.price,
-            "Free Cash Flow": self.fcf,
-            "ROIC": self.roic,
-            "PEG Ratio": self.peg_ratio,
-            "PEG Source": self.peg_source,
-            "P/E Ratio": self.pe_ratio,
-            "Interest Coverage": self.interest_coverage,
-            "Debt/Equity": self.debt_to_equity,
-            "Revenue Growth": self.revenue_growth,
-            "Net Margin": self.net_margin,
-            "FCF Margin": self.fcf_margin,
-            "Currency": self.currency,
-            "_raw_data": self.raw_data,
-        }
+        d = {k: v for k, v in self.__dict__.items() if k != "raw_data"}
+        d["Moat Reasons"] = ", ".join(self.moat_reasons)
+        return d
 
-# ==========================================================================
-# 2. HELPER & VALIDAZIONE (BUGFIX)
-# ==========================================================================
+# ---------------------------- UTILITY GENERICHE ---------------------------------
 def sanitize_ticker(ticker: str) -> str:
-    if not ticker:
-        raise ValueError('Ticker vuoto')
-    clean = str(ticker).strip().upper()
+    clean = str(ticker or "").strip().upper()
+    if not clean:
+        raise ValueError("Ticker vuoto")
     if not re.match(r'^[A-Z0-9\-\.\=\^]+$', clean):
-        raise ValueError(f'Ticker contiene caratteri non validi: {clean}')
-    if '/' in clean or '\\' in clean or '..' in clean:
-        raise ValueError(f'Ticker contiene path traversal: {clean}')
+        raise ValueError(f"Caratteri non validi: {clean}")
     if len(clean) > 20:
-        raise ValueError(f'Ticker troppo lungo: {clean}')
+        raise ValueError("Ticker troppo lungo")
     return clean
 
 def normalize_ticker(ticker: str, suffix: str) -> str:
-    clean_ticker = sanitize_ticker(ticker)
-    if "-" in clean_ticker or clean_ticker.startswith("^"):
-        return clean_ticker
-    clean_suffix = str(suffix).strip().upper()
-    if clean_suffix and not re.match(r"^\.[A-Z]+$", clean_suffix):
-        clean_suffix = ""
-    if clean_suffix and not clean_ticker.endswith(clean_suffix):
-        return f"{clean_ticker}{clean_suffix}"
-    return clean_ticker
+    clean = sanitize_ticker(ticker)
+    if "-" in clean or clean.startswith("^"):
+        return clean
+    s = suffix.strip().upper()
+    if s and not clean.endswith(s):
+        return f"{clean}{s}"
+    return clean
 
-def safe_float(value: Any, default: float = np.nan) -> float:
+def safe_float(value, default=np.nan):
     try:
         if value is None:
             return default
         return float(value)
-    except (TypeError, ValueError):
+    except:
         return default
 
-def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = None) -> bool:
-    t = (ticker or "").upper()
-    if t.startswith("^") or "=X" in t or t.endswith("=F"):
+def is_non_traditional_asset(ticker: str, info: Optional[Dict] = None) -> bool:
+    t = ticker.upper()
+    if t.startswith("^") or "=X" in t or t.endswith("=F") or "-USD" in t:
         return True
-    if "-USD" in t or "-EUR" in t or "-GBP" in t:
-        return True
-    if raw_info:
-        qt = str(raw_info.get('quoteType', '')).upper()
+    if info:
+        qt = str(info.get('quoteType', '')).upper()
         if qt in {"CRYPTOCURRENCY", "CURRENCY", "FUTURE", "INDEX", "ETF", "MUTUALFUND"}:
             return True
     return False
 
-# ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK
-# ==========================================================================
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
-    # TENTATIVO 1: yfinance
+def detect_sector(info: Dict) -> str:
+    sector = str(info.get('sector', '')).upper()
+    if 'FINANCIAL' in sector or 'BANK' in sector:
+        return 'Financial'
+    if 'REAL ESTATE' in sector:
+        return 'RealEstate'
+    if 'TECHNOLOGY' in sector:
+        return 'Technology'
+    return 'Industrial'
+
+def get_asset_class(ticker: str, info: Dict) -> str:
+    t = ticker.upper()
+    qt = str(info.get('quoteType', '')).upper()
+    if qt in ['ETF', 'ETP', 'FUND']:
+        return 'ETF'
+    if qt in ['BOND', 'MUTUALFUND'] or t.endswith('.B'):
+        return 'Bond'
+    if qt == 'CRYPTOCURRENCY' or '-USD' in t or '-EUR' in t:
+        return 'Crypto'
+    if qt == 'INDEX' or t.startswith('^'):
+        return 'Index'
+    if qt == 'COMMODITY' or t in ['GC=F', 'CL=F', 'SI=F']:
+        return 'Commodity'
+    return 'Stock'
+
+# ---------------------------- FUNZIONI AVANZATE (MOAT, DCF, BOND, ETF, CRYPTO) -----------------
+def get_moat_score(info: Dict, fundamentals: Dict) -> Tuple[float, List[str]]:
+    score, reasons = 0, []
+    gm = fundamentals.get('gross_margin', 0) or 0
+    if gm > 0.4:
+        score += 30
+        reasons.append(f"Margini lordi alti ({gm:.1%})")
+    elif gm > 0.3:
+        score += 15
+        reasons.append(f"Margini lordi discreti ({gm:.1%})")
+    roic = fundamentals.get('roic', 0) or 0
+    if roic > 0.15:
+        score += 30
+        reasons.append(f"ROIC sostenibile ({roic:.1%})")
+    elif roic > 0.10:
+        score += 15
+    rev_growth = fundamentals.get('revenue_growth')
+    if rev_growth and rev_growth > 0.1:
+        score += 20
+        reasons.append(f"Crescita revenue >10% ({rev_growth:.1%})")
+    industry = str(info.get('industry', '')).lower()
+    if any(k in industry for k in ['software', 'luxury', 'pharma']):
+        score += 20
+        reasons.append(f"Barriere all'entrata ({industry})")
+    return min(score, 100), reasons
+
+def opportunity_cost(price: float, intrinsic_value: float) -> Dict:
+    if price <= 0 or intrinsic_value <= 0:
+        return {"verdict": "N/D"}
     try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
+        tnx = yf.Ticker("^TNX").history(period="5d")['Close'].dropna().iloc[-1] / 100.0
+    except:
+        tnx = get_active_risk_free_rate() + 0.02
+    earnings_yield = intrinsic_value / price
+    if earnings_yield > tnx + 0.03:
+        verdict = "Azione preferibile a bond"
+    elif earnings_yield < tnx - 0.01:
+        verdict = "Bond preferibili"
+    else:
+        verdict = "Equivalenti"
+    return {"bond_10y": tnx, "stock_yield": earnings_yield, "verdict": verdict, "spread": earnings_yield - tnx}
+
+def analyze_bond(info: Dict, price: float) -> Dict:
+    coupon = info.get('couponRate', 0.05)
+    years = 5.0
+    try:
+        mat = info.get('maturityDate')
+        if mat:
+            from datetime import datetime
+            years = (datetime.strptime(mat, '%Y-%m-%d') - datetime.now()).days / 365.25
+    except:
+        pass
+    ytm = (coupon + (100 - price)/years) / ((100+price)/2) if price>0 else 0.04
+    duration = years / (1+ytm) if ytm>0 else years
+    rating = info.get('creditRating', 'BBB')
+    spread = ytm - get_active_risk_free_rate()
+    return {"ytm": ytm, "modified_duration": duration, "credit_rating": rating, "spread": spread}
+
+def analyze_etf(info: Dict) -> Dict:
+    ter = info.get('totalExpenseRatio', 0.002)
+    tracking = info.get('trackingError', 0.01)
+    replica = info.get('replicationStrategy', 'Fisica')
+    holdings = info.get('numberOfHoldings', 100)
+    pe = info.get('peRatio', 15.0)
+    quality = 0
+    if ter <= DEFAULT_ETF_TER_THRESHOLD:
+        quality += 30
+    elif ter <= 0.005:
+        quality += 15
+    if tracking <= DEFAULT_ETF_TRACKING_ERROR_THRESHOLD:
+        quality += 30
+    elif tracking <= 0.02:
+        quality += 15
+    if replica.lower() == 'fisica':
+        quality += 20
+    if holdings > 50:
+        quality += 10
+    if pe < 20:
+        quality += 10
+    return {"TER": ter, "tracking_error": tracking, "replication": replica, "num_holdings": holdings,
+            "avg_pe": pe, "quality_score": quality, "verdict": "BUY" if quality>=70 else ("HOLD" if quality>=50 else "SELL")}
+
+def analyze_crypto(ticker: str, df: pd.DataFrame) -> Dict:
+    if df is None or df.empty:
+        return {"error": "No data"}
+    returns = df['Close'].pct_change().dropna()
+    vol = returns.std() * np.sqrt(252)
+    close = df['Close']
+    sma50 = close.rolling(50).mean().iloc[-1] if len(close)>=50 else close.iloc[-1]
+    sma200 = close.rolling(200).mean().iloc[-1] if len(close)>=200 else close.iloc[-1]
+    trend = "Rialzista" if sma50 > sma200 else "Ribassista"
+    # Fear & Greed
+    sentiment = "Neutrale"
+    try:
+        r = requests.get(CRYPTO_SENTIMENT_API, timeout=3)
+        if r.status_code == 200:
+            val = int(r.json().get('data', [{}])[0].get('value', 50))
+            if val <= 25:
+                sentiment = "Estrema paura"
+            elif val <= 45:
+                sentiment = "Paura"
+            elif val <= 55:
+                sentiment = "Neutrale"
+            elif val <= 75:
+                sentiment = "Avidità"
+            else:
+                sentiment = "Estrema avidità"
+    except:
+        pass
+    return {"volatility": vol, "trend": trend, "sentiment": sentiment, "risk_score": 100 if vol>0.8 else (70 if vol>0.5 else 40)}
+
+# ---------------------------- ROIC NORMALIZZATO, DCF, ALTMAN Z -----------------------
+def get_bs_item(bs: pd.DataFrame, names: List[str], default=0.0):
+    if bs is None or bs.empty:
+        return default
+    for n in names:
+        if n in bs.index:
+            try:
+                v = bs.loc[n].iloc[0]
+                if pd.notna(v) and v != 0:
+                    return float(v)
+            except:
+                continue
+    return default
+
+def normalized_invested_capital(bs: pd.DataFrame, info: Dict) -> float:
+    debt = get_bs_item(bs, ['Total Debt', 'TotalDebt'], 0.0)
+    equity = get_bs_item(bs, ['Stockholders Equity', 'TotalEquity'], 0.0)
+    cash = get_bs_item(bs, ['Cash And Cash Equivalents', 'Cash'], 0.0)
+    goodwill = get_bs_item(bs, ['Goodwill', 'GoodWill'], 0.0)
+    assets = get_bs_item(bs, ['Total Assets', 'TotalAssets'], 1.0)
+    excess_cash = max(0.0, cash - 0.02 * assets)
+    return max(0.0, debt + equity - excess_cash - goodwill)
+
+def calc_normalized_roic(ebit: float, tax_rate: float, invested_cap_norm: float) -> float:
+    if invested_cap_norm <= 0 or ebit <= 0:
+        return 0.0
+    return ebit * (1 - tax_rate) / invested_cap_norm
+
+def calculate_dcf(fcf: float, stage1_growth=0.05, years=5, terminal_growth=0.02, discount_rate=None) -> float:
+    if fcf <= 0:
+        return 0.0
+    if discount_rate is None:
+        discount_rate = get_active_risk_free_rate() + DEFAULT_EQUITY_RISK_PREMIUM
+    if discount_rate <= terminal_growth:
+        discount_rate = terminal_growth + 0.01
+    pv = 0.0
+    fcf_est = fcf
+    for t in range(1, years+1):
+        fcf_est *= (1 + stage1_growth)
+        pv += fcf_est / ((1+discount_rate)**t)
+    terminal = fcf_est * (1 + terminal_growth) / (discount_rate - terminal_growth)
+    return pv + terminal / ((1+discount_rate)**years)
+
+def margin_of_safety(price: float, iv: float) -> Optional[float]:
+    if iv <= 0 or price <= 0:
+        return None
+    return (iv - price) / iv
+
+def altman_z_adjusted(bs: pd.DataFrame, fin: pd.DataFrame, info: Dict, sector: str) -> Tuple[Any, str]:
+    if sector in ('Financial', 'RealEstate'):
+        return None, "Altman Z non applicabile a banche/assicurazioni"
+    try:
+        ta = get_bs_item(bs, ['Total Assets'], 0.0)
+        if ta <= 0:
+            return None, "Total assets zero"
+        wc = get_bs_item(bs, ['Current Assets']) - get_bs_item(bs, ['Current Liabilities'])
+        re = get_bs_item(bs, ['Retained Earnings'])
+        ebit = get_bs_item(fin, ['EBIT'])
+        mc = info.get('marketCap', 0.0)
+        tl = get_bs_item(bs, ['Total Liabilities Net Minority Interest', 'Total Liabilities'])
+        rev = info.get('totalRevenue', 0.0) or get_bs_item(fin, ['Total Revenue'])
+        if tl <= 0 or mc == 0:
+            return None, "Dati insufficienti"
+        z = (1.2*wc/ta + 1.4*re/ta + 3.3*ebit/ta + 0.6*mc/tl + 1.0*rev/ta)
+        return float(z), "OK"
+    except Exception as e:
+        return None, str(e)
+
+# ---------------------------- FETCH DATI FONDAMENTALI (YFINANCE + YAHOOQUERY) -----------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fundamental_data(symbol: str) -> Optional[Dict]:
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
         if info and ('symbol' in info or 'shortName' in info):
             if 'symbol' not in info:
                 info['symbol'] = symbol
-            return {
-                "info": info,
-                "financials": stock.financials,
-                "balance_sheet": stock.balance_sheet,
-                "cashflow": stock.cashflow,
-                "symbol": symbol
-            }
-    except Exception as e:
-        logger.info(f"yfinance fallito per {symbol}: {e}. Passo a YahooQuery.")
-
-    # TENTATIVO 2: YahooQuery
+            return {"info": info, "financials": ticker.financials, "balance_sheet": ticker.balance_sheet,
+                    "cashflow": ticker.cashflow, "symbol": symbol}
+    except:
+        pass
     try:
         yq = YQ_Ticker(symbol)
-        summary = yq.summary_detail.get(symbol, {}) if isinstance(yq.summary_detail, dict) else {}
-        price = yq.price.get(symbol, {}) if isinstance(yq.price, dict) else {}
-        financial_data = yq.financial_data.get(symbol, {}) if isinstance(yq.financial_data, dict) else {}
-
-        if isinstance(summary, str): summary = {}
-        if isinstance(price, str): price = {}
-        if isinstance(financial_data, str): financial_data = {}
-
-        combined_info = {**summary, **price, **financial_data}
-        combined_info['symbol'] = symbol
-
-        if 'regularMarketPrice' in combined_info:
-            combined_info['currentPrice'] = combined_info['regularMarketPrice']
-
-        def format_yq_df(df_yq):
-            if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
-                df_yq = df_yq.copy()
-                if isinstance(df_yq.index, pd.MultiIndex):
+        summary = yq.summary_detail.get(symbol, {})
+        price = yq.price.get(symbol, {})
+        fin_data = yq.financial_data.get(symbol, {})
+        info = {**summary, **price, **fin_data, 'symbol': symbol}
+        if 'regularMarketPrice' in info:
+            info['currentPrice'] = info['regularMarketPrice']
+        def fmt(df):
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                if isinstance(df.index, pd.MultiIndex):
                     try:
-                        df_yq = df_yq.xs(symbol, level=0)
-                    except KeyError:
+                        df = df.xs(symbol, level=0)
+                    except:
                         return pd.DataFrame()
-                if 'asOfDate' in df_yq.columns:
-                    df_yq.set_index('asOfDate', inplace=True)
-                return df_yq.transpose()
+                if 'asOfDate' in df.columns:
+                    df.set_index('asOfDate', inplace=True)
+                return df.transpose()
             return pd.DataFrame()
-
-        inc_stmt = format_yq_df(yq.income_statement())
-        bal_sheet = format_yq_df(yq.balance_sheet())
-        cash_flow = format_yq_df(yq.cash_flow())
-
-        if not inc_stmt.empty:
-            inc_stmt.rename(index={
-                'TotalRevenue': 'Total Revenue',
-                'PretaxIncome': 'Pretax Income',
-                'TaxProvision': 'Tax Provision',
-                'InterestExpense': 'Interest Expense'
-            }, inplace=True)
-        if not bal_sheet.empty:
-            bal_sheet.rename(index={
-                'TotalDebt': 'Total Debt',
-                'StockholdersEquity': 'Stockholders Equity',
-                'TotalAssets': 'Total Assets',
-                'CurrentAssets': 'Current Assets',
-                'CurrentLiabilities': 'Current Liabilities',
-                'RetainedEarnings': 'Retained Earnings'
-            }, inplace=True)
-        if not cash_flow.empty:
-            cash_flow.rename(index={
-                'OperatingCashFlow': 'Operating Cash Flow',
-                'CapitalExpenditure': 'Capital Expenditure'
-            }, inplace=True)
-
-        return {
-            "info": combined_info,
-            "financials": inc_stmt,
-            "balance_sheet": bal_sheet,
-            "cashflow": cash_flow,
-            "symbol": symbol
-        }
+        inc = fmt(yq.income_statement())
+        bal = fmt(yq.balance_sheet())
+        cf = fmt(yq.cash_flow())
+        return {"info": info, "financials": inc, "balance_sheet": bal, "cashflow": cf, "symbol": symbol}
     except Exception as e:
-        logger.error(f"Tutte le API hanno fallito per i fondamentali di {symbol}: {e}")
+        logger.error(f"Fundamental data fallito per {symbol}: {e}")
         return None
 
-def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[FundamentalMetrics]:
+def calculate_fundamental_metrics(raw_data: Dict) -> Optional[FundamentalMetrics]:
     try:
         info = raw_data["info"]
         symbol = raw_data["symbol"]
-
-        if is_non_traditional_asset(symbol, info):
-            return FundamentalMetrics(
-                ticker=symbol,
-                company_name=info.get('shortName', symbol),
-                price=safe_float(info.get('regularMarketPrice') or info.get('currentPrice'), 0.0),
-                fcf=0.0,
-                roic=0.0,
-                peg_ratio=None,
-                peg_source="N/A (non-equity)",
-                pe_ratio=None,
-                interest_coverage=SAFE_INTEREST_COVERAGE,
-                debt_to_equity=None,
-                revenue_growth=None,
-                net_margin=None,
-                fcf_margin=None,
-                currency=info.get('currency', 'USD'),
-                raw_data=raw_data
-            )
-
+        asset_class = get_asset_class(symbol, info)
+        if asset_class in ('Crypto', 'Currency', 'Index', 'Commodity'):
+            return FundamentalMetrics(ticker=symbol, company_name=info.get('shortName', symbol),
+                price=safe_float(info.get('regularMarketPrice') or info.get('currentPrice'),0.0), fcf=0.0, roic=0.0,
+                peg_ratio=None, peg_source="N/A", pe_ratio=None, interest_coverage=SAFE_INTEREST_COVERAGE,
+                debt_to_equity=None, revenue_growth=None, net_margin=None, fcf_margin=None,
+                currency=info.get('currency','USD'), raw_data=raw_data, asset_class=asset_class)
         fin = raw_data["financials"]
         bs = raw_data["balance_sheet"]
         cf = raw_data["cashflow"]
-
-        def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
+        def first(df, idx, default=0.0):
             if df is None or df.empty or idx not in df.index:
                 return default
             try:
                 return safe_float(df.loc[idx].iloc[0], default)
-            except Exception:
+            except:
                 return default
-
-        op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
-        cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
-        fcf = float(op_cash - abs(cap_ex))
-
-        total_debt = get_first(bs, 'Total Debt', 0.0)
-        equity = get_first(bs, 'Stockholders Equity', np.nan)
-        invested_cap = total_debt + equity
-        ebit = get_first(fin, 'EBIT', 0.0)
-
+        op_cf = first(cf, 'Operating Cash Flow', 0.0)
+        cap_ex = first(cf, 'Capital Expenditure', 0.0)
+        fcf = op_cf - abs(cap_ex)
+        debt = first(bs, 'Total Debt', 0.0)
+        equity = first(bs, 'Stockholders Equity', np.nan)
+        ebit = first(fin, 'EBIT', 0.0)
         tax_rate = DEFAULT_TAX_RATE
-        if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index and not fin.empty:
-            pretax_inc = get_first(fin, 'Pretax Income', 0.0)
-            tax_provision = get_first(fin, 'Tax Provision', 0.0)
-            if pretax_inc > 0:
-                tax_rate = float(np.clip(tax_provision / pretax_inc, 0.0, 1.0))
-
-        roic = 0.0
-        if invested_cap and not np.isnan(invested_cap) and invested_cap > 0:
-            roic = float((ebit * (1 - tax_rate)) / invested_cap)
-
+        if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index:
+            pretax = first(fin, 'Pretax Income', 0.0)
+            tax_prov = first(fin, 'Tax Provision', 0.0)
+            if pretax > 0:
+                tax_rate = np.clip(tax_prov / pretax, 0.0, 1.0)
+        invested = debt + equity if not np.isnan(equity) else debt
+        roic = (ebit * (1-tax_rate))/invested if invested>0 else 0.0
+        norm_inv = normalized_invested_capital(bs, info)
+        norm_roic = calc_normalized_roic(ebit, tax_rate, norm_inv) if norm_inv>0 else None
         pe = info.get('trailingPE')
         growth = info.get('earningsGrowth')
         peg = info.get('pegRatio')
         peg_src = "N/A"
         if peg is not None:
             peg_src = "Official"
-        elif pe and pe > 0 and growth and growth > 0:
-            peg = float(pe / (growth * 100))
+        elif pe and pe>0 and growth and growth>0:
+            peg = pe / (growth*100)
             peg_src = "Estimated"
-
-        int_exp = get_first(fin, 'Interest Expense', 0.0)
-        int_cov = float(ebit / abs(int_exp)) if int_exp != 0 else SAFE_INTEREST_COVERAGE
-
-        total_revenue = info.get('totalRevenue')
-        net_income = info.get('netIncomeToCommon')
-        revenue_growth = info.get('revenueGrowth')
-
-        debt_to_equity = None
-        if equity is not None and not np.isnan(equity) and equity != 0:
-            debt_to_equity = float(total_debt / equity)
-
+        int_exp = first(fin, 'Interest Expense', 0.0)
+        int_cov = ebit/abs(int_exp) if int_exp!=0 else SAFE_INTEREST_COVERAGE
+        rev = info.get('totalRevenue')
+        net_inc = info.get('netIncomeToCommon')
+        rev_growth = info.get('revenueGrowth')
+        de = None
+        if equity and not np.isnan(equity) and equity!=0:
+            de = debt/equity
         net_margin = None
-        if total_revenue not in (None, 0) and net_income is not None:
-            try:
-                net_margin = float(net_income) / float(total_revenue)
-            except (TypeError, ValueError, ZeroDivisionError):
-                net_margin = None
-
+        if rev and rev>0 and net_inc:
+            net_margin = net_inc/rev
         fcf_margin = None
-        if total_revenue not in (None, 0):
-            try:
-                fcf_margin = fcf / float(total_revenue)
-            except (TypeError, ValueError, ZeroDivisionError):
-                fcf_margin = None
-
-        return FundamentalMetrics(
-            ticker=symbol,
-            company_name=info.get('longName', symbol),
-            price=safe_float(info.get('currentPrice') or info.get('regularMarketPrice'), 0.0),
-            fcf=fcf,
-            roic=roic,
-            peg_ratio=safe_float(peg, None) if peg is not None else None,
-            peg_source=peg_src,
-            pe_ratio=safe_float(pe, None) if pe is not None else None,
-            interest_coverage=int_cov,
-            debt_to_equity=debt_to_equity,
-            revenue_growth=safe_float(revenue_growth, None) if revenue_growth is not None else None,
-            net_margin=net_margin,
-            fcf_margin=fcf_margin,
-            currency=info.get('currency', 'USD'),
-            raw_data=raw_data
-        )
+        if rev and rev>0:
+            fcf_margin = fcf/rev
+        price = safe_float(info.get('currentPrice') or info.get('regularMarketPrice'),0.0)
+        intrinsic = calculate_dcf(fcf) if fcf>0 else 0.0
+        mos = margin_of_safety(price, intrinsic) if intrinsic>0 else None
+        sector = detect_sector(info)
+        altman_z, altman_comm = altman_z_adjusted(bs, fin, info, sector)
+        # Moat
+        funda = {'gross_margin': info.get('grossMargins'), 'roic': roic, 'revenue_growth': rev_growth}
+        moat_score, moat_reasons = get_moat_score(info, funda)
+        opp_cost = opportunity_cost(price, intrinsic) if intrinsic>0 else {}
+        bond_metrics = analyze_bond(info, price) if asset_class == 'Bond' else {}
+        etf_metrics = analyze_etf(info) if asset_class == 'ETF' else {}
+        crypto_metrics = analyze_crypto(symbol, None) if asset_class == 'Crypto' else {}
+        return FundamentalMetrics(ticker=symbol, company_name=info.get('longName', symbol), price=price, fcf=fcf,
+            roic=roic, peg_ratio=peg, peg_source=peg_src, pe_ratio=pe, interest_coverage=int_cov,
+            debt_to_equity=de, revenue_growth=rev_growth, net_margin=net_margin, fcf_margin=fcf_margin,
+            currency=info.get('currency','USD'), raw_data=raw_data, normalized_roic=norm_roic,
+            intrinsic_value_dcf=intrinsic if intrinsic>0 else None, margin_of_safety=mos, sector=sector,
+            altman_z_comment=altman_comm, asset_class=asset_class, moat_score=moat_score, moat_reasons=moat_reasons,
+            opportunity_cost=opp_cost, bond_metrics=bond_metrics, etf_metrics=etf_metrics, crypto_metrics=crypto_metrics)
     except Exception as e:
         logger.error(f"Errore calcolo metriche {raw_data.get('symbol', '?')}: {e}")
         return None
 
-def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+def fetch_metrics_for_ticker(ticker: str):
     try:
         raw = get_fundamental_data(ticker)
         if not raw:
-            return ticker, None, f"nessun dato fondamentale disponibile per {ticker}"
+            return ticker, None, "nessun dato"
         met = calculate_fundamental_metrics(raw)
         if not met:
-            return ticker, None, f"impossibile calcolare le metriche per {ticker}"
+            return ticker, None, "calcolo metriche fallito"
         return ticker, met.to_ui_dict(), None
     except Exception as e:
-        logger.exception(f"Errore in fetch_metrics_for_ticker per {ticker}")
         return ticker, None, str(e)
 
-def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    results: List[Dict[str, Any]] = []
-    errors: List[str] = []
+def fetch_metrics_batch(tickers: List[str]):
+    results, errors = [], []
     if not tickers:
         return results, errors
-    effective_workers = min(MAX_WORKERS, len(tickers))
-    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        futures = {executor.submit(fetch_metrics_for_ticker, t): t for t in tickers}
-        for future in as_completed(futures, timeout=60):
-            ticker = futures[future]
-            try:
-                t, ui_dict, err = future.result(timeout=30)
-                if err:
-                    errors.append(f"{t}: {err}")
-                elif ui_dict is not None:
-                    results.append(ui_dict)
-            except Exception as e:
-                errors.append(f"{ticker}: timeout o eccezione - {str(e)}")
-                logger.warning(f"Batch fetch fallito per {ticker}: {e}")
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(tickers))) as ex:
+        futures = {ex.submit(fetch_metrics_for_ticker, t): t for t in tickers}
+        for f in as_completed(futures):
+            t, ui, err = f.result()
+            if err:
+                errors.append(f"{t}: {err}")
+            elif ui:
+                results.append(ui)
     return results, errors
 
-# ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA CON FALLBACK (BUGFIX)
-# ==========================================================================
+# ---------------------------- DATI TECNICI ---------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    original_symbol = symbol
-    symbol = normalize_ticker(symbol, "")
+    sym = normalize_ticker(symbol, "")
     try:
-        df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
+        df = yf.download(sym, period="2y", interval="1d", progress=False, auto_adjust=True)
         if df is not None and not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            df = df.loc[:, ~df.columns.duplicated(keep='first')]
+            df = df.loc[:, ~df.columns.duplicated()]
             if len(df) >= 60:
-                logger.debug(f"yfinance OK per {symbol} ({len(df)} giorni)")
                 return df
-            else:
-                logger.debug(f"yfinance: solo {len(df)} giorni per {symbol}, richiesti 60")
-    except Exception as e:
-        logger.info(f"yfinance tecnico fallito per {symbol}: {e}")
-
+    except:
+        pass
     try:
-        t = YQ_Ticker(symbol)
-        df_yq = t.history(period="2y", interval="1d")
-        if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
-            if isinstance(df_yq.index, pd.MultiIndex):
+        yq = YQ_Ticker(sym)
+        df = yq.history(period="2y", interval="1d")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            if isinstance(df.index, pd.MultiIndex):
                 try:
-                    df_yq = df_yq.xs(symbol, level=0)
-                except KeyError:
+                    df = df.xs(sym, level=0)
+                except:
                     try:
-                        df_yq = df_yq.xs(original_symbol, level=0)
-                    except KeyError:
+                        df = df.xs(symbol, level=0)
+                    except:
                         return None
-            df_yq.columns = [str(c).capitalize() for c in df_yq.columns]
-            df_yq = df_yq.loc[:, ~df_yq.columns.duplicated(keep='first')]
-            if len(df_yq) >= 60:
-                logger.debug(f"YahooQuery OK per {symbol} ({len(df_yq)} giorni)")
-                return df_yq
-            else:
-                logger.debug(f"YahooQuery: solo {len(df_yq)} giorni per {symbol}")
-    except Exception as e:
-        logger.error(f"YahooQuery fallito per {symbol}: {e}")
-
-    logger.warning(f"Nessun dato tecnico disponibile per {symbol}")
+            df.columns = [c.capitalize() for c in df.columns]
+            if len(df) >= 60:
+                return df
+    except:
+        pass
     return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -865,1284 +728,448 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    data['RSI'] = 100 - (100 / (1 + rs))
-    ma20 = close.rolling(20, min_periods=20).mean()
-    std20 = close.rolling(20, min_periods=20).std(ddof=0)
-    data['BB_Lower'] = ma20 - 2 * std20
-    data['BB_Upper'] = ma20 + 2 * std20
+    data['RSI'] = 100 - (100 / (1+rs))
+    ma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std(ddof=0)
+    data['BB_Lower'] = ma20 - 2*std20
+    data['BB_Upper'] = ma20 + 2*std20
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     data['MACD'] = ema12 - ema26
-    data['MACD_signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    if ta is not None:
+    data['MACD_signal'] = data['MACD'].ewm(span=9).mean()
+    if ta:
         try:
-            data['SMA_50'] = ta.sma(close, length=50)
-            data['SMA_200'] = ta.sma(close, length=200)
-            data['RSI'] = ta.rsi(close, length=14)
-            bb = ta.bbands(close, length=20, std=2)
+            data['SMA_50'] = ta.sma(close, 50)
+            data['SMA_200'] = ta.sma(close, 200)
+            data['RSI'] = ta.rsi(close, 14)
+            bb = ta.bbands(close, 20, 2)
             if bb is not None:
-                low = bb.filter(like='BBL_')
-                up = bb.filter(like='BBU_')
-                if not low.empty:
-                    data['BB_Lower'] = low.iloc[:, 0]
-                if not up.empty:
-                    data['BB_Upper'] = up.iloc[:, 0]
+                data['BB_Lower'] = bb.iloc[:,0]
+                data['BB_Upper'] = bb.iloc[:,2]
             macd = ta.macd(close)
-            if macd is not None and not macd.empty:
-                m_col = macd.filter(like='MACD_').filter(regex=r'_\d+_\d+_\d+$')
-                s_col = macd.filter(like='MACDs_')
-                if not m_col.empty:
-                    data['MACD'] = m_col.iloc[:, 0]
-                if not s_col.empty:
-                    data['MACD_signal'] = s_col.iloc[:, 0]
-        except Exception:
+            if macd is not None:
+                data['MACD'] = macd.iloc[:,0]
+                data['MACD_signal'] = macd.iloc[:,1]
+        except:
             pass
     return data
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
     score, reasons = 0, []
-    last_row = data.iloc[-1]
-    sma200 = last_row.get('SMA_200')
+    last = data.iloc[-1]
+    sma200 = last.get('SMA_200')
     if pd.notna(sma200) and current_price > sma200:
         score += 30
-        reasons.append("✅ Trend Rialzista (Sopra SMA 200)")
+        reasons.append("✅ Sopra SMA200")
     else:
-        reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
-
-    rsi = last_row.get('RSI')
+        reasons.append("⚠️ Sotto SMA200")
+    rsi = last.get('RSI')
     if pd.notna(rsi):
         if rsi < 30:
             score += 30
-            reasons.append("✅ Ipervenduto (RSI < 30)")
+            reasons.append("✅ RSI ipervenduto")
         elif rsi > 70:
             score -= 10
-            reasons.append("🛑 Ipercomprato (RSI > 70)")
-
-    bb_lower = last_row.get('BB_Lower', np.nan)
-    if pd.notna(bb_lower) and current_price <= bb_lower * 1.02:
+            reasons.append("🛑 RSI ipercomprato")
+    bb_low = last.get('BB_Lower')
+    if pd.notna(bb_low) and current_price <= bb_low*1.02:
         score += 20
-        reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
-
-    macd = last_row.get('MACD')
-    macd_sig = last_row.get('MACD_signal')
-    if pd.notna(macd) and pd.notna(macd_sig):
-        if macd > macd_sig:
+        reasons.append("✅ Prezzo su banda inferiore")
+    macd = last.get('MACD')
+    sig = last.get('MACD_signal')
+    if pd.notna(macd) and pd.notna(sig):
+        if macd > sig:
             score += 10
-            reasons.append("✅ MACD sopra signal line (momentum positivo)")
+            reasons.append("✅ MACD bullish")
         else:
-            reasons.append("⚠️ MACD sotto signal line")
+            reasons.append("⚠️ MACD bearish")
+    return int(np.clip(score, 0, 100)), reasons
 
-    score = int(np.clip(score, 0, 100))
-    return score, reasons
-
-# ==========================================================================
-# 5. MOTORE QUANTISTICO
-# ==========================================================================
-def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]], risk_free: Optional[float] = None) -> Dict[str, Any]:
+# ---------------------------- METRICHE QUANT ---------------------------------
+def calculate_quant_metrics(df: pd.DataFrame, risk_free: Optional[float] = None) -> Dict:
     rf = risk_free if risk_free is not None else get_active_risk_free_rate()
-    returns = df['Close'].pct_change().dropna()
-    excess_returns = returns - (rf / TRADING_DAYS_YEAR)
-    sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(TRADING_DAYS_YEAR) if excess_returns.std() != 0 else 0.0
-    vol = returns.std() * np.sqrt(TRADING_DAYS_YEAR) if not returns.empty else np.nan
-    log_returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
-    if len(log_returns) >= 2:
-        cum_log_returns = log_returns.cumsum().values.reshape(-1, 1)
-        x = np.arange(len(cum_log_returns)).reshape(-1, 1)
-        model = LinearRegression().fit(x, cum_log_returns)
-        r_sq = model.score(x, cum_log_returns)
+    ret = df['Close'].pct_change().dropna()
+    excess = ret - (rf/TRADING_DAYS_YEAR)
+    sharpe = (excess.mean()/excess.std())*np.sqrt(TRADING_DAYS_YEAR) if excess.std()!=0 else 0.0
+    vol = ret.std()*np.sqrt(TRADING_DAYS_YEAR)
+    logret = np.log(df['Close']/df['Close'].shift(1)).dropna()
+    if len(logret)>=2:
+        x = np.arange(len(logret)).reshape(-1,1)
+        model = LinearRegression().fit(x, logret.cumsum().values.reshape(-1,1))
+        r2 = model.score(x, logret.cumsum().values.reshape(-1,1))
         slope = float(model.coef_[0][0])
     else:
-        r_sq = np.nan
-        slope = np.nan
+        r2, slope = np.nan, np.nan
+    return {"Sharpe Ratio": sharpe, "Annual Volatility": vol, "R-Squared": r2, "Trend Slope": slope,
+            "Risk Free Used": rf}
 
-    z_score: Any = "N/A"
-    if fund_data and 'info' in fund_data and not is_non_traditional_asset(fund_data.get('symbol', ''), fund_data.get('info')):
-        try:
-            bs = fund_data.get("balance_sheet")
-            fin = fund_data.get("financials")
-            info = fund_data.get("info", {})
-            if isinstance(bs, pd.DataFrame) and not bs.empty and isinstance(fin, pd.DataFrame) and not fin.empty:
-                ta_val = bs.loc['Total Assets'].iloc[0] if 'Total Assets' in bs.index else 0
-                if ta_val and ta_val > 0:
-                    wc = bs.loc['Current Assets'].iloc[0] - bs.loc['Current Liabilities'].iloc[0] if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index else 0
-                    re_val = bs.loc['Retained Earnings'].iloc[0] if 'Retained Earnings' in bs.index else 0
-                    ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else 0
-                    mc = info.get('marketCap')
-                    tl = bs.loc['Total Liabilities Net Minority Interest'].iloc[0] if 'Total Liabilities Net Minority Interest' in bs.index else (bs.loc['Total Liabilities'].iloc[0] if 'Total Liabilities' in bs.index else 0)
-                    if mc is not None and tl and tl > 0:
-                        rev = info.get('totalRevenue', 0) or 0
-                        z_score = float((1.2 * (wc / ta_val)) + (1.4 * (re_val / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val)))
-        except Exception as e:
-            logger.debug(f"Altman Z-Score non calcolabile: {e}")
+def calculate_risk_metrics(df: pd.DataFrame) -> Dict:
+    ret = df['Close'].pct_change().dropna()
+    if ret.empty:
+        return {"Max Drawdown": np.nan, "CAGR": np.nan, "VaR_95": np.nan, "Sortino": np.nan, "Calmar": np.nan}
+    eq = (1+ret).cumprod()
+    dd = eq/eq.cummax() - 1
+    max_dd = dd.min()
+    total_ret = eq.iloc[-1] - 1
+    years = len(ret)/TRADING_DAYS_YEAR
+    cagr = (1+total_ret)**(1/years)-1 if years>0 else np.nan
+    var95 = np.quantile(ret, 0.05)
+    rf_daily = get_active_risk_free_rate()/TRADING_DAYS_YEAR
+    downside = ret[ret<rf_daily]
+    downside_dev = downside.std()*np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
+    sortino = (ret.mean()-rf_daily)*TRADING_DAYS_YEAR / downside_dev if downside_dev and downside_dev>0 else np.nan
+    calmar = cagr/abs(max_dd) if max_dd<0 and not np.isnan(cagr) else np.nan
+    return {"Max Drawdown": max_dd, "CAGR": cagr, "VaR_95": var95, "Sortino": sortino, "Calmar": calmar}
 
-    return {
-        "Sharpe Ratio": float(sharpe) if not np.isnan(sharpe) else 0.0,
-        "Annual Volatility": float(vol) if not np.isnan(vol) else np.nan,
-        "R-Squared": float(r_sq) if not np.isnan(r_sq) else np.nan,
-        "Altman Z-Score": z_score,
-        "Price Percentile": float((df['Close'] < df['Close'].iloc[-1]).mean() * 100),
-        "Trend Slope": slope,
-        "Risk Free Used": float(rf),
-    }
+def monte_carlo_equity(df: pd.DataFrame, n_paths=1000, horizon=252):
+    ret = df['Close'].pct_change().dropna().values
+    if len(ret)==0:
+        return None
+    idx = np.random.randint(0, len(ret), size=(n_paths, horizon))
+    paths = (1+ret[idx]).cumprod(axis=1)
+    return {"paths": paths, "q05": np.quantile(paths,0.05,axis=0), "q50": np.quantile(paths,0.5,axis=0), "q95": np.quantile(paths,0.95,axis=0)}
 
-def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
-    prices = df['Close'].dropna()
-    returns = prices.pct_change().dropna()
-    if returns.empty:
-        nan = float('nan')
-        return {"Max Drawdown": nan, "CAGR": nan, "VaR_95": nan, "CVaR_95": nan, "Skew": nan, "Kurt": nan, "Sortino": nan, "Calmar": nan, "Downside Deviation": nan}
-    equity = (1 + returns).cumprod()
-    roll_max = equity.cummax()
-    drawdown = equity / roll_max - 1.0
-    max_dd = drawdown.min()
-    total_return = equity.iloc[-1] - 1.0
-    years = len(returns) / TRADING_DAYS_YEAR
-    cagr = (1.0 + total_return) ** (1.0 / years) - 1.0 if years > 0 else np.nan
-    alpha = 0.95
-    var_95 = np.quantile(returns, 1 - alpha)
-    cvar_95 = returns[returns <= var_95].mean() if (returns <= var_95).any() else np.nan
-    skew = returns.skew()
-    kurt = returns.kurt()
-    rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
-    downside = returns[returns < rf_daily]
-    downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
-    ann_excess_ret = (returns.mean() - rf_daily) * TRADING_DAYS_YEAR
-    sortino = ann_excess_ret / downside_dev if downside_dev and not np.isnan(downside_dev) and downside_dev > 0 else np.nan
-    calmar = cagr / abs(max_dd) if max_dd and max_dd < 0 and not np.isnan(cagr) else np.nan
-    return {
-        "Max Drawdown": float(max_dd),
-        "CAGR": float(cagr) if not np.isnan(cagr) else np.nan,
-        "VaR_95": float(var_95),
-        "CVaR_95": float(cvar_95) if not np.isnan(cvar_95) else np.nan,
-        "Skew": float(skew),
-        "Kurt": float(kurt),
-        "Sortino": float(sortino) if not np.isnan(sortino) else np.nan,
-        "Calmar": float(calmar) if not np.isnan(calmar) else np.nan,
-        "Downside Deviation": float(downside_dev) if not np.isnan(downside_dev) else np.nan,
-    }
-
-def monte_carlo_equity(df: pd.DataFrame, n_paths: int = 1000, horizon_days: int = 252, seed: Optional[int] = None) -> Dict[str, Any]:
-    prices = df['Close'].dropna()
-    returns = prices.pct_change().dropna().values
-    if returns.size == 0:
-        return {"paths": None, "final_distribution": None, "q05": None, "q50": None, "q95": None}
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, len(returns), size=(n_paths, horizon_days))
-    sampled = returns[idx]
-    equity_paths = (1 + sampled).cumprod(axis=1)
-    final_values = equity_paths[:, -1]
-    q05 = np.quantile(equity_paths, 0.05, axis=0)
-    q50 = np.quantile(equity_paths, 0.50, axis=0)
-    q95 = np.quantile(equity_paths, 0.95, axis=0)
-    return {"paths": equity_paths, "final_distribution": final_values, "q05": q05, "q50": q50, "q95": q95}
-
-def monte_carlo_block_bootstrap(df: pd.DataFrame, n_paths: int = 1000, horizon_days: int = 252, block_size: int = 5, seed: Optional[int] = None) -> Dict[str, Any]:
-    prices = df['Close'].dropna()
-    returns = prices.pct_change().dropna().values
-    if returns.size < max(block_size, 10):
-        logger.warning(f"Dati insufficienti per block bootstrap ({returns.size} returns), fallback a IID")
-        return monte_carlo_equity(df, n_paths, horizon_days, seed)
-    rng = np.random.default_rng(seed)
-    n_blocks_needed = (horizon_days + block_size - 1) // block_size
-    max_start = len(returns) - block_size
-    if max_start <= 0:
-        return monte_carlo_equity(df, n_paths, horizon_days, seed)
-    paths = np.empty((n_paths, n_blocks_needed * block_size))
-    for i in range(n_paths):
-        starts = rng.integers(0, max_start + 1, size=n_blocks_needed)
-        path = np.concatenate([returns[s:s+block_size] for s in starts])
-        paths[i, :] = path[:horizon_days] if len(path) > horizon_days else path
-    paths = paths[:, :horizon_days]
-    equity_paths = (1 + paths).cumprod(axis=1)
-    if equity_paths.shape[1] == 0:
-        return {"paths": None, "final_distribution": np.array([1.0]), "q05": np.array([1.0]), "q50": np.array([1.0]), "q95": np.array([1.0])}
-    return {"paths": equity_paths, "final_distribution": equity_paths[:, -1] if equity_paths.shape[1] > 0 else np.ones(n_paths), "q05": np.quantile(equity_paths, 0.05, axis=0), "q50": np.quantile(equity_paths, 0.50, axis=0), "q95": np.quantile(equity_paths, 0.95, axis=0)}
-
-# ==========================================================================
-# 5.D SMART QUANT SCORE
-# ==========================================================================
-def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], weights: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+# ---------------------------- SMART QUANT SCORE ---------------------------------
+def compute_smart_quant_score(row, timing_score, qm, risk, weights=None):
     w = weights or DEFAULT_SMART_WEIGHTS
     f_score = 0.0
     roic = row.get("ROIC", 0.0) or 0.0
-    f_score += float(np.clip((roic - 0.10) / (0.25 - 0.10), 0, 1)) * 30.0
-    peg = row.get("PEG Ratio", None)
-    if peg is not None and peg > 0:
-        if peg <= 1: f_score += 25.0
-        elif peg <= 2: f_score += 12.0
-    debt_to_equity = row.get("Debt/Equity", None)
-    if debt_to_equity is not None:
-        if debt_to_equity <= 0.5: f_score += 12.0
-        elif debt_to_equity <= 1.0: f_score += 7.0
-        elif debt_to_equity <= 2.0: f_score += 3.0
-    revenue_growth = row.get("Revenue Growth", None)
-    if revenue_growth is not None:
-        if revenue_growth >= 0.15: f_score += 6.0
-        elif revenue_growth >= 0.05: f_score += 3.0
-        elif revenue_growth > 0: f_score += 1.5
-    net_margin = row.get("Net Margin", None)
-    if net_margin is not None:
-        if net_margin >= 0.20: f_score += 8.0
-        elif net_margin >= 0.10: f_score += 4.0
-        elif net_margin > 0: f_score += 2.0
-    fcf_margin = row.get("FCF Margin", None)
-    if fcf_margin is not None:
-        if fcf_margin >= 0.15: f_score += 12.0
-        elif fcf_margin >= 0.08: f_score += 7.0
-        elif fcf_margin > 0: f_score += 3.0
-    z = qm.get("Altman Z-Score", "N/A")
-    if isinstance(z, (int, float, np.floating)) and not isinstance(z, bool):
-        if z >= 3.0: f_score += 7.0
-        elif z >= ALTMAN_SAFE_THRESHOLD: f_score += 3.5
-    f_score = float(np.clip(f_score, 0, 100))
-    t_score = float(np.clip(timing_score, 0, 100))
+    f_score += np.clip((roic-0.10)/(0.25-0.10),0,1)*30
+    peg = row.get("PEG Ratio")
+    if peg and peg>0:
+        if peg<=1: f_score+=25
+        elif peg<=2: f_score+=12
+    de = row.get("Debt/Equity")
+    if de is not None:
+        if de<=0.5: f_score+=12
+        elif de<=1.0: f_score+=7
+        elif de<=2.0: f_score+=3
+    rev_g = row.get("Revenue Growth")
+    if rev_g:
+        if rev_g>=0.15: f_score+=6
+        elif rev_g>=0.05: f_score+=3
+        elif rev_g>0: f_score+=1.5
+    net_m = row.get("Net Margin")
+    if net_m:
+        if net_m>=0.20: f_score+=8
+        elif net_m>=0.10: f_score+=4
+        elif net_m>0: f_score+=2
+    fcf_m = row.get("FCF Margin")
+    if fcf_m:
+        if fcf_m>=0.15: f_score+=12
+        elif fcf_m>=0.08: f_score+=7
+        elif fcf_m>0: f_score+=3
+    t_score = np.clip(timing_score,0,100)
     q_score = 0.0
-    sharpe = qm.get("Sharpe Ratio", 0.0) or 0.0
-    max_dd = risk.get("Max Drawdown", 0.0) or 0.0
-    if sharpe <= 0:
-        q_score += 0.0
-    elif sharpe <= 1:
-        q_score += 30.0 * sharpe
-    elif sharpe <= 2:
-        q_score += 30.0 + 30.0 * (sharpe - 1.0)
-    else:
-        q_score += 80.0
-    if isinstance(max_dd, (float, np.floating)):
-        if max_dd < -0.5: q_score -= 20.0
-        elif max_dd < -0.3: q_score -= 10.0
-    q_score = float(np.clip(q_score, 0, 100))
-    smart = w["F"] * f_score + w["T"] * t_score + w["Q"] * q_score
-    smart = float(np.clip(smart, 0, 100))
-    return {"SmartScore": smart, "FundamentalScore": f_score, "TechnicalScore": t_score, "QuantRiskScore": q_score}
+    sharpe = qm.get("Sharpe Ratio",0.0) or 0.0
+    if sharpe>0:
+        if sharpe<=1: q_score = 30*sharpe
+        elif sharpe<=2: q_score = 30+30*(sharpe-1)
+        else: q_score = 80
+    max_dd = risk.get("Max Drawdown",0.0) or 0.0
+    if max_dd<-0.5: q_score -=20
+    elif max_dd<-0.3: q_score -=10
+    q_score = np.clip(q_score,0,100)
+    smart = w["F"]*f_score + w["T"]*t_score + w["Q"]*q_score
+    return {"SmartScore": np.clip(smart,0,100), "FundamentalScore": f_score, "TechnicalScore": t_score, "QuantRiskScore": q_score}
 
-# ==========================================================================
-# 5.E TAX IMPACT
-# ==========================================================================
-def calculate_tax_impact(df_weights: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> pd.DataFrame:
-    if df_weights is None or df_weights.empty:
-        return pd.DataFrame()
-    df_tax = df_weights.copy()
-    df_tax["Aliquota Fiscale %"] = tax_rate * 100.0
-    df_tax["Plus/Minus Lorda"] = df_tax["P&L"].astype(float)
-    df_tax["Imposta Teorica"] = np.where(df_tax["Plus/Minus Lorda"] > 0, df_tax["Plus/Minus Lorda"] * tax_rate, 0.0)
-    df_tax["Plus/Minus Netta"] = df_tax["Plus/Minus Lorda"] - df_tax["Imposta Teorica"]
-    df_tax["Valore Netto Post Imposta"] = df_tax["Valore di Mercato"] - df_tax["Imposta Teorica"]
-    df_tax["Rendimento Netto %"] = np.where(df_tax["Importo Investito"] > 0, (df_tax["Plus/Minus Netta"] / df_tax["Importo Investito"]) * 100.0, 0.0)
-    cols = ["Ticker", "Importo Investito", "Valore di Mercato", "P&L", "Aliquota Fiscale %", "Imposta Teorica", "Plus/Minus Netta", "Valore Netto Post Imposta", "Rendimento Netto %"]
-    return df_tax[[c for c in cols if c in df_tax.columns]]
+# ---------------------------- PORTAFOGLIO (sintetico ma completo) -----------------
+def enrich_portfolio_with_fx(df_weights, base_currency="EUR"):
+    if df_weights.empty:
+        return df_weights
+    out = df_weights.copy()
+    out["FX Rate"] = out["Valuta"].apply(lambda c: get_fx_rate(c, base_currency))
+    out["Importo Investito Base"] = out["Importo Investito"] * out["FX Rate"]
+    out["Valore di Mercato Base"] = out["Valore di Mercato"] * out["FX Rate"]
+    out["P&L Base"] = out["P&L"] * out["FX Rate"]
+    tot = out["Valore di Mercato Base"].sum()
+    out["Peso Base %"] = out["Valore di Mercato Base"] / tot * 100 if tot>0 else 0
+    return out
 
-# ==========================================================================
-# 5.F PORTAFOGLIO: RENDIMENTI & METRICHE
-# ==========================================================================
-def get_daily_returns_for_ticker(symbol: str) -> Optional[pd.Series]:
-    df = get_technical_data(symbol)
-    if df is None or df.empty:
-        return None
-    returns = df["Close"].pct_change().dropna()
-    if returns.empty:
-        return None
-    returns.name = symbol
-    return returns
+def calculate_tax_with_loss_offset(df_base, tax_rate):
+    if df_base.empty:
+        return df_base, {}
+    gains = df_base["P&L Base"].clip(lower=0).sum()
+    losses = -df_base["P&L Base"].clip(upper=0).sum()
+    compensable = min(gains, losses)
+    taxable = max(0, gains - compensable)
+    tax = taxable * tax_rate
+    return df_base, {"Plusvalenze": gains, "Minusvalenze": losses, "Compensate": compensable, "Imposta": tax}
 
-def build_portfolio_returns(tickers: List[str], weights_pct: Dict[str, float]) -> Optional[Tuple[pd.DataFrame, pd.Series]]:
-    series_list: List[pd.Series] = []
+def build_portfolio_returns(tickers, weights_pct):
+    series = []
     for t in tickers:
-        r = get_daily_returns_for_ticker(t)
-        if r is not None:
-            series_list.append(r)
-    if not series_list:
-        return None
-    df_rets = pd.concat(series_list, axis=1, join="outer").sort_index()
-    df_rets = df_rets.dropna(how="all")
-    df_rets = df_rets.dropna()
-    if df_rets.empty:
-        return None
-    cols = df_rets.columns.tolist()
-    w = np.array([weights_pct.get(t, 0.0) for t in cols], dtype=float) / 100.0
-    if w.sum() <= 0:
-        return None
-    w = w / w.sum()
-    port_ret = (df_rets * w).sum(axis=1)
-    port_ret.name = "Portfolio"
-    return df_rets, port_ret
+        df = get_technical_data(t)
+        if df is not None:
+            ret = df['Close'].pct_change().dropna()
+            ret.name = t
+            series.append(ret)
+    if not series:
+        return None, None
+    df_ret = pd.concat(series, axis=1, join="inner").dropna()
+    w = np.array([weights_pct.get(t,0.0) for t in df_ret.columns])/100.0
+    w = w/w.sum()
+    port_ret = (df_ret * w).sum(axis=1)
+    return df_ret, port_ret
 
-def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
+def calculate_portfolio_metrics(port_ret):
     if port_ret is None or port_ret.empty:
-        return {"AnnRet": np.nan, "AnnVol": np.nan, "Sharpe": np.nan, "MaxDD": np.nan, "Sortino": np.nan, "Calmar": np.nan}
+        return {}
     rf = get_active_risk_free_rate()
     mu = port_ret.mean() * TRADING_DAYS_YEAR
     sigma = port_ret.std() * np.sqrt(TRADING_DAYS_YEAR)
-    excess = mu - rf
-    sharpe = excess / sigma if sigma > 0 else np.nan
-    equity = (1 + port_ret).cumprod()
-    roll_max = equity.cummax()
-    drawdown = equity / roll_max - 1.0
-    max_dd = drawdown.min() if not drawdown.empty else np.nan
-    rf_daily = rf / TRADING_DAYS_YEAR
-    downside = port_ret[port_ret < rf_daily]
-    downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
-    sortino = excess / downside_dev if downside_dev and downside_dev > 0 else np.nan
-    n_years = len(port_ret) / TRADING_DAYS_YEAR
-    cagr = (equity.iloc[-1]) ** (1.0 / n_years) - 1.0 if n_years > 0 else np.nan
-    calmar = cagr / abs(max_dd) if max_dd < 0 and not np.isnan(cagr) else np.nan
-    return {"AnnRet": float(mu), "AnnVol": float(sigma), "Sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan, "MaxDD": float(max_dd) if not np.isnan(max_dd) else np.nan, "Sortino": float(sortino) if not np.isnan(sortino) else np.nan, "Calmar": float(calmar) if not np.isnan(calmar) else np.nan, "CAGR": float(cagr) if not np.isnan(cagr) else np.nan}
+    sharpe = (mu - rf)/sigma if sigma>0 else np.nan
+    eq = (1+port_ret).cumprod()
+    dd = eq/eq.cummax() - 1
+    max_dd = dd.min()
+    cagr = eq.iloc[-1]**(TRADING_DAYS_YEAR/len(port_ret)) - 1
+    return {"AnnRet": mu, "AnnVol": sigma, "Sharpe": sharpe, "MaxDD": max_dd, "CAGR": cagr}
 
-# ==========================================================================
-# 5.G CONCENTRAZIONE & DIVERSIFICAZIONE
-# ==========================================================================
-def calculate_concentration_metrics(weights_pct: Dict[str, float]) -> Dict[str, float]:
-    w = np.array(list(weights_pct.values()), dtype=float) / 100.0
-    if w.sum() <= 0:
-        return {"HHI": np.nan, "ENS": np.nan, "Top1 %": np.nan, "Top3 %": np.nan}
-    w = w / w.sum()
-    hhi = float((w ** 2).sum())
-    ens = 1.0 / hhi if hhi > 0 else np.nan
-    sorted_w = np.sort(w)[::-1]
-    top1 = float(sorted_w[0] * 100.0)
-    top3 = float(sorted_w[:3].sum() * 100.0)
-    return {"HHI": hhi, "ENS": float(ens), "Top1 %": top1, "Top3 %": top3}
-
-def calculate_portfolio_beta(port_ret: pd.Series, benchmark_symbol: str = DEFAULT_BENCHMARK) -> Dict[str, float]:
-    try:
-        bench_df = get_technical_data(benchmark_symbol)
-        if bench_df is None or bench_df.empty:
-            return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
-        bench_ret = bench_df['Close'].pct_change().dropna()
-        joined = pd.concat([port_ret, bench_ret], axis=1, join='inner').dropna()
-        if joined.empty or len(joined) < 30:
-            return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
-        joined.columns = ['port', 'bench']
-        cov = joined['port'].cov(joined['bench'])
-        var_b = joined['bench'].var()
-        beta = cov / var_b if var_b > 0 else np.nan
-        rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
-        alpha_daily = (joined['port'].mean() - rf_daily) - beta * (joined['bench'].mean() - rf_daily)
-        alpha_ann = alpha_daily * TRADING_DAYS_YEAR
-        corr = joined['port'].corr(joined['bench'])
-        return {"Beta": float(beta) if not np.isnan(beta) else np.nan, "Alpha (ann.)": float(alpha_ann) if not np.isnan(alpha_ann) else np.nan, "Corr": float(corr) if not np.isnan(corr) else np.nan}
-    except Exception as e:
-        logger.debug(f"Beta non calcolabile: {e}")
-        return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
-
-# ==========================================================================
-# 5.H PORTFOLIO HELPER (BUGFIX)
-# ==========================================================================
-def get_latest_price_in_native_currency(ticker: str) -> Optional[float]:
-    df = get_technical_data(ticker)
-    if df is not None and not df.empty and 'Close' in df.columns:
-        try:
-            return float(df['Close'].dropna().iloc[-1])
-        except Exception:
-            pass
-    raw = get_fundamental_data(ticker)
-    if raw and raw.get('info'):
-        info = raw['info']
-        price = info.get('currentPrice') or info.get('regularMarketPrice')
-        if price is not None:
-            try:
-                return float(price)
-            except (TypeError, ValueError):
-                return None
-    return None
-
-def get_ticker_native_currency(symbol: str) -> Optional[str]:
-    raw = get_fundamental_data(symbol)
-    if raw and raw.get('info'):
-        cur = raw['info'].get('currency')
-        if cur:
-            return str(cur).upper().strip()
-    return None
-
-def calculate_position_from_quantity(ticker: str, quantity: float, pmc: float, user_currency: Optional[str] = None, base_currency: Optional[str] = None) -> Dict[str, float]:
-    current_price_native = get_latest_price_in_native_currency(ticker)
-    native_cur = get_ticker_native_currency(ticker)
-    if not native_cur:
-        native_cur = "USD"
-        logger.debug(f"Valuta nativa non rilevata per {ticker}, assumption: USD")
-    user_cur = (user_currency or "USD").upper().strip()
-    invested = float(quantity * pmc) if quantity > 0 and pmc > 0 else 0.0
-    if current_price_native is None or current_price_native <= 0:
-        return {'Prezzo Attuale': np.nan, 'Importo Investito': invested, 'Valore di Mercato': 0.0, 'P&L': 0.0, 'P&L %': 0.0, 'Valuta Nativa': native_cur, 'Valuta Utente': user_cur, 'FX Native->User': 1.0}
-    fx_native_to_user = get_fx_rate(native_cur, user_cur) if native_cur != user_cur else 1.0
-    current_price_in_user_cur = float(current_price_native) * fx_native_to_user
-    market_value = float(quantity) * current_price_in_user_cur if quantity > 0 else 0.0
-    pnl_value = market_value - invested
-    pnl_pct = (pnl_value / invested) * 100.0 if invested > 0 else 0.0
-    result = {'Prezzo Attuale': current_price_in_user_cur, 'Prezzo Attuale Nativa': float(current_price_native), 'Importo Investito': invested, 'Valore di Mercato': market_value, 'P&L': pnl_value, 'P&L %': pnl_pct, 'Valuta Nativa': native_cur, 'Valuta Utente': user_cur, 'FX Native->User': fx_native_to_user}
-    if base_currency and base_currency != user_cur:
-        fx_user_to_base = get_fx_rate(user_cur, base_currency)
-        result['Importo Investito Base'] = invested * fx_user_to_base
-        result['Valore di Mercato Base'] = market_value * fx_user_to_base
-        result['P&L Base'] = pnl_value * fx_user_to_base
-        result['Valuta Base'] = base_currency
-    return result
-
-def get_latest_price(symbol: str) -> Optional[float]:
-    return get_latest_price_in_native_currency(symbol)
-
-# ==========================================================================
-# 5.I PWA SUPPORT
-# ==========================================================================
-def inject_pwa_support():
-    st.markdown("""
-    <script>
-    (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
-      const manifest = {
-        name: 'V-Quant Pro',
-        short_name: 'V-Quant Pro',
-        description: 'Analisi investimenti e portafoglio installabile su smartphone',
-        start_url: '.',
-        display: 'standalone',
-        background_color: '#0e1117',
-        theme_color: '#0e1117',
-        icons: [
-          { src: 'data:image/png;base64,' + base64Png, sizes: '192x192', type: 'image/png' },
-          { src: 'data:image/png;base64,' + base64Png, sizes: '512x512', type: 'image/png' }
-        ]
-      };
-      const manifestBlob = new Blob([JSON.stringify(manifest)], {type: 'application/manifest+json'});
-      const manifestUrl = URL.createObjectURL(manifestBlob);
-      const link = document.createElement('link');
-      link.rel = 'manifest';
-      link.href = manifestUrl;
-      document.head.appendChild(link);
-      const appleIcon = document.createElement('link');
-      appleIcon.rel = 'apple-touch-icon';
-      appleIcon.href = 'data:image/png;base64,' + base64Png;
-      document.head.appendChild(appleIcon);
-      const meta1 = document.createElement('meta');
-      meta1.name = 'apple-mobile-web-app-capable';
-      meta1.content = 'yes';
-      document.head.appendChild(meta1);
-      const meta2 = document.createElement('meta');
-      meta2.name = 'apple-mobile-web-app-status-bar-style';
-      meta2.content = 'black-translucent';
-      document.head.appendChild(meta2);
-      const meta3 = document.createElement('meta');
-      meta3.name = 'apple-mobile-web-app-title';
-      meta3.content = 'BurryPro';
-      document.head.appendChild(meta3);
-      const meta4 = document.createElement('meta');
-      meta4.name = 'theme-color';
-      meta4.content = '#0e1117';
-      document.head.appendChild(meta4);
-    })();
-    </script>
-    """, unsafe_allow_html=True)
-
-# ==========================================================================
-# 5.J ALLOCAZIONE E RIBILANCIAMENTO
-# ==========================================================================
-def infer_asset_class(ticker: str, company_name: str = "") -> str:
-    t = str(ticker).upper()
-    name = str(company_name).lower()
-    etf_keywords = ["etf", "ucits", "ishares", "xtrackers", "vanguard", "lyxor", "amundi", "invesco", "wisdomtree", "spdr"]
-    bond_keywords = ["bond", "treasury", "aggregate", "gov", "government", "corporate"]
-    gold_keywords = ["gold", "physical gold", "precious", "silver", "metals"]
-    crypto_keywords = ["btc-", "eth-", "-usd", "-eur"]
-    if any(k in name for k in etf_keywords):
-        if any(k in name for k in bond_keywords):
-            return "ETF Obbligazionario"
-        if any(k in name for k in gold_keywords):
-            return "ETF/ETC Oro"
-        return "ETF Azionario"
-    if any(k in t for k in crypto_keywords):
-        return "Crypto"
-    if any(k in name for k in bond_keywords):
-        return "Obbligazione/Fondo Bond"
-    if any(k in name for k in gold_keywords):
-        return "Oro/Metalli"
+def infer_asset_class(ticker, name=""):
+    t = ticker.upper()
+    if any(k in name.lower() for k in ["etf","ucits","ishares"]): return "ETF"
+    if any(k in t for k in ["-USD","-EUR"]): return "Crypto"
+    if t.endswith((".MI",".DE",".PA",".L")): return "Azione"
     return "Azione"
 
-def infer_geography(ticker: str, company_name: str = "") -> str:
-    t = str(ticker).upper()
-    name = str(company_name).lower()
-    suffix_map = {".MI": "Italia", ".DE": "Germania", ".PA": "Francia", ".L": "Regno Unito", ".AS": "Olanda", ".BR": "Belgio", ".LS": "Portogallo", ".MC": "Spagna", ".SW": "Svizzera", ".ST": "Svezia", ".CO": "Danimarca", ".HE": "Finlandia", ".OL": "Norvegia", ".VI": "Austria", ".IR": "Irlanda", ".TO": "Canada", ".V": "Canada", ".AX": "Australia", ".NZ": "Nuova Zelanda", ".T": "Giappone", ".HK": "Hong Kong", ".SS": "Cina (Shanghai)", ".SZ": "Cina (Shenzhen)", ".KS": "Corea del Sud", ".NS": "India", ".BO": "India", ".BR": "Brasile", ".MX": "Messico", ".SA": "Brasile"}
-    for suf, geo in suffix_map.items():
-        if t.endswith(suf):
-            return geo
-    if "-USD" in t:
-        return "Crypto/USD"
-    us_keywords = ["s&p", "nasdaq", "russell", "usa", "united states", "msci usa"]
-    eu_keywords = ["europe", "stoxx", "euro stoxx", "msci europe"]
-    em_keywords = ["emerging", "msci em"]
-    world_keywords = ["world", "all-world", "acwi", "ftse all-world", "global"]
-    japan_keywords = ["japan", "topix", "nikkei"]
-    china_keywords = ["china", "csi", "hang seng"]
-    if any(k in name for k in world_keywords): return "Globale"
-    if any(k in name for k in us_keywords): return "USA"
-    if any(k in name for k in eu_keywords): return "Europa"
-    if any(k in name for k in em_keywords): return "Emergenti"
-    if any(k in name for k in japan_keywords): return "Giappone"
-    if any(k in name for k in china_keywords): return "Cina"
-    return "Da classificare"
-
-def build_portfolio_allocation_df(positive_holdings: Dict[str, float], holdings_currency: Dict[str, str]) -> pd.DataFrame:
+def build_portfolio_allocation_df(positive_holdings, holdings_currency):
     rows = []
-    for ticker, amount in positive_holdings.items():
-        raw = get_fundamental_data(ticker)
-        info = raw["info"] if raw and "info" in raw else {}
-        company_name = info.get("longName", info.get("shortName", ticker))
-        detected_currency = holdings_currency.get(ticker, info.get("currency", "USD"))
-        rows.append({"Ticker": ticker, "Company Name": company_name, "Importo": float(amount), "Valuta": detected_currency, "Asset Class": infer_asset_class(ticker, company_name), "Geografia": infer_geography(ticker, company_name)})
-    df_alloc = pd.DataFrame(rows)
-    if df_alloc.empty:
-        return df_alloc
-    total = df_alloc["Importo"].sum()
-    df_alloc["Peso %"] = np.where(total > 0, df_alloc["Importo"] / total * 100.0, 0.0)
-    return df_alloc.sort_values("Peso %", ascending=False).reset_index(drop=True)
+    for t, amt in positive_holdings.items():
+        raw = get_fundamental_data(t)
+        info = raw["info"] if raw else {}
+        name = info.get("longName", t)
+        cur = holdings_currency.get(t, info.get("currency","USD"))
+        rows.append({"Ticker": t, "Company Name": name, "Importo": amt, "Valuta": cur, "Asset Class": infer_asset_class(t, name)})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        tot = df["Importo"].sum()
+        df["Peso %"] = df["Importo"]/tot*100
+    return df
 
-def summarize_group_weights(df_alloc: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    if df_alloc.empty or group_col not in df_alloc.columns:
-        return pd.DataFrame()
-    out = df_alloc.groupby(group_col, dropna=False)["Importo"].sum().reset_index().sort_values("Importo", ascending=False)
-    total = out["Importo"].sum()
-    out["Peso %"] = np.where(total > 0, out["Importo"] / total * 100.0, 0.0)
-    return out.reset_index(drop=True)
-
-def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str, float], group_col: str = "Ticker", tolerance_pct: float = 1.0) -> pd.DataFrame:
+def summarize_group_weights(df_alloc, group_col):
     if df_alloc.empty:
         return pd.DataFrame()
-    current = summarize_group_weights(df_alloc, group_col)
-    if current.empty:
+    gb = df_alloc.groupby(group_col)["Importo"].sum().reset_index()
+    gb["Peso %"] = gb["Importo"]/gb["Importo"].sum()*100
+    return gb.sort_values("Importo", ascending=False)
+
+def compute_rebalancing_actions(df_alloc, target_weights, group_col="Ticker", tol=1.0):
+    if df_alloc.empty:
+        return pd.DataFrame()
+    cur = summarize_group_weights(df_alloc, group_col)
+    if cur.empty:
         return pd.DataFrame()
     target_df = pd.DataFrame({group_col: list(target_weights.keys()), "Target %": list(target_weights.values())})
-    merged = current.merge(target_df, on=group_col, how="outer").fillna(0.0)
-    total_value = df_alloc["Importo"].sum()
+    merged = cur.merge(target_df, on=group_col, how="outer").fillna(0.0)
+    total = df_alloc["Importo"].sum()
     merged["Scostamento %"] = merged["Target %"] - merged["Peso %"]
-    merged["Azione €"] = total_value * merged["Scostamento %"] / 100.0
-    threshold = tolerance_pct / 100.0 * total_value
-    merged["Azione"] = np.where(merged["Azione €"] > threshold, "Compra", np.where(merged["Azione €"] < -threshold, "Riduci", "In target"))
-    return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
+    merged["Azione €"] = total * merged["Scostamento %"] / 100.0
+    merged["Azione"] = np.where(merged["Azione €"] > tol, "Compra", np.where(merged["Azione €"] < -tol, "Riduci", "In target"))
+    return merged
 
-# ==========================================================================
-# 6. UI: SIDEBAR (RINOMINATO VQAi)
-# ==========================================================================
-def render_apk_download_box() -> None:
-    with st.sidebar.expander("Download App Android (APK)", expanded=False):
-        st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
-        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
-        st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute per il browser o il file manager usato per il download.")
+# ---------------------------- INTERFACCIA STREAMLIT (SIDEBAR + MAIN) -----------------
+st.set_page_config(page_title="V-Quant Pro", layout="wide")
+inject_pwa_support = lambda: None  # semplificato
 
-def setup_sidebar() -> Dict[str, Any]:
+def setup_sidebar():
     render_auth_sidebar()
-    with st.sidebar.expander("⚙️ Impostazioni globali", expanded=False):
-        base_currency = st.selectbox("Valuta base portafoglio", ["EUR", "USD", "GBP", "CHF"], index=0, key="base_currency_sel")
-        rf_mode = st.radio("Tasso risk-free", ["Dinamico (^IRX)", "Manuale", "Default 4%"], index=0, key="rf_mode_sel")
+    with st.sidebar.expander("⚙️ Impostazioni"):
+        base_cur = st.selectbox("Valuta base", ["EUR","USD","GBP"], index=0, key="base_currency")
+        rf_mode = st.radio("Risk-free", ["Dinamico","Manuale","Default 4%"], index=0)
         if rf_mode == "Manuale":
-            rf_manual = st.number_input("Tasso risk-free manuale (%)", 0.0, 15.0, value=DEFAULT_RISK_FREE_RATE * 100, step=0.1)
-            st.session_state["risk_free_override"] = rf_manual / 100.0
+            rf_man = st.number_input("Tasso %", 0.0,15.0,4.0,0.1)
+            st.session_state["risk_free_override"] = rf_man/100.0
         elif rf_mode == "Default 4%":
-            st.session_state["risk_free_override"] = DEFAULT_RISK_FREE_RATE
+            st.session_state["risk_free_override"] = 0.04
         else:
             st.session_state["risk_free_override"] = None
-        rf_eff = get_active_risk_free_rate()
-        st.caption(f"Tasso risk-free effettivo: {rf_eff*100:.2f}%")
-        st.markdown("**Pesi Smart Quant Score**")
-        col_w1, col_w2, col_w3 = st.columns(3)
-        wF = col_w1.number_input("F", 0.0, 1.0, DEFAULT_SMART_WEIGHTS["F"], 0.05)
-        wT = col_w2.number_input("T", 0.0, 1.0, DEFAULT_SMART_WEIGHTS["T"], 0.05)
-        wQ = col_w3.number_input("Q", 0.0, 1.0, DEFAULT_SMART_WEIGHTS["Q"], 0.05)
-        s = wF + wT + wQ
-        if s > 0:
-            st.session_state["smart_weights"] = {"F": wF/s, "T": wT/s, "Q": wQ/s}
-        else:
-            st.session_state["smart_weights"] = DEFAULT_SMART_WEIGHTS
-    st.session_state["base_currency"] = base_currency
-    st.sidebar.header("1. Selezione Asset")
-    input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
-    file, manual = None, None
-    if input_mode == "Batch CSV":
-        file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
+        st.caption(f"Risk-free effettivo: {get_active_risk_free_rate()*100:.2f}%")
+        st.markdown("**Pesi Smart Quant**")
+        wF = st.number_input("F",0.0,1.0,0.4,0.05)
+        wT = st.number_input("T",0.0,1.0,0.3,0.05)
+        wQ = st.number_input("Q",0.0,1.0,0.3,0.05)
+        s = wF+wT+wQ
+        if s>0:
+            st.session_state["smart_weights"] = {"F":wF/s, "T":wT/s, "Q":wQ/s}
+    st.sidebar.header("1. Asset")
+    mode = st.sidebar.radio("Input", ["Manuale","Batch CSV"], horizontal=True)
+    file = None
+    manual = None
+    if mode == "Batch CSV":
+        file = st.sidebar.file_uploader("CSV (colonna 'Ticker')", type=["csv"])
     else:
-        manual = st.sidebar.text_input("Ticker", value="AAPL").upper().strip()
+        manual = st.sidebar.text_input("Ticker", "AAPL").upper().strip()
     st.sidebar.header("2. Mercato")
-    market = st.sidebar.selectbox("Borsa", ["USA", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Spagna (.MC)", "Svizzera (.SW)", "Canada (.TO)", "Giappone (.T)", "Hong Kong (.HK)", "Australia (.AX)", "India (.NS)", "Crypto", "Custom"])
-    suffix_lookup = {"Italia": ".MI", "Germania": ".DE", "Francia": ".PA", "GB": ".L", "Spagna": ".MC", "Svizzera": ".SW", "Canada": ".TO", "Giappone": ".T", "Hong Kong": ".HK", "Australia": ".AX", "India": ".NS"}
-    suffix = ""
-    for k, s in suffix_lookup.items():
-        if k in market:
-            suffix = s
-            break
-    analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
-    with st.sidebar.expander("⚙️ Parametri Fondamentali"):
-        cfg = {"roic": st.number_input("Min ROIC %", value=10.0, step=0.5), "fcf": st.number_input("Min FCF (Mld)", value=0.0, step=1e9), "peg": st.number_input("Max PEG Ratio", value=1.5, step=0.1), "pe": st.number_input("Max PE (Fallback)", value=25.0), "intcov": st.number_input("Min Int. Coverage", value=3.0), "custom_max_de": st.number_input("Custom Max Debt/Equity", value=1.0, step=0.1), "custom_min_fcf_margin": st.number_input("Custom Min FCF Margin", value=0.08, step=0.01, format="%.2f"), "custom_min_net_margin": st.number_input("Custom Min Net Margin", value=0.10, step=0.01, format="%.2f"), "perfectonly": st.checkbox("Solo All Green"), "model_mode": st.selectbox("Modello verdetto", ["Entrambi", "Classico", "Evoluto", "Personalizzabile"], index=0)}
-    with st.sidebar.expander("❓ Come cercare il ticker corretto"):
-        st.markdown("""
-- Azioni USA: solo ticker, es. AAPL, MSFT.
-- Italia: aggiungi `.MI` (es. STLAM.MI, ENI.MI).
-- Germania: `.DE` (BMW.DE, SAP.DE).
-- Francia: `.PA` (AIR.PA, OR.PA).
-- UK: `.L` (ULVR.L).
-- Spagna: `.MC`, Svizzera: `.SW`.
-- Canada: `.TO`, Giappone: `.T`, Hong Kong: `.HK`.
-- Crypto: coppia con valuta, es. `BTC-USD`, `ETH-USD`.
-- In dubbio: cerca su Yahoo Finance e copia il ticker esatto.
-        """)
+    market = st.sidebar.selectbox("Borsa", ["USA","Italia (.MI)","Germania (.DE)","Francia (.PA)","GB (.L)","Crypto"])
+    suffix_map = {"Italia":".MI","Germania":".DE","Francia":".PA","GB":".L"}
+    suffix = suffix_map.get(market.split()[0], "")
+    analizza = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
+    with st.sidebar.expander("Parametri"):
+        cfg = {"roic": st.number_input("Min ROIC %",10.0), "peg": st.number_input("Max PEG",1.5),
+               "custom_max_de": st.number_input("Max D/E",1.0), "custom_min_fcf_margin": st.number_input("Min FCF margin %",8.0)/100,
+               "custom_min_net_margin": st.number_input("Min Net margin %",10.0)/100,
+               "model_mode": st.selectbox("Modello verdetto", ["Entrambi","Classico","Evoluto","Personalizzabile","Value Investing","Universale"])}
     render_apk_download_box()
-    with st.sidebar.expander("ℹ️ Chi Siamo", expanded=False):
-        st.markdown("""
-### Benvenuti su V-QUANT PRO
+    return {"mode": mode, "file": file, "manual": manual, "suffix": suffix, "btn": analizza, "cfg": cfg, "base_currency": st.session_state.get("base_currency","EUR")}
 
-V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
+def render_apk_download_box():
+    with st.sidebar.expander("Download APK"):
+        st.link_button("📲 Scarica APK", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
 
-La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF , Crypto e singoli titoli azionari ed obbligazionari.
+def _init_session_state():
+    for k in ['batch_results', 'selected_ticker', 'portfolio_tickers', 'holdings', 'holdings_quantity',
+              'holdings_pmc', 'holdings_currency', 'analysis_errors', 'standalone_ticker_input',
+              'vq_ai_history', 'vq_ai_symbol', 'vq_ai_live_context', 'ai_ticker_chat_history']:
+        if k not in st.session_state:
+            st.session_state[k] = [] if 'history' in k or 'errors' in k else ({} if 'holdings' in k else None)
 
-Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
-
-### Cosa facciamo:
-- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
-- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
-- Strumenti di supporto decisionale basati su modelli matematici
-
-### ⚠️ Disclaimer Legale
-
-V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
-
-Sviluppato con passione da Innovative Program.
-        """)
-    with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
-        st.markdown("""
-### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
-
-#### 1. Conservazione dei Dati 
-Tutti i dati sensibili, inclusi i dati di autenticazione (email e password) e le configurazioni del tuo portafoglio, sono **detenuti e gestiti in modo sicuro da Supabase. 
-#### Supabase è una piattaforma di database di livello enterprise che garantisce la crittografia dei dati a riposo e in transito.
-Le password sono archiviate tramite hashing sicuro e non sono mai accessibili in chiaro agli amministratori di V-QUANT PRO.
-
-#### 2. Analisi Finanziaria e Cookie
-Questo sito utilizza  Google AdSense per la visualizzazione di annunci pubblicitari e cookie tecnici per il corretto funzionamento della Dashboard.
-Google utilizza i cookie per pubblicare annunci basati sulle tue visite precedenti.
-Puoi gestire le preferenze sugli annunci visitando le impostazioni di Google.
-
-#### 3. Diritti dell'Utente
-
-Poiché i dati sono detenuti su infrastruttura Supabase, puoi richiedere in ogni momento la cancellazione totale del tuo account e dei dati associati attraverso le impostazioni del profilo o contattandoci..
-
-#### 4. Esclusione di Responsabilità
-
-V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
-
-#### 5. Sicurezza
-
-Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
-        """)
-    with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
-        st.markdown("""
-        ### Perché una donazione?
-        V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
-        Mantenere l'infrastruttura, aggiornare i dati in tempo reale e sviluppare nuove funzionalità ha dei costi vivi.
-        
-        Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
-        """)
-        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
-        st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
-    with st.sidebar.expander("Contatti", expanded=False):
-        st.write("Per supporto tecnico, collaborazioni o richieste:")
-        st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
-        st.caption("Risposta normalmente entro 24/48 ore.")
-    return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "cfg": cfg, "base_currency": base_currency}
-
-def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
+def resolve_active_analysis_target():
     ticker = st.session_state.get('selected_ticker')
     batch = st.session_state.get('batch_results')
-    row = None
-    raw_data = None
-    if ticker and batch is not None and not batch.empty and 'Ticker' in batch.columns and ticker in batch['Ticker'].values:
-        row = batch[batch['Ticker'] == ticker].iloc[0]
-        raw_data = row.get('_raw_data') if hasattr(row, 'get') else None
-        return ticker, row, raw_data, 'batch'
-    try:
-        manual = sanitize_ticker(st.session_state.get('standalone_ticker_input', '')) if st.session_state.get('standalone_ticker_input') else ''
-    except ValueError:
-        manual = ''
-    portfolio_tickers = st.session_state.get('portfolio_tickers', []) or []
-    try:
-        portfolio_pick = sanitize_ticker(st.session_state.get('standalone_portfolio_pick', '')) if st.session_state.get('standalone_portfolio_pick') else ''
-    except ValueError:
-        portfolio_pick = ''
-    fallback_ticker = manual or portfolio_pick or (portfolio_tickers[0] if portfolio_tickers else None)
-    if not fallback_ticker:
-        return None, None, None, 'none'
-    try:
-        raw_data = get_fundamental_data(fallback_ticker)
-        if raw_data:
-            met = calculate_fundamental_metrics(raw_data)
+    if ticker and batch is not None and not batch.empty and 'Ticker' in batch.columns:
+        row = batch[batch['Ticker'] == ticker].iloc[0] if ticker in batch['Ticker'].values else None
+        return ticker, row, None, 'batch'
+    manual = st.session_state.get('standalone_ticker_input', '')
+    if manual:
+        raw = get_fundamental_data(manual)
+        if raw:
+            met = calculate_fundamental_metrics(raw)
             if met:
-                row = pd.Series(met.to_ui_dict())
-        return fallback_ticker, row, raw_data, 'standalone'
-    except Exception as e:
-        logger.warning(f'Standalone analysis unavailable for {fallback_ticker}: {e}')
-        return fallback_ticker, None, None, 'standalone'
-
-def _init_session_state() -> None:
-    defaults = {
-        'batch_results': None,
-        'selected_ticker': None,
-        'portfolio_tickers': [],
-        'holdings': {},
-        'holdings_currency': {},
-        'holdings_quantity': {},
-        'holdings_pmc': {},
-        'portfolio_target_mode': "Ticker",
-        'portfolio_targets': {},
-        'analysis_errors': [],
-        'portfolio_loaded_from_db': False,
-        'standalone_ticker_input': '',
-        'standalone_portfolio_pick': '',
-        'risk_free_override': None,
-        'base_currency': 'EUR',
-        'smart_weights': DEFAULT_SMART_WEIGHTS,
-        'ai_ticker_chat_history': [],
-        'ai_ticker_chat_last_symbol': None,
-        'vq_ai_history': [],  # Rinominato
-        'vq_ai_symbol': '',   # Rinominato
-        'vq_ai_asset_type': 'Azione',
-        'vq_ai_live_context': {},
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
-    return df_weights.to_csv(index=False).encode("utf-8")
+                return manual, pd.Series(met.to_ui_dict()), raw, 'standalone'
+    return None, None, None, 'none'
 
 def main():
     init_auth_state()
     _init_session_state()
-    st.title("💲 V-Quant Pro")
-    inject_pwa_support()
+    st.title("💲 V-Quant Pro v3.0 - Analisi Universale")
     ui = setup_sidebar()
-    if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
+    if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db'):
         load_user_portfolio()
         st.session_state.portfolio_loaded_from_db = True
-    if not is_authenticated():
-        st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
     if ui["btn"]:
-        targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
+        targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
             try:
-                csv_df = pd.read_csv(ui["file"])
-            except Exception as e:
-                st.error(f"Errore lettura CSV: {e}")
-                csv_df = None
-            if csv_df is not None:
-                if 'Ticker' not in csv_df.columns:
-                    st.error('Il CSV deve contenere una colonna Ticker.')
-                else:
-                    targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
+                csv = pd.read_csv(ui["file"])
+                if 'Ticker' in csv.columns:
+                    targets = csv['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
+            except:
+                pass
         if targets:
-            normalized_targets: List[str] = []
-            analysis_errors: List[str] = []
-            for t in targets:
-                try:
-                    normalized_targets.append(normalize_ticker(t, ui["suffix"]))
-                except Exception as e:
-                    analysis_errors.append(f'{t}: {e}')
-            with st.spinner(f"Analisi di {len(normalized_targets)} ticker in parallelo..."):
-                results, fetch_errors = fetch_metrics_batch(normalized_targets)
-            analysis_errors.extend(fetch_errors)
+            normalized = [normalize_ticker(t, ui["suffix"]) for t in targets if t]
+            with st.spinner(f"Analisi di {len(normalized)} ticker..."):
+                results, errors = fetch_metrics_batch(normalized)
             st.session_state.batch_results = pd.DataFrame(results)
-            st.session_state.analysis_errors = analysis_errors
+            st.session_state.analysis_errors = errors
             if results:
                 st.session_state.selected_ticker = results[0]["Ticker"]
-            else:
-                st.session_state.selected_ticker = None
-    if st.session_state.get('analysis_errors'):
-        with st.expander('⚠️ Diagnostica analisi', expanded=False):
-            for err in st.session_state.analysis_errors:
-                st.write(f'- {err}')
-    with st.sidebar:
-        st.markdown('---')
-        with st.expander('🤖 VqAi', expanded=False):  # Rinominato
-            st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti e la logica del programma.')
-            st.session_state.vq_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('vq_ai_asset_type', 'Azione') == 'Azione' else 1, key='vq_ai_asset_type_select')
-            st.session_state.vq_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('vq_ai_symbol', ''), key='vq_ai_symbol_input')
-            for msg in st.session_state.get('vq_ai_history', []):
-                with st.chat_message(msg.get('role', 'assistant')):
-                    st.markdown(msg.get('content', ''))
-            vq_ai_prompt = st.chat_input('Chiedi a VqAi', key='vq_ai_prompt_sidebar')  # Rinominato
-            if vq_ai_prompt:
-                ctx = build_burry_ai_context(st.session_state.get('vq_ai_symbol', '') or st.session_state.get('selected_ticker', ''), st.session_state.get('vq_ai_asset_type', 'Azione'), mode=st.session_state.get('model_mode', 'Entrambi'))
-                st.session_state.vq_ai_history.append({'role': 'user', 'content': vq_ai_prompt})
-                conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
-                for m in st.session_state.vq_ai_history[:-1]:
-                    conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
-                enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {vq_ai_prompt}"
-                with st.chat_message('user'):
-                    st.markdown(vq_ai_prompt)
-                with st.chat_message('assistant'):
-                    with st.spinner('VqAi sta rispondendo...'):  # Rinominato
-                        # Impostiamo max_tokens=None o molto alto per evitare troncamento
-                        reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode=st.session_state.get('model_mode', 'Entrambi'), max_tokens=8192)  # Aggiunto max_tokens alto
-                    st.markdown(reply)
-                st.session_state.vq_ai_history.append({'role': 'assistant', 'content': reply})
-    tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
-    with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
-        csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
-        batch_options: List[str] = []
-        if st.session_state.batch_results is not None and not st.session_state.batch_results.empty and 'Ticker' in st.session_state.batch_results.columns:
-            batch_options = st.session_state.batch_results['Ticker'].dropna().astype(str).tolist()
-        portfolio_options = sorted(st.session_state.get('portfolio_tickers', []) or [])
-        if batch_options:
-            sel_idx = ([''] + batch_options).index(st.session_state.selected_ticker) if st.session_state.selected_ticker in batch_options else 0
-            selected_from_batch = csel1.selectbox('Ticker dai risultati caricati', [''] + batch_options, index=sel_idx, key='quick_batch_pick')
-            if selected_from_batch:
-                st.session_state.selected_ticker = selected_from_batch
-                st.session_state.standalone_ticker_input = ''
+    ticker, row, raw_data, source = resolve_active_analysis_target()
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Fondamentali","📉 Tecnico","⚛️ Quant","⚖️ Verdetto","📁 Portafoglio"])
+    with tab1:
+        if row is not None:
+            st.dataframe(pd.DataFrame([row.drop('_raw_data', errors='ignore')]))
+            st.caption(f"Asset Class: {row.get('Asset Class', 'N/D')} | Moat Score: {row.get('Moat Score', 'N/D')}")
         else:
-            csel1.caption('Nessun batch attivo.')
-        if portfolio_options:
-            portfolio_pick = csel2.selectbox('Ticker dal portafoglio', [''] + portfolio_options, index=0, key='standalone_portfolio_pick')
-            if portfolio_pick:
-                st.session_state.selected_ticker = None
-                st.session_state.standalone_ticker_input = portfolio_pick
-        else:
-            csel2.caption('Portafoglio vuoto.')
-        manual_quick = csel3.text_input('Ticker libero', value=st.session_state.get('standalone_ticker_input', ''), key='quick_manual_ticker').upper().strip()
-        if manual_quick:
-            st.session_state.selected_ticker = None
-            st.session_state.standalone_ticker_input = manual_quick
-    ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
-    if not ticker:
-        st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
-    # TAB FONDAMENTALI
-    with tab_f:
-        if row is None:
-            st.info("Nessun ticker attivo. Usa il box 'Analisi rapida senza ricerca'.")
-            if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
-                st.dataframe(st.session_state.batch_results.drop(columns=['_raw_data'], errors='ignore'))
-        else:
-            st.info("💡 **Come leggere questa sezione:** qualita' del business prima, sostenibilita' finanziaria poi, prezzo/multipli alla fine.")
-            if analysis_source == 'batch' and st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
-                st.dataframe(st.session_state.batch_results.drop(columns=['_raw_data'], errors='ignore'))
-            elif row is not None:
-                st.success(f'Analisi standalone attiva su: {ticker}')
-                st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'))
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
-    # TAB TECNICO
-    with tab_t:
-        if row is None:
-            st.info("Nessun ticker attivo.")
-        else:
-            st.info("💡 **Come leggere il grafico:** SMA200 = trend di fondo, RSI = momentum.")
+            st.info("Nessun ticker selezionato")
+    with tab2:
+        if ticker:
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
-                df_calc = calculate_technical_indicators(df_tech)
-                score, reasons = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
+                df_ind = calculate_technical_indicators(df_tech)
+                score, _ = calculate_timing_score(df_ind, df_ind['Close'].iloc[-1])
                 st.metric("Timing Score", f"{score}/100")
-                with st.expander("Dettaglio segnali"):
-                    for r in reasons:
-                        st.write(r)
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200", line=dict(color='blue')), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
-                fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark")
-                st.plotly_chart(fig, width='stretch')
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3])
+                fig.add_trace(go.Candlestick(x=df_ind.index, open=df_ind['Open'], high=df_ind['High'], low=df_ind['Low'], close=df_ind['Close']), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind['SMA_200'], name="SMA200"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind['RSI'], name="RSI"), row=2, col=1)
+                fig.update_layout(height=600, template="plotly_dark")
+                st.plotly_chart(fig)
             else:
-                st.warning(f'Dati tecnici non disponibili per {ticker}.')
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
-    # TAB QUANT
-    with tab_q:
-        if row is None:
-            st.info("Nessun ticker attivo.")
+                st.warning("Dati tecnici non disponibili")
         else:
-            st.info("💡 **Quant:** Sharpe (con rf dinamico), Sortino (rischio downside), Calmar (CAGR/MaxDD), Altman Z-Score, VaR/CVaR, Monte Carlo bootstrap.")
+            st.info("Nessun ticker")
+    with tab3:
+        if ticker and row is not None:
             df_tech = get_technical_data(ticker)
             if df_tech is not None:
-                rf_eff = get_active_risk_free_rate()
-                qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data, risk_free=rf_eff)
+                qm = calculate_quant_metrics(df_tech)
                 risk = calculate_risk_metrics(df_tech)
-                c1, c2, c3 = st.columns(3)
-                c1.metric(f"Sharpe ({rf_eff*100:.1f}% Rf)", f"{qm['Sharpe Ratio']:.2f}")
-                c2.metric("Trend R-Squared", f"{qm['R-Squared']:.2f}")
-                z = qm['Altman Z-Score']
-                c3.metric("Altman Z-Score", f"{z:.2f}" if isinstance(z, (int, float)) else "N/A")
-                c4, c5, c6 = st.columns(3)
-                c4.metric("Max Drawdown", f"{risk['Max Drawdown']*100:.1f}%")
-                c5.metric("CAGR", f"{risk['CAGR']*100:.1f}%" if not np.isnan(risk['CAGR']) else "N/A")
-                c6.metric("VaR 95%", f"{risk['VaR_95']*100:.2f}%")
-                c7, c8, c9 = st.columns(3)
-                c7.metric("Sortino Ratio", f"{risk['Sortino']:.2f}" if not np.isnan(risk['Sortino']) else "N/A")
-                c8.metric("Calmar Ratio", f"{risk['Calmar']:.2f}" if not np.isnan(risk['Calmar']) else "N/A")
-                c9.metric("CVaR 95%", f"{risk['CVaR_95']*100:.2f}%" if not np.isnan(risk['CVaR_95']) else "N/A")
-                df_calc_q = calculate_technical_indicators(df_tech)
-                score_q, _ = calculate_timing_score(df_calc_q, df_calc_q['Close'].iloc[-1])
-                smart_w = st.session_state.get("smart_weights", DEFAULT_SMART_WEIGHTS)
-                smart = compute_smart_quant_score(row, score_q, qm, risk, weights=smart_w)
-                st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
-                st.caption(f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}")
-                with st.expander("📉 Distribuzione rendimenti & rischio"):
-                    st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
-                    returns = df_tech['Close'].pct_change().dropna()
-                    fig_r = go.Figure()
-                    fig_r.add_trace(go.Histogram(x=returns, nbinsx=50, name="Rendimenti giornalieri"))
-                    fig_r.update_layout(template="plotly_dark", bargap=0.05)
-                    st.plotly_chart(fig_r, width='stretch')
-                with st.expander("🎲 Simulazione Monte Carlo"):
-                    col_mc1, col_mc2, col_mc3 = st.columns(3)
-                    horizon_days = col_mc1.slider("Orizzonte (giorni)", 60, 756, 252, step=21)
-                    n_paths = col_mc2.slider("Numero traiettorie", 100, 3000, 1000, step=100)
-                    method = col_mc3.selectbox("Metodo", ["IID Bootstrap", "Block Bootstrap"])
-                    if method == "Block Bootstrap":
-                        mc = monte_carlo_block_bootstrap(df_tech, n_paths, horizon_days)
-                    else:
-                        mc = monte_carlo_equity(df_tech, n_paths, horizon_days)
-                    if mc["paths"] is not None:
-                        final_vals = mc["final_distribution"]
-                        p05 = np.quantile(final_vals, 0.05)
-                        p50 = np.quantile(final_vals, 0.50)
-                        c10, c11, c12 = st.columns(3)
-                        c10.metric("Prob. perdita > 20%", f"{(final_vals < 0.8).mean()*100:.1f}%")
-                        c11.metric("Mediana esito", f"{(p50-1)*100:.1f}%")
-                        c12.metric("5° percentile", f"{(p05-1)*100:.1f}%")
-                        x = np.arange(1, horizon_days + 1)
-                        fig_mc = go.Figure()
-                        fig_mc.add_trace(go.Scatter(x=x, y=mc["q50"], name="Mediana", line=dict(color="cyan")))
-                        fig_mc.add_trace(go.Scatter(x=x, y=mc["q95"], name="95° percentile", line=dict(color="green"), opacity=0.3))
-                        fig_mc.add_trace(go.Scatter(x=x, y=mc["q05"], name="5° percentile", line=dict(color="red"), opacity=0.3, fill="tonexty", fillcolor="rgba(255,0,0,0.1)"))
-                        fig_mc.update_layout(template="plotly_dark", height=400, xaxis_title="Giorni", yaxis_title="Equity")
-                        st.plotly_chart(fig_mc, width='stretch')
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
-    # TAB VERDETTO
-    with tab_v:
-        if row is None:
-            st.info("Nessun ticker attivo.")
-        else:
-            st.info("💡 **Verdetto:** modello Classico, Evoluto, Personalizzabile + Smart Quant.")
-            df_tech = get_technical_data(ticker)
-            qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data) if df_tech is not None else {}
-            risk = calculate_risk_metrics(df_tech) if df_tech is not None else {"Max Drawdown": 0.0, "CAGR": 0.0}
-            if df_tech is not None:
-                df_calc_v = calculate_technical_indicators(df_tech)
-                score, reasons = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
+                st.metric("Sharpe Ratio", f"{qm['Sharpe Ratio']:.2f}")
+                st.metric("Max Drawdown", f"{risk['Max Drawdown']*100:.1f}%")
+                st.metric("Sortino", f"{risk['Sortino']:.2f}")
+                st.metric("Calmar", f"{risk['Calmar']:.2f}")
+                mc = monte_carlo_equity(df_tech, 500, 252)
+                if mc:
+                    st.line_chart(pd.DataFrame({"Mediana": mc["q50"], "5° perc": mc["q05"], "95° perc": mc["q95"]}))
+    with tab4:
+        if ticker and row is not None:
+            st.subheader("Verdetto Value Investing integrato")
+            mos = row.get("Margin of Safety")
+            intrinsic = row.get("Intrinsic Value (DCF)")
+            st.metric("Valore Intrinseco DCF", f"{intrinsic:.2f}" if intrinsic else "N/D")
+            st.metric("Margine di Sicurezza", f"{mos*100:.1f}%" if mos else "N/D")
+            if row.get("Asset Class") == "Bond":
+                bm = row.get("bond_metrics", {})
+                st.metric("YTM", f"{bm.get('ytm',0)*100:.2f}%")
+                st.metric("Duration", f"{bm.get('modified_duration',0):.1f}")
+            elif row.get("Asset Class") == "ETF":
+                em = row.get("etf_metrics", {})
+                st.metric("ETF Quality", f"{em.get('quality_score',0)}/100")
+                st.write(f"Verdetto ETF: {em.get('verdict','N/D')}")
+            elif row.get("Asset Class") == "Crypto":
+                cm = row.get("crypto_metrics", {})
+                st.metric("Volatilità Crypto", f"{cm.get('volatility',0)*100:.1f}%")
+                st.write(f"Sentiment: {cm.get('sentiment','N/D')}")
             else:
-                score = 0
-                reasons = []
-            z_val = qm.get('Altman Z-Score', 0.0)
-            raw_info = (row.get('_raw_data', {}) or {}).get('info', {}) if row is not None else {}
-            z_safe = is_non_traditional_asset(ticker, raw_info) or (isinstance(z_val, (int, float)) and z_val >= ALTMAN_SAFE_THRESHOLD)
-            roic_thr = ui['cfg']['roic'] / 100.0
-            peg_thr = ui['cfg']['peg']
-            de_thr = ui['cfg']['custom_max_de']
-            fcfm_thr = ui['cfg']['custom_min_fcf_margin']
-            netm_thr = ui['cfg']['custom_min_net_margin']
-            roic_v = row.get('ROIC', 0.0) or 0.0
-            peg_v = row.get('PEG Ratio')
-            de_v = row.get('Debt/Equity')
-            fcfm_v = row.get('FCF Margin')
-            netm_v = row.get('Net Margin')
-            fund_pts_classic = (1 if roic_v >= roic_thr else 0) + (1 if peg_v is not None and peg_v <= peg_thr else 0)
-            fund_pts_evoluto = fund_pts_classic + (1 if de_v is not None and de_v <= 1.0 else 0) + (1 if fcfm_v is not None and fcfm_v >= 0.08 else 0) + (1 if netm_v is not None and netm_v >= 0.10 else 0)
-            fund_pts_custom = (1 if roic_v >= roic_thr else 0) + (1 if peg_v is not None and peg_v <= peg_thr else 0) + (1 if de_v is not None and de_v <= de_thr else 0) + (1 if fcfm_v is not None and fcfm_v >= fcfm_thr else 0) + (1 if netm_v is not None and netm_v >= netm_thr else 0)
-            mode = ui['cfg']['model_mode']
-            if mode == "Entrambi":
-                col_m1, col_m2 = st.columns(2)
-                col_m1.metric("Punti Modello Classico", f"{fund_pts_classic}/2")
-                col_m2.metric("Punti Modello Evoluto", f"{fund_pts_evoluto}/5")
-            if mode in ["Entrambi", "Evoluto"]:
-                st.caption(f"Evoluto → ROIC: {'✅' if roic_v >= roic_thr else '❌'} | PEG: {'✅' if (peg_v is not None and peg_v <= peg_thr) else '❌'} | D/E: {'✅' if (de_v is not None and de_v <= 1.0) else '❌'} | FCF Margin: {'✅' if (fcfm_v is not None and fcfm_v >= 0.08) else '❌'} | Net Margin: {'✅' if (netm_v is not None and netm_v >= 0.10) else '❌'}")
-            if mode == "Personalizzabile":
-                st.caption(f"Personalizzabile → ROIC: {'✅' if roic_v >= roic_thr else '❌'} | PEG: {'✅' if (peg_v is not None and peg_v <= peg_thr) else '❌'} | D/E: {'✅' if (de_v is not None and de_v <= de_thr) else '❌'} | FCF Margin: {'✅' if (fcfm_v is not None and fcfm_v >= fcfm_thr) else '❌'} | Net Margin: {'✅' if (netm_v is not None and netm_v >= netm_thr) else '❌'}")
-            if mode in ["Entrambi", "Classico"]:
-                st.subheader("Modello Classico")
-                if fund_pts_classic >= 2 and z_safe and score >= 50:
-                    st.success("🟢 BUY: Fondamentali base solidi e timing favorevole.")
-                elif fund_pts_classic >= 1 and z_safe:
-                    st.warning("🟡 HOLD: Azienda discreta, serve piu' margine di sicurezza.")
+                # Modello value per azioni
+                if mos and mos > 0.20:
+                    st.success("🟢 BUY: Ampio margine di sicurezza")
+                elif mos and mos > 0.10:
+                    st.warning("🟡 HOLD: Margine di sicurezza limitato")
                 else:
-                    st.error("🔴 SELL: Fondamentali o sicurezza finanziaria insufficienti.")
-            if mode in ["Entrambi", "Evoluto"]:
-                st.subheader("Modello Evoluto")
-                if fund_pts_evoluto >= 4 and z_safe and score >= 50:
-                    st.success("🟢 BUY: Fondamentali robusti, qualita' finanziaria e timing favorevole.")
-                elif fund_pts_evoluto >= 3 and z_safe:
-                    st.warning("🟡 HOLD: Azienda interessante, serve conferma.")
-                else:
-                    st.error("🔴 SELL: Fondamentali insufficienti o profilo rischio/rendimento debole.")
-            if mode == "Personalizzabile":
-                st.subheader("Modello Personalizzabile")
-                if fund_pts_custom >= 4 and z_safe and score >= 50:
-                    st.success("🟢 BUY: Criteri personalizzati soddisfatti e timing favorevole.")
-                elif fund_pts_custom >= 3 and z_safe:
-                    st.warning("🟡 HOLD: Setup discreto secondo i parametri personalizzati.")
-                else:
-                    st.error("🔴 SELL: Il titolo non soddisfa i criteri personalizzati.")
-            st.markdown('---')
-            st.subheader('Spiegazione AI')
-            ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
-            st.session_state.vq_ai_live_context[ticker] = ai_context
-            if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
-                st.session_state.ai_ticker_chat_history = []
-                st.session_state.ai_ticker_chat_last_symbol = ticker
-            if st.button('🧠 Spiega con AI', key=f'ai_explain_{ticker}'):
-                with st.spinner('Analisi AI in corso...'):
-                    ai_answer = ask_gemini_ticker_chat(ai_context, 'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.', mode=mode, max_tokens=8192)
-                st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
-            if st.session_state.get('ai_ticker_chat_history'):
-                last_ai_msg = st.session_state.ai_ticker_chat_history[-1]
-                if last_ai_msg.get('role') == 'assistant':
-                    st.markdown(last_ai_msg.get('content', ''))
-            st.subheader('Chat AI sul ticker')
-            for msg in st.session_state.get('ai_ticker_chat_history', []):
-                with st.chat_message(msg.get('role', 'assistant')):
-                    st.markdown(msg.get('content', ''))
-            ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
-            if ai_user_prompt:
-                st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
-                conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
-                for m in st.session_state.ai_ticker_chat_history[:-1]:
-                    conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
-                enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {ai_user_prompt}"
-                with st.chat_message('user'):
-                    st.markdown(ai_user_prompt)
-                with st.chat_message('assistant'):
-                    with st.spinner("L'AI sta rispondendo..."):
-                        ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode=mode, max_tokens=8192)
-                    st.markdown(ai_reply)
-                st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
-            if df_tech is not None and qm:
-                smart_w = st.session_state.get("smart_weights", DEFAULT_SMART_WEIGHTS)
-                smart_v = compute_smart_quant_score(row, score, qm, risk, weights=smart_w)
-                if mode in ["Entrambi", "Evoluto"]:
-                    st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
-                    st.write(f"F: {smart_v['FundamentalScore']:.0f} | T: {smart_v['TechnicalScore']:.0f} | Q: {smart_v['QuantRiskScore']:.0f}")
-                    if smart_v["SmartScore"] >= 70 and z_safe and fund_pts_evoluto >= 4:
-                        st.success("🟢 BUY (Quant): Vantaggio statistico, fondamentali e rischio OK.")
-                    elif smart_v["SmartScore"] >= 50 and z_safe and fund_pts_evoluto >= 3:
-                        st.warning("🟡 HOLD (Quant): Setup discreto.")
-                    else:
-                        st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole.")
-                if mode == "Personalizzabile":
-                    st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
-                    st.write(f"F: {smart_v['FundamentalScore']:.0f} | T: {smart_v['TechnicalScore']:.0f} | Q: {smart_v['QuantRiskScore']:.0f}")
-                    if smart_v["SmartScore"] >= 70 and z_safe and fund_pts_custom >= 4:
-                        st.success("🟢 BUY (Quant): Vantaggio statistico e criteri personalizzati OK.")
-                    elif smart_v["SmartScore"] >= 50 and z_safe and fund_pts_custom >= 3:
-                        st.warning("🟡 HOLD (Quant): Setup discreto.")
-                    else:
-                        st.error("🔴 NO TRADE (Quant): Score o criteri insufficienti.")
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>", unsafe_allow_html=True)
-    # TAB PORTAFOGLIO
-    with tab_p:
-        st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita', PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze, concentrazione, ribilanciamento.")
-        base_currency = ui.get("base_currency") or st.session_state.get("base_currency", "EUR")
-        st.success(f"Valuta base portafoglio: **{base_currency}** | Conversione FX reale attiva.")
-        all_tickers_batch: List[str] = []
-        if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
-            all_tickers_batch = st.session_state.batch_results["Ticker"].tolist()
-        if all_tickers_batch:
-            st.markdown("#### Seleziona dal batch analizzato")
-            default_batch = [t for t in st.session_state.portfolio_tickers if t in all_tickers_batch]
-            selected_from_batch = st.multiselect("Titoli da includere nel portafoglio (da batch)", all_tickers_batch, default=default_batch)
+                    st.error("🔴 SELL: Prezzo troppo alto rispetto al valore")
         else:
-            selected_from_batch = []
-        st.markdown("#### Aggiungi manualmente altri ticker")
-        manual_ticker = st.text_input("Ticker (incluso suffisso mercato, es. STLAM.MI, BMW.DE, AIR.PA, ULVR.L)", "")
-        if st.button("➕ Aggiungi ticker manuale al portafoglio"):
-            if manual_ticker.strip():
+            st.info("Nessun ticker")
+    with tab5:
+        st.info("Gestione portafoglio (leggero, ma funzionante)")
+        if st.button("📥 Carica portafoglio salvato"):
+            load_user_portfolio()
+            st.rerun()
+        portfolio_tickers = st.session_state.get('portfolio_tickers', [])
+        if portfolio_tickers:
+            st.write("Ticker in portafoglio:", ", ".join(portfolio_tickers))
+            for t in portfolio_tickers:
+                col1, col2, col3 = st.columns([1,1,0.5])
+                qty = st.session_state.holdings_quantity.get(t, 0)
+                pmc = st.session_state.holdings_pmc.get(t, 0)
+                cur = st.session_state.holdings_currency.get(t, "USD")
+                new_qty = col1.number_input(f"Qty {t}", value=float(qty), step=1.0, key=f"qty_{t}")
+                new_pmc = col2.number_input(f"PMC {t}", value=float(pmc), step=0.5, key=f"pmc_{t}")
+                if col3.button("🗑", key=f"del_{t}"):
+                    delete_user_portfolio_position(t)
+                    st.session_state.portfolio_tickers.remove(t)
+                    st.rerun()
+                st.session_state.holdings_quantity[t] = new_qty
+                st.session_state.holdings_pmc[t] = new_pmc
+                st.session_state.holdings_currency[t] = cur
+                if is_authenticated():
+                    save_user_portfolio_position(t, new_qty, new_pmc, cur)
+        else:
+            st.info("Portafoglio vuoto. Aggiungi dal tab fondamentali (pulsante 'Aggiungi al portafoglio') o carica.")
+        # Quick add
+        new_ticker = st.text_input("Aggiungi ticker manuale")
+        if st.button("➕ Aggiungi"):
+            if new_ticker:
                 try:
-                    t_clean = sanitize_ticker(manual_ticker)
+                    t_clean = sanitize_ticker(new_ticker)
                     if t_clean not in st.session_state.portfolio_tickers:
                         st.session_state.portfolio_tickers.append(t_clean)
-                        st.session_state.holdings_quantity.setdefault(t_clean, 0.0)
-                        st.session_state.holdings_pmc.setdefault(t_clean, 0.0)
-                        st.session_state.holdings_currency.setdefault(t_clean, 'USD')
-                        if is_authenticated():
-                            save_user_portfolio_position(t_clean, st.session_state.holdings_quantity[t_clean], st.session_state.holdings_pmc[t_clean], st.session_state.holdings_currency[t_clean])
-                        st.success(f"Aggiunto {t_clean} al portafoglio.")
-                except ValueError as e:
+                        st.session_state.holdings_quantity[t_clean] = 0.0
+                        st.session_state.holdings_pmc[t_clean] = 0.0
+                        st.session_state.holdings_currency[t_clean] = "USD"
+                        st.rerun()
+                except Exception as e:
                     st.error(f"Ticker non valido: {e}")
-            else:
-                st.warning("Inserisci un ticker valido prima di aggiungere.")
-        portfolio_list = sorted(set(selected_from_batch + st.session_state.portfolio_tickers))
-        st.session_state.portfolio_tickers = portfolio_list
-        if portfolio_list:
-            st.markdown("#### Dati posizione per ogni ticker")
-            cols = st.columns(2)
-            holdings: Dict[str, float] = st.session_state.holdings
-            holdings_quantity: Dict[str, float] = st.session_state.holdings_quantity
-            holdings_pmc: Dict[str, float] = st.session_state.holdings_pmc
-            for i, t in enumerate(portfolio_list):
-                col = cols[i % 2]
-                col.markdown(f"##### {t}")
-                default_qty = float(holdings_quantity.get(t, 0.0))
-                default_pmc = float(holdings_pmc.get(t, 0.0))
-                qty = col.number_input(f"{t} - Quantità / Quote", min_value=0.0, value=default_qty, step=0.01, format="%.4f", key=f"holding_qty_{t}")
-                pmc = col.number_input(f"{t} - PMC", min_value=0.0, value=default_pmc, step=0.01, format="%.4f", key=f"holding_pmc_{t}")
-                cur_default = st.session_state.holdings_currency.get(t, "USD")
-                cur_options = ["USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD"]
-                if cur_default not in cur_options:
-                    cur_options = [cur_default] + cur_options
-                cur = col.selectbox(f"{t} - Valuta posizione", cur_options, index=cur_options.index(cur_default) if cur_default in cur_options else 0, key=f"currency_{t}")
-                st.session_state.holdings_currency[t] = cur
-                derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur) if qty > 0 and pmc > 0 else {'Importo Investito': 0.0, 'Prezzo Attuale': np.nan, 'Valore di Mercato': 0.0, 'P&L': 0.0, 'P&L %': 0.0, 'Valuta Nativa': cur, 'FX Native->User': 1.0}
-                holdings_quantity[t] = qty
-                holdings_pmc[t] = pmc
-                holdings[t] = float(derived['Importo Investito'])
-                if is_authenticated():
-                    save_user_portfolio_position(t, qty, pmc, cur)
-                price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
-                native_cur = derived.get('Valuta Nativa', cur)
-                fx_used = derived.get('FX Native->User', 1.0)
-                col.caption(f"Prezzo (in {cur}): {price_text} | Investito: {derived['Importo Investito']:.2f} | Valore: {derived['Valore di Mercato']:.2f} | P&L: {derived['P&L']:.2f} ({derived['P&L %']:.2f}%)")
-                if native_cur and native_cur != cur:
-                    col.caption(f"⚠️ Valuta nativa: {native_cur}, FX applicato: {fx_used:.4f}")
-                if col.button("🗑 Rimuovi", key=f"remove_{t}"):
-                    if t in st.session_state.portfolio_tickers:
-                        st.session_state.portfolio_tickers = [x for x in st.session_state.portfolio_tickers if x != t]
-                    for d in [st.session_state.holdings, st.session_state.holdings_currency, st.session_state.holdings_quantity, st.session_state.holdings_pmc]:
-                        d.pop(t, None)
-                    if is_authenticated():
-                        delete_user_portfolio_position(t)
-                    st.rerun()
-            st.session_state.holdings = holdings
-            st.session_state.holdings_quantity = holdings_quantity
-            st.session_state.holdings_pmc = holdings_pmc
-            if st.button("📊 Calcola pesi e analisi del portafoglio"):
-                positive_holdings = {t: a for t, a in holdings.items() if a > 0}
-                if not positive_holdings:
-                    st.error("Imposta quantita' e PMC > 0 almeno per un titolo.")
-                else:
-                    tot = sum(positive_holdings.values())
-                    weights_pct = {t: a / tot * 100.0 for t, a in positive_holdings.items()}
-                    built = build_portfolio_returns(list(positive_holdings.keys()), weights_pct)
-                    if built is None:
-                        st.error("Impossibile costruire la serie dei rendimenti (dati insufficienti).")
-                    else:
-                        df_rets, port_ret = built
-                        pm = calculate_portfolio_metrics(port_ret)
-                        st.markdown("#### Dettaglio posizioni e pesi")
-                        rows_pos = []
-                        total_market_value = 0.0
-                        for t in weights_pct.keys():
-                            qty = holdings_quantity.get(t, 0.0)
-                            pmc = holdings_pmc.get(t, 0.0)
-                            cur = st.session_state.holdings_currency.get(t, "USD")
-                            derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur)
-                            total_market_value += derived['Valore di Mercato']
-                            rows_pos.append({"Ticker": t, "Quantità": qty, "PMC": pmc, "Prezzo Attuale": derived['Prezzo Attuale'], "Importo Investito": derived['Importo Investito'], "Valore di Mercato": derived['Valore di Mercato'], "P&L": derived['P&L'], "P&L %": derived['P&L %'], "Peso %": weights_pct[t], "Valuta": cur})
-                        df_weights = pd.DataFrame(rows_pos)
-                        st.dataframe(df_weights, width='stretch')
-                        csv_bytes = _portfolio_export_csv(df_weights)
-                        st.download_button("💾 Scarica portafoglio (CSV)", data=csv_bytes, file_name="portfolio_burry.csv", mime="text/csv")
-                        df_weights_base = enrich_portfolio_with_fx(df_weights, base_currency=base_currency)
-                        st.markdown(f"#### Portafoglio in valuta base ({base_currency})")
-                        st.dataframe(df_weights_base, width='stretch')
-                        st.markdown("#### Analisi fiscale teorica")
-                        tax_rate_input = st.slider("Aliquota fiscale (%)", 0.0, 50.0, value=float(DEFAULT_TAX_RATE * 100.0), step=1.0, key="portfolio_tax_rate_slider") / 100.0
-                        df_tax = calculate_tax_impact(df_weights, tax_rate=tax_rate_input)
-                        if not df_tax.empty:
-                            st.dataframe(df_tax, width='stretch')
-                            total_tax = float(df_tax["Imposta Teorica"].sum())
-                            total_net_pnl = float(df_tax["Plus/Minus Netta"].sum())
-                            tax_c1, tax_c2 = st.columns(2)
-                            tax_c1.metric("Imposta teorica (no compensazione)", f"{total_tax:,.2f}")
-                            tax_c2.metric("P&L netto", f"{total_net_pnl:,.2f}")
-                        st.markdown("#### Compensazione fiscale (minusvalenze)")
-                        df_tax_comp, summary_comp = calculate_tax_with_loss_offset(df_weights_base, tax_rate=tax_rate_input)
-                        if summary_comp:
-                            ccol1, ccol2, ccol3 = st.columns(3)
-                            ccol1.metric("Plusvalenze tot.", f"{summary_comp['Plusvalenze totali']:,.2f}")
-                            ccol2.metric("Minusvalenze tot.", f"{summary_comp['Minusvalenze totali']:,.2f}")
-                            ccol3.metric("Risparmio fiscale", f"{summary_comp['Risparmio fiscale da compensazione']:,.2f}")
-                            st.caption(f"In Italia le minusvalenze realizzate possono essere usate per ridurre l'imponibile sulle plusvalenze entro {TAX_LOSS_COMPENSATION_YEARS} anni (art. 68 TUIR). Imposta teorica netta: {summary_comp['Imposta teorica netta']:,.2f} {base_currency}.")
-                        st.markdown("#### Allocazione del portafoglio")
-                        df_alloc = build_portfolio_allocation_df(positive_holdings, st.session_state.holdings_currency)
-                        if not df_alloc.empty:
-                            st.dataframe(df_alloc, width='stretch')
-                            col_a1, col_a2, col_a3 = st.columns(3)
-                            with col_a1:
-                                st.markdown("**Per Asset Class**")
-                                df_asset = summarize_group_weights(df_alloc, "Asset Class")
-                                st.dataframe(df_asset, width='stretch')
-                            with col_a2:
-                                st.markdown("**Per Geografia**")
-                                df_geo = summarize_group_weights(df_alloc, "Geografia")
-                                st.dataframe(df_geo, width='stretch')
-                            with col_a3:
-                                st.markdown("**Per Valuta**")
-                                df_cur = summarize_group_weights(df_alloc, "Valuta")
-                                st.dataframe(df_cur, width='stretch')
-                            st.markdown("#### Concentrazione e diversificazione")
-                            conc = calculate_concentration_metrics(weights_pct)
-                            ccc1, ccc2, ccc3, ccc4 = st.columns(4)
-                            ccc1.metric("HHI", f"{conc['HHI']:.3f}")
-                            ccc2.metric("Numero effettivo titoli", f"{conc['ENS']:.1f}")
-                            ccc3.metric("Top 1 %", f"{conc['Top1 %']:.1f}%")
-                            ccc4.metric("Top 3 %", f"{conc['Top3 %']:.1f}%")
-                            st.caption("HHI < 0.10 → portafoglio molto diversificato; HHI > 0.25 → concentrazione elevata. ENS = 1/HHI rappresenta il numero effettivo di titoli equivalenti equipesati.")
-                            st.markdown("#### Ribilanciamento automatico")
-                            rebalance_mode = st.radio("Livello target", ["Ticker", "Asset Class", "Geografia", "Valuta"], horizontal=True, key="rebalance_mode_radio")
-                            st.session_state.portfolio_target_mode = rebalance_mode
-                            mapping = {"Ticker": ("Ticker", df_alloc[["Ticker", "Peso %"]].copy()), "Asset Class": ("Asset Class", df_asset[["Asset Class", "Peso %"]].copy()), "Geografia": ("Geografia", df_geo[["Geografia", "Peso %"]].copy()), "Valuta": ("Valuta", df_cur[["Valuta", "Peso %"]].copy())}
-                            label_col, current_target_df = mapping[rebalance_mode]
-                            target_inputs = {}
-                            cols_target = st.columns(3)
-                            for j, rec in enumerate(current_target_df.to_dict("records")):
-                                col_t = cols_target[j % 3]
-                                label = rec[label_col]
-                                current_weight = float(rec["Peso %"])
-                                key_target = f"{rebalance_mode}::{label}"
-                                default_target = float(st.session_state.portfolio_targets.get(key_target, current_weight))
-                                target_val = col_t.number_input(f"Target {label}", min_value=0.0, max_value=100.0, value=default_target, step=1.0, key=f"target_{rebalance_mode}_{label}")
-                                target_inputs[label] = target_val
-                                st.session_state.portfolio_targets[key_target] = target_val
-                            tolerance_pct = st.slider("Tolleranza ribilanciamento (%)", 0.0, 10.0, 1.0, step=0.5)
-                            target_sum = sum(target_inputs.values())
-                            normalized_targets = {k: v / target_sum * 100.0 for k, v in target_inputs.items()} if target_sum > 0 else target_inputs
-                            rebalance_df = compute_rebalancing_actions(df_alloc=df_alloc, target_weights=normalized_targets, group_col=label_col, tolerance_pct=tolerance_pct)
-                            if not rebalance_df.empty:
-                                st.markdown("##### Azioni suggerite")
-                                st.dataframe(rebalance_df, width='stretch')
-                                fig_reb = go.Figure()
-                                fig_reb.add_trace(go.Bar(x=rebalance_df[label_col], y=rebalance_df["Peso %"], name="Peso attuale %"))
-                                fig_reb.add_trace(go.Bar(x=rebalance_df[label_col], y=rebalance_df["Target %"], name="Target %"))
-                                fig_reb.update_layout(barmode="group", template="plotly_dark", height=420, xaxis_title=label_col, yaxis_title="Peso %")
-                                st.plotly_chart(fig_reb, width='stretch')
-                        if not df_weights_base.empty:
-                            total_invested_base = float(df_weights_base["Importo Investito Base"].sum())
-                            total_value_base = float(df_weights_base["Valore di Mercato Base"].sum())
-                            total_pnl_base = float(df_weights_base["P&L Base"].sum())
-                            total_pnl_pct_base = total_pnl_base / total_invested_base * 100.0 if total_invested_base > 0 else 0.0
-                            ctot1, ctot2, ctot3, ctot4 = st.columns(4)
-                            ctot1.metric(f"Investito ({base_currency})", f"{total_invested_base:,.2f}")
-                            ctot2.metric(f"Valore ({base_currency})", f"{total_value_base:,.2f}")
-                            ctot3.metric(f"P&L ({base_currency})", f"{total_pnl_base:,.2f}")
-                            ctot4.metric("Rend. totale", f"{total_pnl_pct_base:.2f}%")
-                        cpa, cpv, cps, cpdd = st.columns(4)
-                        cpa.metric("Rend. annuo atteso", f"{pm['AnnRet']*100:.2f}%")
-                        cpv.metric("Volatilita' annua", f"{pm['AnnVol']*100:.2f}%")
-                        cps.metric("Sharpe portafoglio", f"{pm['Sharpe']:.2f}")
-                        cpdd.metric("Max Drawdown", f"{pm['MaxDD']*100:.1f}%")
-                        cps2, cps3, cps4 = st.columns(3)
-                        cps2.metric("Sortino", f"{pm['Sortino']:.2f}" if not np.isnan(pm['Sortino']) else "N/A")
-                        cps3.metric("Calmar", f"{pm['Calmar']:.2f}" if not np.isnan(pm['Calmar']) else "N/A")
-                        cps4.metric("CAGR portafoglio", f"{pm['CAGR']*100:.1f}%" if not np.isnan(pm['CAGR']) else "N/A")
-                        st.markdown("#### Esposizione di mercato (vs S&P 500)")
-                        beta_metrics = calculate_portfolio_beta(port_ret, benchmark_symbol=DEFAULT_BENCHMARK)
-                        bcol1, bcol2, bcol3 = st.columns(3)
-                        bcol1.metric("Beta", f"{beta_metrics['Beta']:.2f}" if not np.isnan(beta_metrics['Beta']) else "N/A")
-                        bcol2.metric("Alpha (annuo)", f"{beta_metrics['Alpha (ann.)']*100:.2f}%" if not np.isnan(beta_metrics['Alpha (ann.)']) else "N/A")
-                        bcol3.metric("Correlazione", f"{beta_metrics['Corr']:.2f}" if not np.isnan(beta_metrics['Corr']) else "N/A")
-                        equity_p = (1 + port_ret).cumprod()
-                        fig_p = go.Figure()
-                        fig_p.add_trace(go.Scatter(x=equity_p.index, y=equity_p.values, name="Equity portafoglio"))
-                        fig_p.update_layout(template="plotly_dark", height=400, xaxis_title="Data", yaxis_title="Equity normalizzata")
-                        st.plotly_chart(fig_p, width='stretch')
-                        corr = df_rets.corr()
-                        st.markdown("#### Correlazioni tra titoli in portafoglio")
-                        st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
-        else:
-            st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
-        st.markdown("---")
-        st.markdown("Creato e sviluppato da Innovative Program", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
