@@ -3,7 +3,7 @@ name: Keep-Alive
 on:
   schedule:
     # Esegue il job ogni 5 ore (0, 5, 10, 15, 20, ecc.)
-    - cron: '0 */5 * * *'
+    - cron: '0 */4 * * *'
   workflow_dispatch: 
 
 jobs:
