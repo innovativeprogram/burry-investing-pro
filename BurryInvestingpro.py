@@ -1,10 +1,7 @@
-"""
 # Copyright (c) 2026 InnovativeProgram
-# Tutti i diritti riservati. 
+# Tutti i diritti riservati.
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
-"""
-
 import streamlit as st
 import yfinance as yf
 import requests
@@ -28,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List, Union
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
-from burry_ai_prompts import (  # Manteniamo il nome originale del modulo per compatibilità
+from burry_ai_prompts import (
     build_ai_context_for_ticker,
     ask_gemini_ticker_chat,
     build_burry_ai_context,
@@ -43,7 +40,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("VqQuantPro")  # Rinominato
+logger = logging.getLogger("VqQuantPro")
 
 # Costanti finanziarie
 DEFAULT_TAX_RATE = 0.26
@@ -111,7 +108,8 @@ def get_current_price_safe(ticker_symbol: str) -> float:
 
     try:
         t = yf.Ticker(symbol)
-        return float(t.fast_info['last_price'])
+        # CORRETTO: usa 'lastPrice' invece di 'last_price'
+        return float(t.fast_info['lastPrice'])
     except Exception as e:
         logger.debug(f"yfinance price fallback for {symbol}: {e}")
         return 0.0
@@ -128,13 +126,17 @@ def get_fx_rate(from_currency: str, to_currency: str) -> float:
         if direct is not None and not direct.empty and 'Close' in direct.columns:
             s = direct['Close'].dropna()
             if not s.empty:
-                return float(s.iloc[-1])
+                val = float(s.iloc[-1])
+                if not np.isnan(val):
+                    return val
 
         inverse = yf.Ticker(f"{t}{f}=X").history(period="5d", interval="1d")
         if inverse is not None and not inverse.empty and 'Close' in inverse.columns:
             s = inverse['Close'].dropna()
             if not s.empty and float(s.iloc[-1]) != 0:
-                return float(1.0 / float(s.iloc[-1]))
+                inv_val = float(s.iloc[-1])
+                if not np.isnan(inv_val):
+                    return 1.0 / inv_val
     except Exception as e:
         logger.warning(f"FX fallback {from_currency}->{to_currency}: {e}")
     return 1.0
@@ -203,7 +205,9 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
     theoretical_tax = taxable_base * tax_rate
     df["Aliquota Fiscale %"] = tax_rate * 100.0
     df["Plus/Minus Lorda Base"] = pl_lorda
-    df["Imposta Teorica Base (compensata)"] = np.where(pl_lorda > 0, np.where(gains > 0, pl_lorda / gains * theoretical_tax, 0.0), 0.0)
+    # Imposta proporzionale ripartita sui guadagni, limitata al guadagno stesso
+    imposta_raw = np.where(pl_lorda > 0, pl_lorda / gains * theoretical_tax, 0.0) if gains > 0 else 0.0
+    df["Imposta Teorica Base (compensata)"] = np.minimum(imposta_raw, pl_lorda.clip(lower=0))
     summary = {
         "Plusvalenze totali": float(gains),
         "Minusvalenze totali": float(losses),
@@ -573,6 +577,15 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
             return True
     return False
 
+def normalize_growth(growth_val: Optional[float]) -> Optional[float]:
+    """Converte il tasso di crescita in percentuale se è in formato decimale."""
+    if growth_val is None:
+        return None
+    # Se > 1.0 presumiamo sia già in percentuale (es. 15 = 15%)
+    if growth_val > 1.0:
+        return growth_val
+    return growth_val * 100
+
 # ==========================================================================
 # 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK
 # ==========================================================================
@@ -612,22 +625,28 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         if 'regularMarketPrice' in combined_info:
             combined_info['currentPrice'] = combined_info['regularMarketPrice']
 
-        def format_yq_df(df_yq):
+        def format_yq_df(df_yq, sym):
             if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
-                df_yq = df_yq.copy()
-                if isinstance(df_yq.index, pd.MultiIndex):
-                    try:
-                        df_yq = df_yq.xs(symbol, level=0)
-                    except KeyError:
-                        return pd.DataFrame()
-                if 'asOfDate' in df_yq.columns:
-                    df_yq.set_index('asOfDate', inplace=True)
-                return df_yq.transpose()
+                df = df_yq.copy()
+                # Gestione MultiIndex (se simbolo è livello, estrailo)
+                if isinstance(df.index, pd.MultiIndex):
+                    if sym in df.index.names:
+                        df = df.xs(sym, level=0)
+                    else:
+                        # Se c'è un solo livello, prova a droppare il primo livello
+                        try:
+                            df = df.droplevel(0)
+                        except Exception:
+                            return pd.DataFrame()
+                if 'asOfDate' in df.columns:
+                    df.set_index('asOfDate', inplace=True)
+                # Trasponi per avere metriche come indice (coerente con il resto del codice)
+                return df.transpose()
             return pd.DataFrame()
 
-        inc_stmt = format_yq_df(yq.income_statement())
-        bal_sheet = format_yq_df(yq.balance_sheet())
-        cash_flow = format_yq_df(yq.cash_flow())
+        inc_stmt = format_yq_df(yq.income_statement(), symbol)
+        bal_sheet = format_yq_df(yq.balance_sheet(), symbol)
+        cash_flow = format_yq_df(yq.cash_flow(), symbol)
 
         if not inc_stmt.empty:
             inc_stmt.rename(index={
@@ -719,21 +738,24 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             roic = float((ebit * (1 - tax_rate)) / invested_cap)
 
         pe = info.get('trailingPE')
-        growth = info.get('earningsGrowth')
+        growth_raw = info.get('earningsGrowth')
+        growth = normalize_growth(growth_raw)  # Corretto: normalizza crescita
         peg = info.get('pegRatio')
         peg_src = "N/A"
         if peg is not None:
             peg_src = "Official"
         elif pe and pe > 0 and growth and growth > 0:
-            peg = float(pe / (growth * 100))
+            peg = float(pe / growth)  # growth già in percentuale (es. 15)
             peg_src = "Estimated"
 
         int_exp = get_first(fin, 'Interest Expense', 0.0)
         int_cov = float(ebit / abs(int_exp)) if int_exp != 0 else SAFE_INTEREST_COVERAGE
+        int_cov = min(int_cov, 1000.0)  # Clipping per evitare valori estremi
 
         total_revenue = info.get('totalRevenue')
         net_income = info.get('netIncomeToCommon')
-        revenue_growth = info.get('revenueGrowth')
+        revenue_growth_raw = info.get('revenueGrowth')
+        revenue_growth = revenue_growth_raw  # di solito decimale, lo lasciamo così
 
         debt_to_equity = None
         if equity is not None and not np.isnan(equity) and equity != 0:
@@ -900,6 +922,8 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return data
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
+    if data is None or data.empty:
+        return 0, ["Nessun dato tecnico disponibile"]
     score, reasons = 0, []
     last_row = data.iloc[-1]
     sma200 = last_row.get('SMA_200')
@@ -997,7 +1021,11 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     max_dd = drawdown.min()
     total_return = equity.iloc[-1] - 1.0
     years = len(returns) / TRADING_DAYS_YEAR
-    cagr = (1.0 + total_return) ** (1.0 / years) - 1.0 if years > 0 else np.nan
+    # CAGR con protezione per equity finale negativa
+    if years > 0 and equity.iloc[-1] > 0:
+        cagr = (equity.iloc[-1]) ** (1.0 / years) - 1.0
+    else:
+        cagr = np.nan
     alpha = 0.95
     var_95 = np.quantile(returns, 1 - alpha)
     cvar_95 = returns[returns <= var_95].mean() if (returns <= var_95).any() else np.nan
@@ -1051,7 +1079,11 @@ def monte_carlo_block_bootstrap(df: pd.DataFrame, n_paths: int = 1000, horizon_d
     for i in range(n_paths):
         starts = rng.integers(0, max_start + 1, size=n_blocks_needed)
         path = np.concatenate([returns[s:s+block_size] for s in starts])
-        paths[i, :] = path[:horizon_days] if len(path) > horizon_days else path
+        # Pad/tronca correttamente per evitare errori di shape
+        effective_path = path[:horizon_days]
+        if len(effective_path) < horizon_days:
+            effective_path = np.pad(effective_path, (0, horizon_days - len(effective_path)), constant_values=0)
+        paths[i, :] = effective_path
     paths = paths[:, :horizon_days]
     equity_paths = (1 + paths).cumprod(axis=1)
     if equity_paths.shape[1] == 0:
@@ -1183,7 +1215,10 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
     downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
     sortino = excess / downside_dev if downside_dev and downside_dev > 0 else np.nan
     n_years = len(port_ret) / TRADING_DAYS_YEAR
-    cagr = (equity.iloc[-1]) ** (1.0 / n_years) - 1.0 if n_years > 0 else np.nan
+    if n_years > 0 and equity.iloc[-1] > 0:
+        cagr = equity.iloc[-1] ** (1.0 / n_years) - 1.0
+    else:
+        cagr = np.nan
     calmar = cagr / abs(max_dd) if max_dd < 0 and not np.isnan(cagr) else np.nan
     return {"AnnRet": float(mu), "AnnVol": float(sigma), "Sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan, "MaxDD": float(max_dd) if not np.isnan(max_dd) else np.nan, "Sortino": float(sortino) if not np.isnan(sortino) else np.nan, "Calmar": float(calmar) if not np.isnan(calmar) else np.nan, "CAGR": float(cagr) if not np.isnan(cagr) else np.nan}
 
@@ -1287,7 +1322,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA9gBTjICfuDZUUYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro',
         short_name: 'V-Quant Pro',
@@ -1596,8 +1631,8 @@ def _init_session_state() -> None:
         'smart_weights': DEFAULT_SMART_WEIGHTS,
         'ai_ticker_chat_history': [],
         'ai_ticker_chat_last_symbol': None,
-        'vq_ai_history': [],  # Rinominato
-        'vq_ai_symbol': '',   # Rinominato
+        'vq_ai_history': [],
+        'vq_ai_symbol': '',
         'vq_ai_asset_type': 'Azione',
         'vq_ai_live_context': {},
     }
@@ -1655,14 +1690,14 @@ def main():
                 st.write(f'- {err}')
     with st.sidebar:
         st.markdown('---')
-        with st.expander('🤖 VqAi', expanded=False):  # Rinominato
+        with st.expander('🤖 VqAi', expanded=False):
             st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti e la logica del programma.')
             st.session_state.vq_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('vq_ai_asset_type', 'Azione') == 'Azione' else 1, key='vq_ai_asset_type_select')
             st.session_state.vq_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('vq_ai_symbol', ''), key='vq_ai_symbol_input')
             for msg in st.session_state.get('vq_ai_history', []):
                 with st.chat_message(msg.get('role', 'assistant')):
                     st.markdown(msg.get('content', ''))
-            vq_ai_prompt = st.chat_input('Chiedi a VqAi', key='vq_ai_prompt_sidebar')  # Rinominato
+            vq_ai_prompt = st.chat_input('Chiedi a VqAi', key='vq_ai_prompt_sidebar')
             if vq_ai_prompt:
                 ctx = build_burry_ai_context(st.session_state.get('vq_ai_symbol', '') or st.session_state.get('selected_ticker', ''), st.session_state.get('vq_ai_asset_type', 'Azione'), mode=st.session_state.get('model_mode', 'Entrambi'))
                 st.session_state.vq_ai_history.append({'role': 'user', 'content': vq_ai_prompt})
@@ -1673,9 +1708,8 @@ def main():
                 with st.chat_message('user'):
                     st.markdown(vq_ai_prompt)
                 with st.chat_message('assistant'):
-                    with st.spinner('VqAi sta rispondendo...'):  # Rinominato
-                        # Impostiamo max_tokens=None o molto alto per evitare troncamento
-                        reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode=st.session_state.get('model_mode', 'Entrambi'), max_tokens=8192)  # Aggiunto max_tokens alto
+                    with st.spinner('VqAi sta rispondendo...'):
+                        reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode=st.session_state.get('model_mode', 'Entrambi'), max_tokens=8192)
                     st.markdown(reply)
                 st.session_state.vq_ai_history.append({'role': 'assistant', 'content': reply})
     tab_f, tab_t, tab_q, tab_v, tab_p = st.tabs(["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"])
