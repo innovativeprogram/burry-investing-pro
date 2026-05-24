@@ -9,10 +9,10 @@ from typing import Any, Dict, List
 import streamlit as st
 import pandas as pd
 
-logger = logging.getLogger("BurryInvestingPro")
+logger = logging.getLogger("VqQuantPro")  # aggiornato il nome
 
 SYSTEM_PROMPT = dedent("""
-Sei l'assistente AI interno di BurryInvestingPro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
+Sei l'assistente AI interno di V-Quant Pro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
 
 RUOLO
 Agisci come analista finanziario rigoroso, prudente e argomentativo.
@@ -114,7 +114,7 @@ def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "
 
 def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any],
                                 score: float, reasons: List[str], mode: str) -> Dict[str, Any]:
-    """[NEW] Costruisce un contesto compatto per l'assistente AI sul ticker."""
+    """Costruisce un contesto compatto per l'assistente AI sul ticker."""
     row_dict = row.to_dict() if row is not None and hasattr(row, 'to_dict') else dict(row or {})
     return {
         'ticker': ticker,
@@ -136,8 +136,11 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
         'risk': risk or {},
     }
 
-def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
-    """Wrapper robusto con retry/backoff e fallback modello."""
+def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
+    """
+    Chiamata a Gemini con contesto e possibilità di impostare la lunghezza massima della risposta.
+    - max_tokens: token di output (max 8192 per Gemini 2.0 Flash, default 8192 per risposte lunghe)
+    """
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
@@ -153,8 +156,12 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
         client = genai.Client(api_key=api_key)
         system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
 
+        # Modelli supportati
         candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
         last_error = None
+
+        # Assicura che max_tokens sia entro i limiti (Gemini Flash supporta fino a 8192)
+        output_tokens = min(max_tokens, 8192) if max_tokens else 8192
 
         for model_name in candidate_models:
             for attempt in range(4):
@@ -162,7 +169,10 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                     resp = client.models.generate_content(
                         model=model_name,
                         contents=[system_prompt, user_prompt],
-                        config=GenerateContentConfig(temperature=0.2, max_output_tokens=4000),
+                        config=GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=output_tokens  # <-- ora dinamico
+                        ),
                     )
                     answer = getattr(resp, "text", None)
                     if answer and answer.strip():
@@ -184,7 +194,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
         return f"Errore AI: {e}"
 
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
-    """[NEW] Contesto BurryAi arricchito con risultati correnti e contesto live del verdetto."""
+    """Contesto per VqAi (ex BurryAi) arricchito con risultati correnti e contesto live del verdetto."""
     symbol_clean = (symbol or "").upper().strip()
     context = {
         "ticker": symbol_clean,
@@ -197,11 +207,11 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
     }
 
     try:
-        live_map = st.session_state.get('burry_ai_live_context', {}) or {}
+        live_map = st.session_state.get('vq_ai_live_context', {}) or {}  # aggiornato nome
         if symbol_clean and symbol_clean in live_map:
             context['live_program_analysis'] = live_map[symbol_clean]
     except Exception as e:
-        logger.debug(f'BurryAi live context fallback: {e}')
+        logger.debug(f'VqAi live context fallback: {e}')
 
     try:
         df = st.session_state.get('batch_results')
@@ -236,7 +246,7 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
                     'signal': row_dict.get('Signal'),
                 }
     except Exception as e:
-        logger.debug(f'BurryAi context fallback su batch_results: {e}')
+        logger.debug(f'VqAi context fallback su batch_results: {e}')
 
     try:
         selected = (st.session_state.get('selected_ticker') or '').upper().strip()
@@ -245,8 +255,3 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
         context['selected_ticker_match'] = False
 
     return context
-
-
-# ==========================================================================
-# 7. MAIN
-# ==========================================================================
