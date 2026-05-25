@@ -1689,6 +1689,233 @@ def compute_smart_quant_score(
 
 
 # ==========================================================================
+# 5.X MODELLO UNIFICATO "BIBBIA"
+# ==========================================================================
+def compute_unified_verdict(
+    row: pd.Series,
+    timing_score: int,
+    qm: Dict[str, Any],
+    risk: Dict[str, Any],
+    weights: Optional[Dict[str, float]] = None,
+    thresholds: Optional[Dict[str, float]] = None
+) -> Dict[str, Any]:
+    """
+    [NEW] Modello unificato "Bibbia".
+    Combina Qualità Fondamentale, Valutazione, Timing e Rischio Quantitativo.
+    """
+    if weights is None:
+        weights = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
+    if thresholds is None:
+        thresholds = {
+            "roic_min": 0.10,
+            "croic_min": 0.05,
+            "fcf_margin_min": 0.08,
+            "net_margin_min": 0.10,
+            "de_max": 1.0,
+            "interest_cov_min": 3.0,
+            "fscore_min": 4,
+            "mscore_max": -1.78,
+            "altman_safe": ALTMAN_SAFE_THRESHOLD,
+            "peg_max": 1.5,
+            "ev_ebit_max": 15,
+            "pfcf_max": 25,
+            "fcf_yield_min": 0.04,
+            "pb_max": 3.0,
+        }
+
+    # --- 1. Qualità Fondamentale (FQS) ---
+    fqs = 0.0
+    details = []
+
+    # ROIC
+    roic = safe_float(row.get("ROIC"), 0.0)
+    if roic >= thresholds["roic_min"]:
+        fqs += 20
+        details.append("✅ ROIC ≥ 10%")
+    elif roic > 0:
+        fqs += 10
+        details.append("⚠️ ROIC positivo ma basso")
+
+    # CROIC
+    croic = safe_float(row.get("CROIC"), 0.0)
+    if croic >= thresholds["croic_min"]:
+        fqs += 10
+        details.append("✅ CROIC ≥ 5%")
+
+    # FCF Margin
+    fcf_margin = safe_float(row.get("FCF Margin"), None)
+    if fcf_margin is not None and fcf_margin >= thresholds["fcf_margin_min"]:
+        fqs += 10
+        details.append("✅ FCF Margin ≥ 8%")
+
+    # Net Margin
+    net_margin = safe_float(row.get("Net Margin"), None)
+    if net_margin is not None and net_margin >= thresholds["net_margin_min"]:
+        fqs += 10
+        details.append("✅ Net Margin ≥ 10%")
+
+    # Debt/Equity
+    de = safe_float(row.get("Debt/Equity"), None)
+    if de is not None:
+        if de <= 0.5:
+            fqs += 10
+            details.append("✅ D/E ≤ 0.5")
+        elif de <= thresholds["de_max"]:
+            fqs += 5
+            details.append("⚠️ D/E ≤ 1.0")
+
+    # Interest Coverage
+    int_cov = safe_float(row.get("Interest Coverage"), SAFE_INTEREST_COVERAGE)
+    if int_cov >= 5:
+        fqs += 10
+        details.append("✅ Int.Cover. > 5x")
+    elif int_cov >= thresholds["interest_cov_min"]:
+        fqs += 5
+        details.append("⚠️ Int.Cover. > 3x")
+
+    # Piotroski F-Score
+    fscore = safe_float(row.get("F-Score"), 0.0)
+    if fscore >= 7:
+        fqs += 15
+        details.append("✅ F‑Score ≥ 7 (eccellente)")
+    elif fscore >= thresholds["fscore_min"]:
+        fqs += 8
+        details.append("⚠️ F‑Score ≥ 4 (discreto)")
+
+    # Beneish M-Score
+    mscore = safe_float(row.get("Beneish M-Score"), None)
+    if mscore is not None:
+        if mscore <= -2.22:
+            fqs += 10
+            details.append("✅ M‑Score ≤ -2.22 (nessuna manipolazione)")
+        elif mscore <= thresholds["mscore_max"]:
+            fqs += 5
+            details.append("⚠️ M‑Score accettabile")
+        else:
+            fqs -= 20
+            details.append("🛑 M‑Score > -1.78 (sospetto manipolazione)")
+
+    # Altman Z-Score
+    z = qm.get("Altman Z-Score", "N/A")
+    if isinstance(z, (int, float)):
+        if z >= 3.0:
+            fqs += 5
+            details.append("✅ Z‑Score > 3 (zona sicura)")
+        elif z >= thresholds["altman_safe"]:
+            fqs += 2
+            details.append("⚠️ Z‑Score > 1.81 (grey zone)")
+
+    # Revenue Growth
+    rev_growth = safe_float(row.get("Revenue Growth"), None)
+    if rev_growth is not None and rev_growth > 0.05:
+        fqs += 5
+        details.append("✅ Crescita ricavi > 5%")
+
+    fqs = np.clip(fqs, 0, 100)
+
+    # --- 2. Valutazione (VAS) ---
+    vas = 0.0
+    peg = safe_float(row.get("PEG Ratio"), None)
+    if peg is not None and peg > 0:
+        if peg <= 1.0:
+            vas += 30
+            details.append("✅ PEG ≤ 1")
+        elif peg <= thresholds["peg_max"]:
+            vas += 20
+            details.append("✅ PEG ≤ 1.5")
+        else:
+            vas += 5
+
+    ev_ebit = safe_float(row.get("EV/EBIT"), None)
+    if ev_ebit is not None and ev_ebit > 0:
+        if ev_ebit <= 10:
+            vas += 25
+            details.append("✅ EV/EBIT ≤ 10")
+        elif ev_ebit <= thresholds["ev_ebit_max"]:
+            vas += 15
+            details.append("⚠️ EV/EBIT ≤ 15")
+
+    # FCF Yield come proxy di economicità
+    fcf_yield = safe_float(row.get("FCF Yield"), None)
+    if fcf_yield is not None:
+        if fcf_yield >= 0.08:
+            vas += 20
+            details.append("✅ FCF Yield ≥ 8%")
+        elif fcf_yield >= thresholds["fcf_yield_min"]:
+            vas += 10
+            details.append("⚠️ FCF Yield ≥ 4%")
+
+    pb = safe_float(row.get("Price/Book"), None)
+    if pb is not None and pb > 0:
+        if pb <= 1.5:
+            vas += 15
+            details.append("✅ P/B ≤ 1.5")
+        elif pb <= thresholds["pb_max"]:
+            vas += 8
+            details.append("⚠️ P/B ≤ 3")
+
+    vas = np.clip(vas, 0, 100)
+
+    # --- 3. Timing Tecnico (TMS) ---
+    tms = float(np.clip(timing_score, 0, 100))
+    details.append(f"📈 Timing Score: {tms:.0f}/100")
+
+    # --- 4. Rischio Quantitativo (QRS) ---
+    sharpe = qm.get("Sharpe Ratio", 0.0) or 0.0
+    max_dd = risk.get("Max Drawdown", 0.0) or 0.0
+    sortino = risk.get("Sortino", 0.0) or 0.0
+
+    qrs = 50  # base neutra
+    if sharpe > 0:
+        qrs += min(20, sharpe * 20)  # fino a +20 per Sharpe 1
+    if sortino > 0:
+        qrs += min(15, sortino * 15)
+    if max_dd < -0.50:
+        qrs -= 25
+    elif max_dd < -0.30:
+        qrs -= 10
+    qrs = np.clip(qrs, 0, 100)
+    details.append(f"📉 Rischio Quant (Sharpe {sharpe:.2f}, MaxDD {max_dd*100:.1f}%)")
+
+    # --- Punteggio Finale ---
+    final_score = (
+        weights["F"] * fqs +
+        weights["V"] * vas +
+        weights["T"] * tms +
+        weights["Q"] * qrs
+    )
+
+    # Determina verdetto
+    if final_score >= 75:
+        verdict = "Strong Buy"
+        emoji = "🟢"
+    elif final_score >= 60:
+        verdict = "Buy"
+        emoji = "🟢"
+    elif final_score >= 45:
+        verdict = "Hold"
+        emoji = "🟡"
+    elif final_score >= 30:
+        verdict = "Reduce"
+        emoji = "🟠"
+    else:
+        verdict = "Sell"
+        emoji = "🔴"
+
+    return {
+        "FinalScore": final_score,
+        "Verdict": verdict,
+        "Emoji": emoji,
+        "FQS": fqs,
+        "VAS": vas,
+        "TMS": tms,
+        "QRS": qrs,
+        "Details": details,
+        "Weights": weights,
+    }
+
+
+# ==========================================================================
 # 5.E TAX IMPACT (legacy - manteniamo l'originale per backward compat)
 # ==========================================================================
 def calculate_tax_impact(
@@ -2226,10 +2453,7 @@ def setup_sidebar() -> Dict[str, Any]:
             "custom_min_fcf_margin": st.number_input("Custom Min FCF Margin", value=0.08, step=0.01, format="%.2f"),
             "custom_min_net_margin": st.number_input("Custom Min Net Margin", value=0.10, step=0.01, format="%.2f"),
             "perfectonly": st.checkbox("Solo All Green"),
-            "model_mode": st.selectbox(
-                "Modello verdetto",
-                ["Entrambi", "Classico", "Evoluto", "Personalizzabile"], index=0
-            ),
+            # [RIMOSSO] model_mode: non più necessario, il modello è unificato
         }
 
     with st.sidebar.expander("❓ Come cercare il ticker corretto"):
@@ -2501,10 +2725,11 @@ def main():
 
             burry_ai_prompt = st.chat_input('Chiedi a BurryAi', key='burry_ai_prompt_sidebar')
             if burry_ai_prompt:
+                # Ora il modello è sempre Unificato
                 ctx = build_burry_ai_context(
                     st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
                     st.session_state.get('burry_ai_asset_type', 'Azione'),
-                    mode=st.session_state.get('model_mode', 'Entrambi')
+                    mode='Unificato'
                 )
 
                 st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
@@ -2523,7 +2748,7 @@ def main():
                         reply = ask_gemini_ticker_chat(
                             ctx,
                             enriched_prompt,
-                            mode=st.session_state.get('model_mode', 'Entrambi')
+                            mode='Unificato'
                         )
                     st.markdown(reply)
 
@@ -2735,7 +2960,8 @@ def main():
         if row is None:
             st.info("Nessun ticker attivo.")
         else:
-            st.info("💡 **Verdetto:** modello Classico, Evoluto, Personalizzabile + Smart Quant.")
+            st.info("💡 **Modello Unificato:** qualità, valutazione, timing e rischio in un unico punteggio (0‑100).")
+
             df_tech = get_technical_data(ticker)
             qm = calculate_quant_metrics(
                 df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data
@@ -2745,104 +2971,48 @@ def main():
             }
             if df_tech is not None:
                 df_calc_v = calculate_technical_indicators(df_tech)
-                score, reasons = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
+                timing_score, timing_reasons = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
             else:
-                score = 0
-                reasons = []
+                timing_score = 0
+                timing_reasons = []
 
-            # [FIN-FIX] Z-safe: usa is_non_traditional_asset invece di check string indiretto
-            z_val = qm.get('Altman Z-Score', 0.0)
-            raw_info = (row.get('_raw_data', {}) or {}).get('info', {}) if row is not None else {}
-            z_safe = (
-                is_non_traditional_asset(ticker, raw_info)
-                or (isinstance(z_val, (int, float)) and z_val >= ALTMAN_SAFE_THRESHOLD)
+            # Esegui il modello unificato
+            verdict = compute_unified_verdict(
+                row=row,
+                timing_score=timing_score,
+                qm=qm,
+                risk=risk,
+                weights={"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
             )
 
-            roic_thr = ui['cfg']['roic'] / 100.0
-            peg_thr = ui['cfg']['peg']
-            de_thr = ui['cfg']['custom_max_de']
-            fcfm_thr = ui['cfg']['custom_min_fcf_margin']
-            netm_thr = ui['cfg']['custom_min_net_margin']
-            roic_v = row.get('ROIC', 0.0) or 0.0
-            peg_v = row.get('PEG Ratio')
-            de_v = row.get('Debt/Equity')
-            fcfm_v = row.get('FCF Margin')
-            netm_v = row.get('Net Margin')
+            # Mostra il verdetto grande
+            st.markdown(f"## {verdict['Emoji']} {verdict['Verdict']}  ({verdict['FinalScore']:.1f}/100)")
 
-            fund_pts_classic = (
-                (1 if roic_v >= roic_thr else 0) +
-                (1 if peg_v is not None and peg_v <= peg_thr else 0)
-            )
-            fund_pts_evoluto = fund_pts_classic + (
-                (1 if de_v is not None and de_v <= 1.0 else 0) +
-                (1 if fcfm_v is not None and fcfm_v >= 0.08 else 0) +
-                (1 if netm_v is not None and netm_v >= 0.10 else 0)
-            )
-            fund_pts_custom = (
-                (1 if roic_v >= roic_thr else 0) +
-                (1 if peg_v is not None and peg_v <= peg_thr else 0) +
-                (1 if de_v is not None and de_v <= de_thr else 0) +
-                (1 if fcfm_v is not None and fcfm_v >= fcfm_thr else 0) +
-                (1 if netm_v is not None and netm_v >= netm_thr else 0)
-            )
+            # Barra di progresso
+            st.progress(int(verdict['FinalScore']))
 
-            mode = ui['cfg']['model_mode']
+            # Pannelli con i punteggi dei pilastri
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Qualità", f"{verdict['FQS']:.0f}/100")
+            col2.metric("Valutazione", f"{verdict['VAS']:.0f}/100")
+            col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
+            col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
 
-            if mode == "Entrambi":
-                col_m1, col_m2 = st.columns(2)
-                col_m1.metric("Punti Modello Classico", f"{fund_pts_classic}/2")
-                col_m2.metric("Punti Modello Evoluto", f"{fund_pts_evoluto}/5")
+            # Checklist dettagliata
+            with st.expander("🔍 Criteri analizzati"):
+                for d in verdict["Details"]:
+                    st.write(d)
 
-            if mode in ["Entrambi", "Evoluto"]:
-                st.caption(
-                    "Evoluto → "
-                    f"ROIC: {'✅' if roic_v >= roic_thr else '❌'} | "
-                    f"PEG: {'✅' if (peg_v is not None and peg_v <= peg_thr) else '❌'} | "
-                    f"D/E: {'✅' if (de_v is not None and de_v <= 1.0) else '❌'} | "
-                    f"FCF Margin: {'✅' if (fcfm_v is not None and fcfm_v >= 0.08) else '❌'} | "
-                    f"Net Margin: {'✅' if (netm_v is not None and netm_v >= 0.10) else '❌'}"
-                )
+            # Timing reasons
+            if timing_reasons:
+                with st.expander("📈 Dettaglio segnali tecnici"):
+                    for r in timing_reasons:
+                        st.write(r)
 
-            if mode == "Personalizzabile":
-                st.caption(
-                    "Personalizzabile → "
-                    f"ROIC: {'✅' if roic_v >= roic_thr else '❌'} | "
-                    f"PEG: {'✅' if (peg_v is not None and peg_v <= peg_thr) else '❌'} | "
-                    f"D/E: {'✅' if (de_v is not None and de_v <= de_thr) else '❌'} | "
-                    f"FCF Margin: {'✅' if (fcfm_v is not None and fcfm_v >= fcfm_thr) else '❌'} | "
-                    f"Net Margin: {'✅' if (netm_v is not None and netm_v >= netm_thr) else '❌'}"
-                )
-
-            if mode in ["Entrambi", "Classico"]:
-                st.subheader("Modello Classico")
-                if fund_pts_classic >= 2 and z_safe and score >= 50:
-                    st.success("🟢 BUY: Fondamentali base solidi e timing favorevole.")
-                elif fund_pts_classic >= 1 and z_safe:
-                    st.warning("🟡 HOLD: Azienda discreta, serve piu' margine di sicurezza.")
-                else:
-                    st.error("🔴 SELL: Fondamentali o sicurezza finanziaria insufficienti.")
-
-            if mode in ["Entrambi", "Evoluto"]:
-                st.subheader("Modello Evoluto")
-                if fund_pts_evoluto >= 4 and z_safe and score >= 50:
-                    st.success("🟢 BUY: Fondamentali robusti, qualita' finanziaria e timing favorevole.")
-                elif fund_pts_evoluto >= 3 and z_safe:
-                    st.warning("🟡 HOLD: Azienda interessante, serve conferma.")
-                else:
-                    st.error("🔴 SELL: Fondamentali insufficienti o profilo rischio/rendimento debole.")
-
-            if mode == "Personalizzabile":
-                st.subheader("Modello Personalizzabile")
-                if fund_pts_custom >= 4 and z_safe and score >= 50:
-                    st.success("🟢 BUY: Criteri personalizzati soddisfatti e timing favorevole.")
-                elif fund_pts_custom >= 3 and z_safe:
-                    st.warning("🟡 HOLD: Setup discreto secondo i parametri personalizzati.")
-                else:
-                    st.error("🔴 SELL: Il titolo non soddisfa i criteri personalizzati.")
-
+            # AI context e chat (invariato)
             st.markdown('---')
             st.subheader('Spiegazione AI')
-            ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, score, reasons, mode)
+            ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, timing_score, timing_reasons, mode='Unificato')
             st.session_state.burry_ai_live_context[ticker] = ai_context
 
             if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
@@ -2854,7 +3024,7 @@ def main():
                     ai_answer = ask_gemini_ticker_chat(
                         ai_context,
                         'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.',
-                        mode=mode,
+                        mode='Unificato',
                     )
                 st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
 
@@ -2872,7 +3042,6 @@ def main():
             if ai_user_prompt:
                 st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
                 
-                # [BUGFIX] Costruzione della memoria contestuale per l'IA (Ticker Chat principale)
                 conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
                 for m in st.session_state.ai_ticker_chat_history[:-1]:
                     conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
@@ -2882,44 +3051,9 @@ def main():
                     st.markdown(ai_user_prompt)
                 with st.chat_message('assistant'):
                     with st.spinner("L'AI sta rispondendo..."):
-                        ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode=mode)
+                        ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode='Unificato')
                     st.markdown(ai_reply)
                 st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
-
-            if df_tech is not None and qm:
-                smart_w = st.session_state.get("smart_weights", DEFAULT_SMART_WEIGHTS)
-                smart_v = compute_smart_quant_score(row, score, qm, risk, weights=smart_w)
-                if mode in ["Entrambi", "Evoluto"]:
-                    st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
-                    st.write(
-                        f"F: {smart_v['FundamentalScore']:.0f} | "
-                        f"T: {smart_v['TechnicalScore']:.0f} | "
-                        f"Q: {smart_v['QuantRiskScore']:.0f}"
-                    )
-                    if smart_v["SmartScore"] >= 70 and z_safe and fund_pts_evoluto >= 4:
-                        st.success("🟢 BUY (Quant): Vantaggio statistico, fondamentali e rischio OK.")
-                    elif smart_v["SmartScore"] >= 50 and z_safe and fund_pts_evoluto >= 3:
-                        st.warning("🟡 HOLD (Quant): Setup discreto.")
-                    else:
-                        st.error("🔴 NO TRADE (Quant): Vantaggio quantitativo debole.")
-
-                if mode == "Personalizzabile":
-                    st.metric("Smart Quant Score", f"{smart_v['SmartScore']:.1f}/100")
-                    st.write(
-                        f"F: {smart_v['FundamentalScore']:.0f} | "
-                        f"T: {smart_v['TechnicalScore']:.0f} | "
-                        f"Q: {smart_v['QuantRiskScore']:.0f}"
-                    )
-                    if smart_v["SmartScore"] >= 70 and z_safe and fund_pts_custom >= 4:
-                        st.success("🟢 BUY (Quant): Vantaggio statistico e criteri personalizzati OK.")
-                    elif smart_v["SmartScore"] >= 50 and z_safe and fund_pts_custom >= 3:
-                        st.warning("🟡 HOLD (Quant): Setup discreto.")
-                    else:
-                        st.error("🔴 NO TRADE (Quant): Score o criteri insufficienti.")
-
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
-                    unsafe_allow_html=True)
 
     # ----- TAB PORTAFOGLIO -----
     with tab_p:
