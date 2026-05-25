@@ -24,6 +24,7 @@ import re
 import logging
 import os
 import io
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
@@ -41,10 +42,18 @@ from burry_ai_prompts import (
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# [FIX‑CRIT] Log su file per debug in produzione (opzionale)
+if os.getenv("BURRY_LOG_FILE"):
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        filename=os.getenv("BURRY_LOG_FILE")
+    )
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 logger = logging.getLogger("BurryInvestingPro")
 
 # [REFACTOR] Costanti finanziarie raggruppate e documentate
@@ -68,6 +77,9 @@ TAX_LOSS_COMPENSATION_YEARS = 4
 # [NEW] Soglia per Beneish M-Score (sopra -1.78 sospetto)
 BENEISH_THRESHOLD = -1.78
 
+# [FIX‑CRIT] Rate limiting batch (secondi tra un ticker e l'altro)
+BATCH_RATE_LIMIT_SEC = 0.3
+
 
 # ==========================================================================
 # 0.A SAFE SECRETS / CONFIG ACCESS  [SECURITY]
@@ -78,7 +90,6 @@ def safe_get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     `st.secrets` non sia configurato (StreamlitSecretNotFoundError) senza
     far crollare l'applicazione e senza esporre fallback hardcoded.
     """
-    # Priorita': variabile d'ambiente -> st.secrets -> default
     env_val = os.getenv(key)
     if env_val:
         return env_val.strip()
@@ -87,13 +98,10 @@ def safe_get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
             val = st.secrets[key]
             return str(val).strip() if val is not None else default
     except Exception:
-        # secrets.toml mancante in dev: ignoriamo silenziosamente
         pass
     return default
 
 
-# [SECURITY] BUGFIX: rimosso fallback hardcoded della Polygon API key.
-# Se mancante, il provider Polygon viene semplicemente saltato.
 POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 
 
@@ -102,16 +110,10 @@ POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=False)
 def get_current_price_safe(ticker_symbol: str) -> float:
-    """
-    Recupero prezzo con failover: Polygon -> YahooQuery -> yFinance.
-    [BUGFIX] eccezioni catturate in modo specifico, no bare except.
-    [BUGFIX] rimosso re-import di YQ_Ticker (gia' importato a livello modulo).
-    """
     symbol = (ticker_symbol or "").upper().strip()
     if not symbol:
         return 0.0
 
-    # Tentativo 1: Polygon (solo se key presente e ticker non ha suffisso)
     if POLYGON_API_KEY and "." not in symbol and "-" not in symbol:
         try:
             url = f"https://api.polygon.io/v2/last/trade/{symbol}?apiKey={POLYGON_API_KEY}"
@@ -125,7 +127,6 @@ def get_current_price_safe(ticker_symbol: str) -> float:
         except (requests.RequestException, ValueError, KeyError) as e:
             logger.debug(f"Polygon price fallback for {symbol}: {e}")
 
-    # Tentativo 2: YahooQuery
     try:
         yq = YQ_Ticker(symbol)
         price_data = yq.price.get(symbol, {}) if isinstance(yq.price, dict) else {}
@@ -136,7 +137,6 @@ def get_current_price_safe(ticker_symbol: str) -> float:
     except Exception as e:
         logger.debug(f"YahooQuery price fallback for {symbol}: {e}")
 
-    # Tentativo 3: yfinance
     try:
         t = yf.Ticker(symbol)
         return float(t.fast_info['last_price'])
@@ -147,11 +147,6 @@ def get_current_price_safe(ticker_symbol: str) -> float:
 
 @st.cache_data(ttl=FX_TTL_SECONDS, show_spinner=False)
 def get_fx_rate(from_currency: str, to_currency: str) -> float:
-    """
-    Cambio FX con fallback: pair diretto -> pair inverso -> 1.0 (neutro).
-    Logica originaria preservata, solo error handling rinforzato.
-    [FIX-11.1] Uso di safe_float per evitare ValueError.
-    """
     try:
         f = str(from_currency or "").upper().strip()
         t = str(to_currency or "").upper().strip()
@@ -178,19 +173,12 @@ def get_fx_rate(from_currency: str, to_currency: str) -> float:
 
 @st.cache_data(ttl=RISK_FREE_TTL_SECONDS, show_spinner=False)
 def get_dynamic_risk_free_rate() -> float:
-    """
-    [NEW] Recupera dinamicamente il tasso risk-free dal T-Bill 13-settimane (^IRX).
-    Se non disponibile, fallback al DEFAULT_RISK_FREE_RATE.
-    Nota: ^IRX riporta yield in punti percentuali (es. 4.50 = 4.50%).
-    [FIX-7.1] Usa safe_float per robustezza.
-    """
     try:
         irx = yf.Ticker("^IRX").history(period="5d")
         if irx is not None and not irx.empty and 'Close' in irx.columns:
             last = irx['Close'].dropna()
             if not last.empty:
                 rf_pct = safe_float(last.iloc[-1], DEFAULT_RISK_FREE_RATE * 100)
-                # Sanity check: rendimento normalmente tra 0% e 15%
                 if 0 <= rf_pct <= 15:
                     return rf_pct / 100.0
     except Exception as e:
@@ -199,7 +187,6 @@ def get_dynamic_risk_free_rate() -> float:
 
 
 def get_active_risk_free_rate() -> float:
-    """[NEW] Wrapper che permette override via session state."""
     try:
         override = st.session_state.get("risk_free_override")
         if override is not None:
@@ -216,12 +203,6 @@ def enrich_portfolio_with_fx(
     df_weights: pd.DataFrame,
     base_currency: str = "EUR"
 ) -> pd.DataFrame:
-    """
-    [BUGFIX] Funzione gia' presente nell'originale ma mai chiamata.
-    Ora effettivamente integrata nel flusso del tab Portafoglio.
-    Converte importi/valori/PnL nella valuta base e ricalcola i pesi
-    sul valore di mercato in base.
-    """
     if df_weights is None or df_weights.empty:
         return pd.DataFrame()
     out = df_weights.copy()
@@ -244,11 +225,6 @@ def calculate_tax_impact_df_base(
     df_weights_base: pd.DataFrame,
     tax_rate: float = DEFAULT_TAX_RATE
 ) -> pd.DataFrame:
-    """
-    [BUGFIX] Anche questa era definita ma mai utilizzata.
-    Ora effettivamente integrata: calcola fiscalita' sul P&L gia'
-    convertito in valuta base.
-    """
     if df_weights_base is None or df_weights_base.empty:
         return pd.DataFrame()
     df_tax = df_weights_base.copy()
@@ -273,18 +249,12 @@ def calculate_tax_with_loss_offset(
     df_weights_base: pd.DataFrame,
     tax_rate: float = DEFAULT_TAX_RATE
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """
-    [NEW][FIN-FIX] Compensazione fiscale italiana: le minusvalenze
-    realizzate possono essere utilizzate per ridurre l'imponibile sulle
-    plusvalenze entro 4 anni. Qui simuliamo la compensazione *teorica*
-    se tutte le posizioni venissero chiuse oggi.
-    """
     if df_weights_base is None or df_weights_base.empty:
         return pd.DataFrame(), {}
     df = df_weights_base.copy()
     pl_lorda = df["P&L Base"].astype(float)
     gains = pl_lorda.clip(lower=0).sum()
-    losses = (-pl_lorda.clip(upper=0)).sum()  # valore positivo
+    losses = (-pl_lorda.clip(upper=0)).sum()
     compensable = min(gains, losses)
     taxable_base = max(0.0, gains - compensable)
     theoretical_tax = taxable_base * tax_rate
@@ -292,7 +262,6 @@ def calculate_tax_with_loss_offset(
     df["Plus/Minus Lorda Base"] = pl_lorda
     df["Imposta Teorica Base (compensata)"] = np.where(
         pl_lorda > 0,
-        # Distribuiamo l'imposta proporzionalmente sulle posizioni in gain
         np.where(gains > 0, pl_lorda / gains * theoretical_tax, 0.0),
         0.0
     )
@@ -320,10 +289,6 @@ st.set_page_config(
 # ==========================================================================
 # 0.D AUTH SUPABASE  [SECURITY]
 # ==========================================================================
-# [SECURITY] BUGFIX: i fallback hardcoded di SUPABASE_PROJECT_REF e
-# SUPABASE_ANON_KEY sono stati rimossi. Le credenziali vanno fornite
-# tramite st.secrets o variabili d'ambiente.
-
 def get_app_base_url() -> str:
     candidates = [
         os.getenv('APP_BASE_URL'),
@@ -341,7 +306,6 @@ def get_email_redirect_url() -> str:
 
 
 def get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
-    """[SECURITY] Restituisce (None, None) se le credenziali non sono configurate."""
     url = safe_get_secret('SUPABASE_URL')
     key = safe_get_secret('SUPABASE_ANON_KEY')
     return url, key
@@ -349,7 +313,6 @@ def get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client() -> Optional[Client]:
-    """[SECURITY] Restituisce None se le credenziali non sono configurate."""
     url, key = get_supabase_credentials()
     if not url or not key:
         logger.warning("Supabase non configurato: imposta SUPABASE_URL e SUPABASE_ANON_KEY.")
@@ -393,7 +356,6 @@ def get_logged_user_id() -> Optional[str]:
 
 
 def is_supabase_available() -> bool:
-    """[NEW] True solo se Supabase e' configurato e raggiungibile."""
     return get_supabase_client() is not None
 
 
@@ -480,7 +442,6 @@ def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     return user, session
 
 
-# [NEW] Validazione email con regex di base
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 
@@ -489,7 +450,6 @@ def validate_email(email: str) -> bool:
 
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:
-    """[NEW][SECURITY] Verifica robustezza minima password."""
     if len(password) < 8:
         return False, "La password deve avere almeno 8 caratteri."
     if not re.search(r"[A-Z]", password):
@@ -647,7 +607,7 @@ class FundamentalMetrics:
     price: float
     fcf: float
     roic: float
-    croic: float                    # [NEW-4] Cash Return on Invested Capital
+    croic: float
     peg_ratio: Optional[float]
     peg_source: str
     pe_ratio: Optional[float]
@@ -656,14 +616,15 @@ class FundamentalMetrics:
     revenue_growth: Optional[float]
     net_margin: Optional[float]
     fcf_margin: Optional[float]
-    fcf_yield: Optional[float]      # [NEW-4]
-    ev_to_ebit: Optional[float]     # [NEW-4]
-    ev_to_ebitda: Optional[float]   # [NEW-4]
-    price_to_book: Optional[float]  # [NEW-4]
-    price_to_sales: Optional[float] # [NEW-4]
-    f_score: Optional[int]          # [NEW-4] Piotroski F-Score
-    m_score: Optional[float]        # [NEW-4] Beneish M-Score
-    currency: str
+    fcf_yield: Optional[float]
+    ev_to_ebit: Optional[float]
+    ev_to_ebitda: Optional[float]
+    price_to_book: Optional[float]
+    price_to_sales: Optional[float]
+    f_score: Optional[int]
+    m_score: Optional[float]
+    m_score_reliable: bool = True   # [FIX‑CRIT] indica se il calcolo è basato su dati completi
+    currency: str = "USD"
     raw_data: Dict[str, Any] = field(default_factory=dict)
 
     def to_ui_dict(self) -> Dict[str, Any]:
@@ -689,6 +650,7 @@ class FundamentalMetrics:
             "Price/Sales": self.price_to_sales,
             "F-Score": self.f_score,
             "Beneish M-Score": self.m_score,
+            "M-Score reliable": self.m_score_reliable,
             "Currency": self.currency,
             "_raw_data": self.raw_data,
         }
@@ -719,7 +681,6 @@ def normalize_ticker(ticker: str, suffix: str) -> str:
 
 
 def safe_float(value: Any, default: float = np.nan) -> float:
-    """[NEW] Conversione sicura a float."""
     try:
         if value is None:
             return default
@@ -729,15 +690,9 @@ def safe_float(value: Any, default: float = np.nan) -> float:
 
 
 def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = None) -> bool:
-    """
-    [NEW][FIX-7.3] Identifica asset non tradizionali (crypto, FX, commodity, indici)
-    per cui i criteri fondamentali (Z-Score, ROIC, etc.) non sono applicabili.
-    Rilevamento crypto migliorato per evitare falsi positivi.
-    """
     t = (ticker or "").upper()
     if t.startswith("^") or "=X" in t or t.endswith("=F"):
         return True
-    # [FIX-7.3] Riconoscimento crypto basato su coppia simbolo-valuta
     parts = t.split("-")
     if len(parts) == 2:
         crypto_symbols = {"BTC", "ETH", "XRP", "LTC", "BCH", "ADA", "DOT", "LINK", "XLM", "UNI", "SOL", "AVAX", "MATIC"}
@@ -756,7 +711,6 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
-    # TENTATIVO 1: yfinance
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
@@ -773,7 +727,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.info(f"yfinance fallito per {symbol}: {e}. Passo a YahooQuery.")
 
-    # TENTATIVO 2: YahooQuery
     try:
         yq = YQ_Ticker(symbol)
         summary = yq.summary_detail.get(symbol, {}) if isinstance(yq.summary_detail, dict) else {}
@@ -800,9 +753,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                         return pd.DataFrame()
                 if 'asOfDate' in df_yq.columns:
                     df_yq.set_index('asOfDate', inplace=True)
-                # [FIX-13] Dopo set_index le colonne diventano indicatori; trasponiamo per avere date come colonne
                 df_t = df_yq.transpose()
-                # Ordiniamo le colonne (date) in ordine decrescente per garantire che il dato più recente sia il primo
                 try:
                     date_cols = pd.to_datetime(df_t.columns, errors='coerce')
                     df_t = df_t.iloc[:, date_cols.argsort()[::-1]]
@@ -851,10 +802,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
-    """
-    [NEW-4] Calcola il Piotroski F-Score (0-9). Un punteggio alto indica solidità finanziaria.
-    Utilizza dati di bilancio e finanziari.
-    """
     info = raw_data.get('info', {})
     bs = raw_data.get('balance_sheet')
     fin = raw_data.get('financials')
@@ -863,37 +810,31 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
         return 0
     fscore = 0
     try:
-        # ROA (Net Income / Total Assets)
         net_income = safe_float(info.get('netIncomeToCommon'), 0.0)
         total_assets = get_first(bs, 'Total Assets', 0.0)
         if total_assets > 0:
             roa = net_income / total_assets
             if roa > 0: fscore += 1
 
-        # Operating Cash Flow / Total Assets
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         if total_assets > 0 and op_cash > 0:
             fscore += 1
 
-        # Delta ROA (rispetto anno precedente)
         if 'Net Income' in fin.index and fin.shape[1] >= 2:
             ni0 = safe_float(fin.loc['Net Income'].iloc[0], 0.0)
             ni1 = safe_float(fin.loc['Net Income'].iloc[1], 0.0)
             if total_assets > 0 and (ni0 / total_assets) > (ni1 / total_assets):
                 fscore += 1
 
-        # Accruals (Net Income - OpCash) / TA < 0
         if total_assets > 0:
             accruals = (net_income - op_cash) / total_assets
             if accruals < 0: fscore += 1
 
-        # Leverage (Long-term debt diminuito?)
         if 'Total Debt' in bs.index and bs.shape[1] >= 2:
             debt0 = safe_float(bs.loc['Total Debt'].iloc[0], 0.0)
             debt1 = safe_float(bs.loc['Total Debt'].iloc[1], 0.0)
             if debt0 < debt1: fscore += 1
 
-        # Current Ratio migliorato?
         if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index and bs.shape[1] >= 2:
             ca0 = safe_float(bs.loc['Current Assets'].iloc[0], 0.0)
             cl0 = safe_float(bs.loc['Current Liabilities'].iloc[0], 1.0)
@@ -903,10 +844,8 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
             cr1 = ca1 / cl1 if cl1 != 0 else 0.0
             if cr0 > cr1: fscore += 1
 
-        # Dilution: Shares outstanding non aumentato? (assumiamo ok=1)
-        fscore += 1
+        fscore += 1  # diluition
 
-        # Gross Margin migliorato?
         if 'Total Revenue' in fin.index and fin.shape[1] >= 2:
             rev0 = safe_float(fin.loc['Total Revenue'].iloc[0], 0.0)
             rev1 = safe_float(fin.loc['Total Revenue'].iloc[1], 0.0)
@@ -916,7 +855,6 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
             gm1 = (rev1 - cogs1) / rev1 if rev1 != 0 else 0.0
             if gm0 > gm1: fscore += 1
 
-        # Asset Turnover migliorato?
         if total_assets > 0 and bs.shape[1] >= 2:
             ta0 = total_assets
             ta1 = safe_float(bs.loc['Total Assets'].iloc[1], 0.0)
@@ -930,41 +868,37 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
     return fscore
 
 
-def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Optional[float]:
+def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float], bool]:
     """
-    [NEW-4] Calcola il Beneish M-Score (modello a 8 variabili).
-    Valori > -1.78 suggeriscono manipolazione contabile.
-    Ritorna None se dati insufficienti.
+    [FIX‑CRIT] Restituisce (M‑Score, reliable_flag).
+    reliable_flag indica se i dati sono sufficienti per un calcolo fedele.
     """
     info = raw_data.get('info', {})
     bs = raw_data.get('balance_sheet')
     fin = raw_data.get('financials')
     cf = raw_data.get('cashflow')
     if bs is None or fin is None or cf is None:
-        return None
+        return None, False
     try:
-        # Richiede due anni di dati
         if bs.shape[1] < 2 or fin.shape[1] < 2 or cf.shape[1] < 2:
-            return None
+            return None, False
 
-        # Indici da bilancio
         total_assets = get_first(bs, 'Total Assets', 0.0)
         cur_assets = get_first(bs, 'Current Assets', 0.0)
         cur_liab = get_first(bs, 'Current Liabilities', 0.0)
         cash = safe_float(info.get('totalCash', 0.0), 0.0)
         total_debt = get_first(bs, 'Total Debt', 0.0)
-        equity = get_first(bs, 'Stockholders Equity', 1.0)  # evita /0
+        equity = get_first(bs, 'Stockholders Equity', 1.0)
         revenue = safe_float(info.get('totalRevenue', 0.0), 0.0)
         cogs = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[0], 0.0) if 'Cost Of Goods Sold' in fin.index else 0.0
         net_income = safe_float(info.get('netIncomeToCommon', 0.0), 0.0)
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
-        depreciation = safe_float(info.get('depreciationExpense', 0.0), 0.0)  # approx
+        depreciation = safe_float(info.get('depreciationExpense', 0.0), 0.0)
 
-        # Precedente anno (indice 1)
         total_assets_prev = safe_float(bs.loc['Total Assets'].iloc[1], total_assets)
         cur_assets_prev = safe_float(bs.loc['Current Assets'].iloc[1], cur_assets)
         cur_liab_prev = safe_float(bs.loc['Current Liabilities'].iloc[1], cur_liab)
-        cash_prev = 0.0  # non disponibile, assumiamo uguale
+        cash_prev = 0.0
         total_debt_prev = safe_float(bs.loc['Total Debt'].iloc[1], total_debt)
         equity_prev = safe_float(bs.loc['Stockholders Equity'].iloc[1], equity)
         revenue_prev = safe_float(fin.loc['Total Revenue'].iloc[1] if 'Total Revenue' in fin.index else revenue, revenue)
@@ -976,31 +910,29 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Optional[float]:
         def safe_ratio(num, den, default=0.0):
             return num/den if den != 0 else default
 
-        # DSRI (Days Sales in Receivables Index)
+        # Verifica disponibilità voci critiche per il modello originale
+        reliable = True
+        if 'Cost Of Goods Sold' not in fin.index:
+            reliable = False
+        if 'Total Assets' not in bs.index:
+            reliable = False
+
         dsri = safe_ratio((cur_assets - cash) / revenue, (cur_assets_prev - cash_prev) / revenue_prev)
-        # GMI (Gross Margin Index)
         gmi = safe_ratio((revenue_prev - cogs_prev)/revenue_prev, (revenue - cogs)/revenue)
-        # AQI (Asset Quality Index)
         aqi = safe_ratio(1 - (cur_assets + total_assets - cur_liab - cash)/total_assets,
                          1 - (cur_assets_prev + total_assets_prev - cur_liab_prev - cash_prev)/total_assets_prev)
-        # SGI (Sales Growth Index)
         sgi = revenue / revenue_prev if revenue_prev != 0 else 1.0
-        # DEPI (Depreciation Index)
         depi = safe_ratio(depreciation_prev/(depreciation_prev + total_assets_prev),
                           depreciation/(depreciation + total_assets))
-        # SGAI (Sales General and Administrative Expenses Index) – non disponibile, assumiamo 1
-        sgai = 1.0
-        # LVGI (Leverage Index)
+        sgai = 1.0   # SG&A non disponibile, assumiamo 1 (impatto neutro)
         lvgi = safe_ratio(total_debt/total_assets, total_debt_prev/total_assets_prev)
-        # TATA (Total Accruals to Total Assets)
         tata = (net_income - op_cash) / total_assets
 
-        # Coefficienti del modello
         m_score = -4.84 + 0.92*dsri + 0.528*gmi + 0.404*aqi + 0.892*sgi + 0.115*depi - 0.172*sgai + 4.679*tata - 0.327*lvgi
-        return float(m_score)
+        return float(m_score), reliable
     except Exception as e:
         logger.debug(f"Beneish M-Score non calcolabile: {e}")
-        return None
+        return None, False
 
 
 def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[FundamentalMetrics]:
@@ -1008,30 +940,17 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         info = raw_data["info"]
         symbol = raw_data["symbol"]
 
-        # [REFACTOR] Asset non tradizionali (crypto, FX, indici): metriche non applicabili
         if is_non_traditional_asset(symbol, info):
             return FundamentalMetrics(
                 ticker=symbol,
                 company_name=info.get('shortName', symbol),
                 price=safe_float(info.get('regularMarketPrice') or info.get('currentPrice'), 0.0),
-                fcf=0.0,
-                roic=0.0,
-                croic=0.0,
-                peg_ratio=None,
-                peg_source="N/A (non-equity)",
-                pe_ratio=None,
+                fcf=0.0, roic=0.0, croic=0.0,
+                peg_ratio=None, peg_source="N/A (non-equity)", pe_ratio=None,
                 interest_coverage=SAFE_INTEREST_COVERAGE,
-                debt_to_equity=None,
-                revenue_growth=None,
-                net_margin=None,
-                fcf_margin=None,
-                fcf_yield=None,
-                ev_to_ebit=None,
-                ev_to_ebitda=None,
-                price_to_book=None,
-                price_to_sales=None,
-                f_score=None,
-                m_score=None,
+                debt_to_equity=None, revenue_growth=None, net_margin=None, fcf_margin=None,
+                fcf_yield=None, ev_to_ebit=None, ev_to_ebitda=None, price_to_book=None, price_to_sales=None,
+                f_score=None, m_score=None, m_score_reliable=False,
                 currency=info.get('currency', 'USD'),
                 raw_data=raw_data
             )
@@ -1041,7 +960,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         cf = raw_data["cashflow"]
 
         def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
-            """[ROBUSTNESS-7.2] Verifica esistenza colonne prima di iloc."""
             if df is None or df.empty or idx not in df.index:
                 return default
             if df.shape[1] == 0:
@@ -1053,8 +971,7 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
-        # [FIX-8.1] CapEx è già negativo, non usare abs
-        fcf = float(op_cash - cap_ex)  # se cap_ex è negativo, si somma
+        fcf = float(op_cash - cap_ex)
 
         total_debt = get_first(bs, 'Total Debt', 0.0)
         cash_equiv = safe_float(info.get('totalCash'), 0.0)
@@ -1064,7 +981,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
         ebit = get_first(fin, 'EBIT', 0.0)
 
-        # Tax rate con clipping fino a 100% per sicurezza
         tax_rate = DEFAULT_TAX_RATE
         if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index and not fin.empty:
             pretax_inc = get_first(fin, 'Pretax Income', 0.0)
@@ -1086,7 +1002,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         if peg is not None:
             peg_src = "Official"
         elif pe and pe > 0 and growth and growth > 0:
-            # earningsGrowth e' frazione (es. 0.10 = 10%); PEG = PE / (growth%)
             peg = float(pe / (growth * 100))
             peg_src = "Estimated"
 
@@ -1109,13 +1024,11 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         if total_revenue not in (None, 0):
             fcf_margin = fcf / float(total_revenue)
 
-        # FCF Yield
         mc = info.get('marketCap')
         fcf_yield = None
         if mc and mc > 0 and fcf != 0:
             fcf_yield = fcf / float(mc)
 
-        # Multipli EV
         ev = info.get('enterpriseValue')
         ebitda = info.get('ebitda')
         ev_to_ebit = None
@@ -1128,18 +1041,14 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         pb = info.get('priceToBook')
         ps = info.get('priceToSalesTrailing12Months')
 
-        # Piotroski F-Score
         fscore = calculate_piotroski_fscore(raw_data)
-        # Beneish M-Score
-        mscore = calculate_beneish_mscore(raw_data)
+        mscore, mscore_reliable = calculate_beneish_mscore(raw_data)
 
         return FundamentalMetrics(
             ticker=symbol,
             company_name=info.get('longName', symbol),
             price=safe_float(info.get('currentPrice') or info.get('regularMarketPrice'), 0.0),
-            fcf=fcf,
-            roic=roic,
-            croic=croic,
+            fcf=fcf, roic=roic, croic=croic,
             peg_ratio=safe_float(peg, None) if peg is not None else None,
             peg_source=peg_src,
             pe_ratio=safe_float(pe, None) if pe is not None else None,
@@ -1155,6 +1064,7 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             price_to_sales=safe_float(ps, None) if ps is not None else None,
             f_score=fscore,
             m_score=mscore,
+            m_score_reliable=mscore_reliable,
             currency=info.get('currency', 'USD'),
             raw_data=raw_data
         )
@@ -1165,7 +1075,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 
 
 def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
-    """[NEW] Wrapper per ThreadPoolExecutor: ritorna (ticker, ui_dict, error)."""
     try:
         raw = get_fundamental_data(ticker)
         if not raw:
@@ -1179,11 +1088,11 @@ def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]]
 
 
 def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """[NEW] Fetch parallelo dei fondamentali con ThreadPoolExecutor."""
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
     if not tickers:
         return results, errors
+    # [FIX‑CRIT] Aggiunto time.sleep per rate limiting
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch_metrics_for_ticker, t): t for t in tickers}
         for f in as_completed(futures):
@@ -1192,15 +1101,15 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
                 errors.append(f"{t}: {err}")
             elif ui_dict is not None:
                 results.append(ui_dict)
+            time.sleep(BATCH_RATE_LIMIT_SEC)
     return results, errors
 
 
 # ==========================================================================
 # 4. DATA ENGINE: ANALISI TECNICA CON FALLBACK
 # ==========================================================================
-@st.cache_data(ttl=900, show_spinner=True)  # [FIX-9.2] show_spinner=True per feedback
+@st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    # TENTATIVO 1: yfinance
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
         if df is not None and not df.empty:
@@ -1212,7 +1121,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     except Exception as e:
         logger.info(f"yfinance tecnico fallito per {symbol}: {e}. Passo a YahooQuery.")
 
-    # TENTATIVO 2: YahooQuery
     try:
         t = YQ_Ticker(symbol)
         df_yq = t.history(period="2y", interval="1d")
@@ -1251,7 +1159,9 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data['BB_Lower'] = ma20 - 2 * std20
     data['BB_Upper'] = ma20 + 2 * std20
 
-    # MACD manuale se pandas_ta non disponibile, altrimenti usa TA
+    # [FIX‑CRIT] Unificato il calcolo MACD e ADX: prima prova pandas_ta, altrimenti manuale
+    macd_ok = False
+    adx_ok = False
     if ta is not None:
         try:
             data['SMA_50'] = ta.sma(close, length=50)
@@ -1271,18 +1181,19 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
                 s_col = macd.filter(like='MACDs_')
                 if not m_col.empty:
                     data['MACD'] = m_col.iloc[:, 0]
+                    macd_ok = True
                 if not s_col.empty:
                     data['MACD_signal'] = s_col.iloc[:, 0]
-            # [NEW-4] ADX
             adx_df = ta.adx(high=high, low=low, close=close, length=14)
             if adx_df is not None:
                 adx_col = adx_df.filter(like='ADX_')
                 if not adx_col.empty:
                     data['ADX'] = adx_col.iloc[:, 0]
+                    adx_ok = True
         except Exception:
             pass
-    else:
-        # [FIX-13] Calcolo manuale del MACD
+
+    if not macd_ok:
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         data['MACD'] = ema12 - ema26
@@ -1292,11 +1203,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
-    """
-    [REFACTOR] Punteggio mantenuto invariato nelle soglie ma con
-    output clipped 0..100 esplicito.
-    [NEW-4] Aggiunto ADX per forza del trend.
-    """
     score, reasons = 0, []
     last_row = data.iloc[-1]
     sma200 = last_row.get('SMA_200')
@@ -1320,7 +1226,6 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
         score += 20
         reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
 
-    # MACD bullish crossover
     macd = last_row.get('MACD')
     macd_sig = last_row.get('MACD_signal')
     if pd.notna(macd) and pd.notna(macd_sig):
@@ -1330,7 +1235,6 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
         else:
             reasons.append("⚠️ MACD sotto signal line")
 
-    # [NEW-4] ADX
     adx = last_row.get('ADX')
     if pd.notna(adx):
         if adx > 25:
@@ -1340,7 +1244,6 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
             score -= 5
             reasons.append("⚠️ Trend debole/assente (ADX < 20)")
 
-    # Clip difensivo finale
     score = int(np.clip(score, 0, 100))
     return score, reasons
 
@@ -1353,13 +1256,6 @@ def calculate_quant_metrics(
     fund_data: Optional[Dict[str, Any]],
     risk_free: Optional[float] = None
 ) -> Dict[str, Any]:
-    """
-    [REFACTOR] Logica di scoring identica all'originale.
-    [FIN-FIX] Altman Z-Score restituisce "N/A" se marketCap mancante
-    invece di usare 1 come fallback (che produceva valori distorti).
-    [NEW] risk_free puo' essere passato per usare il tasso dinamico.
-    [NEW-4] Aggiunto Altman Z''-Score.
-    """
     rf = risk_free if risk_free is not None else get_active_risk_free_rate()
 
     returns = df['Close'].pct_change().dropna()
@@ -1416,7 +1312,6 @@ def calculate_quant_metrics(
                             (0.6 * (mc / tl)) +
                             (1.0 * (rev / ta_val))
                         )
-                        # Z''-Score (per non-manufacturing, emerging markets)
                         bv_equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else 0
                         if bv_equity:
                             z_score2 = float(
@@ -1433,7 +1328,7 @@ def calculate_quant_metrics(
         "Annual Volatility": float(vol) if not np.isnan(vol) else np.nan,
         "R-Squared": float(r_sq) if not np.isnan(r_sq) else np.nan,
         "Altman Z-Score": z_score,
-        "Altman Z''-Score": z_score2,  # [NEW-4]
+        "Altman Z''-Score": z_score2,
         "Price Percentile": float((df['Close'] < df['Close'].iloc[-1]).mean() * 100),
         "Trend Slope": slope,
         "Risk Free Used": float(rf),
@@ -1441,7 +1336,6 @@ def calculate_quant_metrics(
 
 
 def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
-    """[REFACTOR] Aggiunti Sortino e Calmar ratio + downside deviation."""
     prices = df['Close'].dropna()
     returns = prices.pct_change().dropna()
     if returns.empty:
@@ -1468,7 +1362,6 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     skew = returns.skew()
     kurt = returns.kurt()
 
-    # Sortino Ratio
     rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
     downside = returns[returns < rf_daily]
     downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
@@ -1479,7 +1372,6 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
         else np.nan
     )
 
-    # Calmar Ratio
     calmar = cagr / abs(max_dd) if max_dd and max_dd < 0 and not np.isnan(cagr) else np.nan
 
     return {
@@ -1499,12 +1391,8 @@ def monte_carlo_equity(
     df: pd.DataFrame,
     n_paths: int = 1000,
     horizon_days: int = 252,
-    seed: Optional[int] = 42  # [FIX-9.1] seed fisso per riproducibilità
+    seed: Optional[int] = 42
 ) -> Dict[str, Any]:
-    """
-    [REFACTOR] Bootstrap iid sui rendimenti storici (logica originaria).
-    [NEW] Seed predefinito 42 per coerenza tra esecuzioni.
-    """
     prices = df['Close'].dropna()
     returns = prices.pct_change().dropna().values
     if returns.size == 0:
@@ -1532,12 +1420,8 @@ def monte_carlo_block_bootstrap(
     n_paths: int = 1000,
     horizon_days: int = 252,
     block_size: int = 5,
-    seed: Optional[int] = 42  # [FIX-9.1]
+    seed: Optional[int] = 42
 ) -> Dict[str, Any]:
-    """
-    [NEW] Block bootstrap: campiona blocchi consecutivi di rendimenti
-    per preservare autocorrelazione e clustering della volatilita'.
-    """
     prices = df['Close'].dropna()
     returns = prices.pct_change().dropna().values
     if returns.size < block_size:
@@ -1573,9 +1457,6 @@ def compute_smart_quant_score(
     risk: Dict[str, Any],
     weights: Optional[Dict[str, float]] = None
 ) -> Dict[str, Any]:
-    """[REFACTOR] Pesi configurabili (default 0.40/0.30/0.30 invariati).
-    [NEW-4] Integrazione nuove metriche: F-Score, M-Score, EV/EBIT, FCF Yield, ROIC premium.
-    """
     w = weights or DEFAULT_SMART_WEIGHTS
 
     f_score = 0.0
@@ -1611,7 +1492,6 @@ def compute_smart_quant_score(
         elif fcf_margin >= 0.08: f_score += 7.0
         elif fcf_margin > 0: f_score += 3.0
 
-    # [NEW-4] Piotroski F-Score
     fscore_val = row.get("F-Score", 0) or 0
     if fscore_val >= 7:
         f_score += 12.0
@@ -1620,7 +1500,6 @@ def compute_smart_quant_score(
     elif fscore_val >= 2:
         f_score += 3.0
 
-    # [NEW-4] EV/EBIT
     ev_ebit = row.get("EV/EBIT", None)
     if ev_ebit is not None and ev_ebit > 0:
         if ev_ebit <= 10:
@@ -1628,7 +1507,6 @@ def compute_smart_quant_score(
         elif ev_ebit <= 15:
             f_score += 5.0
 
-    # [NEW-4] FCF Yield
     fcf_yield = row.get("FCF Yield", None)
     if fcf_yield is not None:
         if fcf_yield >= 0.10:
@@ -1636,7 +1514,6 @@ def compute_smart_quant_score(
         elif fcf_yield >= 0.05:
             f_score += 4.0
 
-    # [NEW-4] Beneish M-Score penalità
     mscore = row.get("Beneish M-Score", None)
     if mscore is not None:
         if mscore > -1.78:
@@ -1644,7 +1521,6 @@ def compute_smart_quant_score(
         elif mscore > -2.22:
             f_score -= 8.0
 
-    # [NEW-4] ROIC premium
     if roic >= 0.15:
         f_score += 6.0
     elif roic >= 0.12:
@@ -1699,10 +1575,6 @@ def compute_unified_verdict(
     weights: Optional[Dict[str, float]] = None,
     thresholds: Optional[Dict[str, float]] = None
 ) -> Dict[str, Any]:
-    """
-    [NEW] Modello unificato "Bibbia".
-    Combina Qualità Fondamentale, Valutazione, Timing e Rischio Quantitativo.
-    """
     if weights is None:
         weights = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
     if thresholds is None:
@@ -1723,11 +1595,10 @@ def compute_unified_verdict(
             "pb_max": 3.0,
         }
 
-    # --- 1. Qualità Fondamentale (FQS) ---
+    # Qualità Fondamentale
     fqs = 0.0
     details = []
 
-    # ROIC
     roic = safe_float(row.get("ROIC"), 0.0)
     if roic >= thresholds["roic_min"]:
         fqs += 20
@@ -1736,25 +1607,21 @@ def compute_unified_verdict(
         fqs += 10
         details.append("⚠️ ROIC positivo ma basso")
 
-    # CROIC
     croic = safe_float(row.get("CROIC"), 0.0)
     if croic >= thresholds["croic_min"]:
         fqs += 10
         details.append("✅ CROIC ≥ 5%")
 
-    # FCF Margin
     fcf_margin = safe_float(row.get("FCF Margin"), None)
     if fcf_margin is not None and fcf_margin >= thresholds["fcf_margin_min"]:
         fqs += 10
         details.append("✅ FCF Margin ≥ 8%")
 
-    # Net Margin
     net_margin = safe_float(row.get("Net Margin"), None)
     if net_margin is not None and net_margin >= thresholds["net_margin_min"]:
         fqs += 10
         details.append("✅ Net Margin ≥ 10%")
 
-    # Debt/Equity
     de = safe_float(row.get("Debt/Equity"), None)
     if de is not None:
         if de <= 0.5:
@@ -1764,7 +1631,6 @@ def compute_unified_verdict(
             fqs += 5
             details.append("⚠️ D/E ≤ 1.0")
 
-    # Interest Coverage
     int_cov = safe_float(row.get("Interest Coverage"), SAFE_INTEREST_COVERAGE)
     if int_cov >= 5:
         fqs += 10
@@ -1773,7 +1639,6 @@ def compute_unified_verdict(
         fqs += 5
         details.append("⚠️ Int.Cover. > 3x")
 
-    # Piotroski F-Score
     fscore = safe_float(row.get("F-Score"), 0.0)
     if fscore >= 7:
         fqs += 15
@@ -1782,8 +1647,8 @@ def compute_unified_verdict(
         fqs += 8
         details.append("⚠️ F‑Score ≥ 4 (discreto)")
 
-    # Beneish M-Score
     mscore = safe_float(row.get("Beneish M-Score"), None)
+    mscore_reliable = row.get("M-Score reliable", True)
     if mscore is not None:
         if mscore <= -2.22:
             fqs += 10
@@ -1794,8 +1659,9 @@ def compute_unified_verdict(
         else:
             fqs -= 20
             details.append("🛑 M‑Score > -1.78 (sospetto manipolazione)")
+        if not mscore_reliable:
+            details.append("⚠️ M‑Score approssimativo (dati incompleti)")
 
-    # Altman Z-Score
     z = qm.get("Altman Z-Score", "N/A")
     if isinstance(z, (int, float)):
         if z >= 3.0:
@@ -1804,8 +1670,11 @@ def compute_unified_verdict(
         elif z >= thresholds["altman_safe"]:
             fqs += 2
             details.append("⚠️ Z‑Score > 1.81 (grey zone)")
+    # [FIX‑CRIT] Utilizza Z''-Score se disponibile e se Z classico non lo è
+    z2 = qm.get("Altman Z''-Score", "N/A")
+    if isinstance(z2, (int, float)):
+        details.append(f"ℹ️ Z''-Score (non‑manifatturiero): {z2:.2f}")
 
-    # Revenue Growth
     rev_growth = safe_float(row.get("Revenue Growth"), None)
     if rev_growth is not None and rev_growth > 0.05:
         fqs += 5
@@ -1813,7 +1682,7 @@ def compute_unified_verdict(
 
     fqs = np.clip(fqs, 0, 100)
 
-    # --- 2. Valutazione (VAS) ---
+    # Valutazione
     vas = 0.0
     peg = safe_float(row.get("PEG Ratio"), None)
     if peg is not None and peg > 0:
@@ -1835,7 +1704,6 @@ def compute_unified_verdict(
             vas += 15
             details.append("⚠️ EV/EBIT ≤ 15")
 
-    # FCF Yield come proxy di economicità
     fcf_yield = safe_float(row.get("FCF Yield"), None)
     if fcf_yield is not None:
         if fcf_yield >= 0.08:
@@ -1856,18 +1724,18 @@ def compute_unified_verdict(
 
     vas = np.clip(vas, 0, 100)
 
-    # --- 3. Timing Tecnico (TMS) ---
+    # Timing
     tms = float(np.clip(timing_score, 0, 100))
     details.append(f"📈 Timing Score: {tms:.0f}/100")
 
-    # --- 4. Rischio Quantitativo (QRS) ---
+    # Rischio Quantitativo
     sharpe = qm.get("Sharpe Ratio", 0.0) or 0.0
     max_dd = risk.get("Max Drawdown", 0.0) or 0.0
     sortino = risk.get("Sortino", 0.0) or 0.0
 
-    qrs = 50  # base neutra
+    qrs = 50
     if sharpe > 0:
-        qrs += min(20, sharpe * 20)  # fino a +20 per Sharpe 1
+        qrs += min(20, sharpe * 20)
     if sortino > 0:
         qrs += min(15, sortino * 15)
     if max_dd < -0.50:
@@ -1877,7 +1745,6 @@ def compute_unified_verdict(
     qrs = np.clip(qrs, 0, 100)
     details.append(f"📉 Rischio Quant (Sharpe {sharpe:.2f}, MaxDD {max_dd*100:.1f}%)")
 
-    # --- Punteggio Finale ---
     final_score = (
         weights["F"] * fqs +
         weights["V"] * vas +
@@ -1885,7 +1752,6 @@ def compute_unified_verdict(
         weights["Q"] * qrs
     )
 
-    # Determina verdetto
     if final_score >= 75:
         verdict = "Strong Buy"
         emoji = "🟢"
@@ -1976,11 +1842,9 @@ def build_portfolio_returns(
     if not series_list:
         return None
 
-    # [FIN-FIX] join "outer" + ffill iniziale per non perdere dati di
-    # ticker con storia piu' breve. Poi dropna finale solo sulle prime righe.
     df_rets = pd.concat(series_list, axis=1, join="outer").sort_index()
     df_rets = df_rets.dropna(how="all")
-    df_rets = df_rets.dropna()  # mantiene solo periodo comune
+    df_rets = df_rets.dropna()
     if df_rets.empty:
         return None
 
@@ -2012,13 +1876,11 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
     drawdown = equity / roll_max - 1.0
     max_dd = drawdown.min() if not drawdown.empty else np.nan
 
-    # [NEW] Sortino & Calmar a livello portafoglio
     rf_daily = rf / TRADING_DAYS_YEAR
     downside = port_ret[port_ret < rf_daily]
     downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
     sortino = excess / downside_dev if downside_dev and downside_dev > 0 else np.nan
 
-    # CAGR per Calmar
     n_years = len(port_ret) / TRADING_DAYS_YEAR
     cagr = (equity.iloc[-1]) ** (1.0 / n_years) - 1.0 if n_years > 0 else np.nan
     calmar = cagr / abs(max_dd) if max_dd < 0 and not np.isnan(cagr) else np.nan
@@ -2038,7 +1900,6 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 # 5.G CONCENTRAZIONE & DIVERSIFICAZIONE  [NEW]
 # ==========================================================================
 def calculate_concentration_metrics(weights_pct: Dict[str, float]) -> Dict[str, float]:
-    """[NEW] HHI e Effective Number of Stocks (ENS)."""
     w = np.array(list(weights_pct.values()), dtype=float) / 100.0
     if w.sum() <= 0:
         return {"HHI": np.nan, "ENS": np.nan, "Top1 %": np.nan, "Top3 %": np.nan}
@@ -2060,7 +1921,6 @@ def calculate_portfolio_beta(
     port_ret: pd.Series,
     benchmark_symbol: str = DEFAULT_BENCHMARK
 ) -> Dict[str, float]:
-    """[NEW] Beta vs benchmark (S&P 500 di default)."""
     try:
         bench_df = get_technical_data(benchmark_symbol)
         if bench_df is None or bench_df.empty:
@@ -2075,7 +1935,6 @@ def calculate_portfolio_beta(
         beta = cov / var_b if var_b > 0 else np.nan
 
         rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
-        # CAPM: alpha = mean(port - rf) - beta*(mean(bench - rf))
         alpha_daily = (joined['port'].mean() - rf_daily) - beta * (joined['bench'].mean() - rf_daily)
         alpha_ann = alpha_daily * TRADING_DAYS_YEAR
         corr = joined['port'].corr(joined['bench'])
@@ -2096,7 +1955,7 @@ def get_latest_price(symbol: str) -> Optional[float]:
     df = get_technical_data(symbol)
     if df is not None and not df.empty and 'Close' in df.columns:
         val = df['Close'].dropna().iloc[-1]
-        return safe_float(val, None)  # [ROBUSTNESS] safe_float restituisce None se NaN
+        return safe_float(val, None)
     raw = get_fundamental_data(symbol)
     if raw and raw.get('info'):
         info = raw['info']
@@ -2107,7 +1966,6 @@ def get_latest_price(symbol: str) -> Optional[float]:
 
 
 def get_ticker_native_currency(symbol: str) -> Optional[str]:
-    """[NEW] Ritorna la valuta nativa del ticker secondo i fondamentali."""
     raw = get_fundamental_data(symbol)
     if raw and raw.get('info'):
         cur = raw['info'].get('currency')
@@ -2123,17 +1981,11 @@ def calculate_position_from_quantity(
     user_currency: Optional[str] = None,
     base_currency: Optional[str] = None
 ) -> Dict[str, float]:
-    """
-    [FIN-FIX] CRITICAL: il prezzo attuale e' nella valuta nativa del ticker.
-    Se l'utente ha inserito PMC in una valuta diversa (es. USD per ticker .MI
-    quotato in EUR), va applicata la conversione. Se base_currency e'
-    specificata, anche i totali sono convertiti.
-    """
     current_price_native = safe_float(get_latest_price(ticker), np.nan)
     native_cur = get_ticker_native_currency(ticker) or "EUR"
     user_cur = (user_currency or native_cur).upper().strip()
 
-    invested = float(quantity * pmc)  # nella valuta utente
+    invested = float(quantity * pmc)
     if np.isnan(current_price_native):
         market_value = 0.0
         current_price_in_user_cur = np.nan
@@ -2212,7 +2064,25 @@ def inject_pwa_support():
 # ==========================================================================
 # 5.J ALLOCAZIONE E RIBILANCIAMENTO
 # ==========================================================================
-def infer_asset_class(ticker: str, company_name: str = "") -> str:
+def infer_asset_class(ticker: str, company_name: str = "", raw_info: Optional[Dict[str, Any]] = None) -> str:
+    # [FIX‑CRIT] Utilizza quoteType da Yahoo Finance se disponibile
+    if raw_info:
+        qt = str(raw_info.get('quoteType', '')).upper()
+        if qt == 'ETF':
+            # Distingue ETF obbligazionari/azionari dal nome
+            name_lower = company_name.lower()
+            if any(k in name_lower for k in ["bond", "treasury", "government", "corporate"]):
+                return "ETF Obbligazionario"
+            if any(k in name_lower for k in ["gold", "silver", "precious"]):
+                return "ETF/ETC Oro"
+            return "ETF Azionario"
+        if qt == 'MUTUALFUND':
+            return "Fondo Comune"
+        if qt == 'CURRENCY':
+            return "Valuta"
+        if qt == 'CRYPTOCURRENCY':
+            return "Crypto"
+
     t = str(ticker).upper()
     name = str(company_name).lower()
 
@@ -2245,7 +2115,6 @@ def infer_geography(ticker: str, company_name: str = "") -> str:
     t = str(ticker).upper()
     name = str(company_name).lower()
 
-    # [FIN-FIX] Estesa la lista dei suffissi mercato
     suffix_map = {
         ".MI": "Italia", ".DE": "Germania", ".PA": "Francia", ".L": "Regno Unito",
         ".AS": "Olanda", ".BR": "Belgio", ".LS": "Portogallo", ".MC": "Spagna",
@@ -2295,7 +2164,7 @@ def build_portfolio_allocation_df(
             "Company Name": company_name,
             "Importo": float(amount),
             "Valuta": detected_currency,
-            "Asset Class": infer_asset_class(ticker, company_name),
+            "Asset Class": infer_asset_class(ticker, company_name, info),
             "Geografia": infer_geography(ticker, company_name)
         })
 
@@ -2326,11 +2195,6 @@ def compute_rebalancing_actions(
     group_col: str = "Ticker",
     tolerance_pct: float = 1.0
 ) -> pd.DataFrame:
-    """
-    [COMMENTO-7.4] La tolleranza è espressa in punti percentuali.
-    L'azione in valuta è data da: scostamento percentuale * valore totale / 100.
-    La soglia è confrontata con lo scostamento percentuale assoluto.
-    """
     if df_alloc.empty:
         return pd.DataFrame()
     current = summarize_group_weights(df_alloc, group_col)
@@ -2370,7 +2234,6 @@ def render_apk_download_box() -> None:
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
 
-    # [NEW] Pannello impostazioni globali
     with st.sidebar.expander("⚙️ Impostazioni globali", expanded=False):
         base_currency = st.selectbox(
             "Valuta base portafoglio", ["EUR", "USD", "GBP", "CHF"], index=0,
@@ -2392,6 +2255,9 @@ def setup_sidebar() -> Dict[str, Any]:
             st.session_state["risk_free_override"] = None
         rf_eff = get_active_risk_free_rate()
         st.caption(f"Tasso risk-free effettivo: {rf_eff*100:.2f}%")
+        # [FIX‑CRIT] Avviso se si usa il fallback
+        if st.session_state["risk_free_override"] is None and rf_eff == DEFAULT_RISK_FREE_RATE:
+            st.warning("⚠️ Tasso risk-free dinamico non disponibile. Uso 4% default.")
 
         st.markdown("**Pesi Smart Quant Score**")
         col_w1, col_w2, col_w3 = st.columns(3)
@@ -2404,7 +2270,6 @@ def setup_sidebar() -> Dict[str, Any]:
         else:
             st.session_state["smart_weights"] = DEFAULT_SMART_WEIGHTS
 
-        # [NEW-10.2] Pulsante pulizia cache
         if st.button("🧹 Pulisci cache", width='stretch'):
             st.cache_data.clear()
             st.cache_resource.clear()
@@ -2453,7 +2318,6 @@ def setup_sidebar() -> Dict[str, Any]:
             "custom_min_fcf_margin": st.number_input("Custom Min FCF Margin", value=0.08, step=0.01, format="%.2f"),
             "custom_min_net_margin": st.number_input("Custom Min Net Margin", value=0.10, step=0.01, format="%.2f"),
             "perfectonly": st.checkbox("Solo All Green"),
-            # [RIMOSSO] model_mode: non più necessario, il modello è unificato
         }
 
     with st.sidebar.expander("❓ Come cercare il ticker corretto"):
@@ -2545,12 +2409,10 @@ Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tr
         Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
         """)
         
-        # Sostituisci il link con il tuo link personale PayPal.me o il codice del pulsante
         st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
         
         st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
       
-
 
     with st.sidebar.expander("Contatti", expanded=False):
         st.write("Per supporto tecnico, collaborazioni o richieste:")
@@ -2608,7 +2470,6 @@ def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series]
 
 
 def _init_session_state() -> None:
-    """[REFACTOR] Inizializzazione di tutti gli state in un punto solo."""
     defaults = {
         'batch_results': None,
         'selected_ticker': None,
@@ -2639,15 +2500,606 @@ def _init_session_state() -> None:
 
 
 def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
-    """[NEW] Esporta il portafoglio in CSV per backup/condivisione."""
     return df_weights.to_csv(index=False).encode("utf-8")
+
+
+# ==========================================================================
+# 7. FUNZIONI DI RENDERING DEI TAB (per ridurre la dimensione di main)
+# ==========================================================================
+def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
+    if row is None:
+        st.info("Nessun ticker attivo. Usa il box 'Analisi rapida senza ricerca'.")
+        if batch_results is not None and not batch_results.empty:
+            st.dataframe(batch_results.drop(columns=['_raw_data'], errors='ignore'))
+    else:
+        st.info("💡 **Come leggere questa sezione:** qualita' del business prima, sostenibilita' "
+                "finanziaria poi, prezzo/multipli alla fine.")
+        if analysis_source == 'batch' and batch_results is not None and not batch_results.empty:
+            st.dataframe(batch_results.drop(columns=['_raw_data'], errors='ignore'))
+        elif row is not None:
+            st.success(f'Analisi standalone attiva su: {ticker}')
+            st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'))
+    st.markdown("---")
+    st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
+                unsafe_allow_html=True)
+
+
+def render_tecnico_tab(row, ticker):
+    if row is None:
+        st.info("Nessun ticker attivo.")
+        return
+    st.info("💡 **Come leggere il grafico:** SMA200 = trend di fondo, RSI = momentum, ADX = forza del trend.")
+    df_tech = get_technical_data(ticker)
+    if df_tech is not None:
+        df_calc = calculate_technical_indicators(df_tech)
+        score, reasons = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
+        st.metric("Timing Score", f"{score}/100")
+        with st.expander("Dettaglio segnali"):
+            for r in reasons:
+                st.write(r)
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.5, 0.25, 0.25])
+        fig.add_trace(go.Candlestick(
+            x=df_calc.index, open=df_calc['Open'], high=df_calc['High'],
+            low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200",
+            line=dict(color='blue')
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_calc.index, y=df_calc['RSI'], name="RSI",
+            line=dict(color='purple')
+        ), row=2, col=1)
+        if 'ADX' in df_calc.columns:
+            fig.add_trace(go.Scatter(
+                x=df_calc.index, y=df_calc['ADX'], name="ADX",
+                line=dict(color='orange')
+            ), row=3, col=1)
+        fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_dark")
+        st.plotly_chart(fig, width='stretch')
+    else:
+        st.warning(f'Dati tecnici non disponibili per {ticker}.')
+    st.markdown("---")
+    st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
+                unsafe_allow_html=True)
+
+
+def render_quant_tab(row, ticker, standalone_raw_data):
+    if row is None:
+        st.info("Nessun ticker attivo.")
+        return
+    st.info("💡 **Quant:** Sharpe (con rf dinamico), Sortino (rischio downside), Calmar "
+            "(CAGR/MaxDD), Altman Z-Score e Z''-Score, VaR/CVaR, Monte Carlo bootstrap.")
+    df_tech = get_technical_data(ticker)
+    if df_tech is not None:
+        rf_eff = get_active_risk_free_rate()
+        qm = calculate_quant_metrics(
+            df_tech,
+            row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data,
+            risk_free=rf_eff
+        )
+        risk = calculate_risk_metrics(df_tech)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"Sharpe ({rf_eff*100:.1f}% Rf)", f"{qm['Sharpe Ratio']:.2f}")
+        c2.metric("Trend R-Squared", f"{qm['R-Squared']:.2f}")
+        z = qm['Altman Z-Score']
+        z2 = qm.get("Altman Z''-Score", "N/A")
+        c3.metric("Altman Z-Score", f"{z:.2f}" if isinstance(z, (int, float)) else "N/A")
+        if isinstance(z2, (int, float)):
+            st.caption(f"Altman Z''-Score (emergenti): {z2:.2f}")
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Max Drawdown", f"{risk['Max Drawdown']*100:.1f}%")
+        c5.metric("CAGR", f"{risk['CAGR']*100:.1f}%" if not np.isnan(risk['CAGR']) else "N/A")
+        c6.metric("VaR 95%", f"{risk['VaR_95']*100:.2f}%")
+
+        c7, c8, c9 = st.columns(3)
+        c7.metric("Sortino Ratio", f"{risk['Sortino']:.2f}" if not np.isnan(risk['Sortino']) else "N/A")
+        c8.metric("Calmar Ratio", f"{risk['Calmar']:.2f}" if not np.isnan(risk['Calmar']) else "N/A")
+        c9.metric("CVaR 95%", f"{risk['CVaR_95']*100:.2f}%" if not np.isnan(risk['CVaR_95']) else "N/A")
+
+        df_calc_q = calculate_technical_indicators(df_tech)
+        score_q, _ = calculate_timing_score(df_calc_q, df_calc_q['Close'].iloc[-1])
+        smart_w = st.session_state.get("smart_weights", DEFAULT_SMART_WEIGHTS)
+        smart = compute_smart_quant_score(row, score_q, qm, risk, weights=smart_w)
+        st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
+        st.caption(f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}")
+
+        with st.expander("📉 Distribuzione rendimenti & rischio"):
+            st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
+            returns = df_tech['Close'].pct_change().dropna()
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Histogram(x=returns, nbinsx=50, name="Rendimenti giornalieri"))
+            fig_r.update_layout(template="plotly_dark", bargap=0.05)
+            st.plotly_chart(fig_r, width='stretch')
+
+        with st.expander("🎲 Simulazione Monte Carlo"):
+            col_mc1, col_mc2, col_mc3 = st.columns(3)
+            horizon_days = col_mc1.slider("Orizzonte (giorni)", 60, 756, 252, step=21)
+            n_paths = col_mc2.slider("Numero traiettorie", 100, 3000, 1000, step=100)
+            method = col_mc3.selectbox("Metodo", ["IID Bootstrap", "Block Bootstrap"])
+
+            if method == "Block Bootstrap":
+                mc = monte_carlo_block_bootstrap(df_tech, n_paths, horizon_days)
+            else:
+                mc = monte_carlo_equity(df_tech, n_paths, horizon_days)
+
+            if mc["paths"] is not None:
+                final_vals = mc["final_distribution"]
+                p05 = np.quantile(final_vals, 0.05)
+                p50 = np.quantile(final_vals, 0.50)
+                c10, c11, c12 = st.columns(3)
+                c10.metric("Prob. perdita > 20%", f"{(final_vals < 0.8).mean()*100:.1f}%")
+                c11.metric("Mediana esito", f"{(p50-1)*100:.1f}%")
+                c12.metric("5° percentile", f"{(p05-1)*100:.1f}%")
+
+                x = np.arange(1, horizon_days + 1)
+                fig_mc = go.Figure()
+                fig_mc.add_trace(go.Scatter(x=x, y=mc["q50"], name="Mediana",
+                                            line=dict(color="cyan")))
+                fig_mc.add_trace(go.Scatter(x=x, y=mc["q95"], name="95° percentile",
+                                            line=dict(color="green"), opacity=0.3))
+                fig_mc.add_trace(go.Scatter(x=x, y=mc["q05"], name="5° percentile",
+                                            line=dict(color="red"), opacity=0.3,
+                                            fill="tonexty", fillcolor="rgba(255,0,0,0.1)"))
+                fig_mc.update_layout(template="plotly_dark", height=400,
+                                     xaxis_title="Giorni", yaxis_title="Equity")
+                st.plotly_chart(fig_mc, width='stretch')
+    st.markdown("---")
+    st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
+                unsafe_allow_html=True)
+
+
+def render_verdetto_tab(row, ticker, standalone_raw_data):
+    if row is None:
+        st.info("Nessun ticker attivo.")
+        return
+    st.info("💡 **Modello Unificato:** qualità, valutazione, timing e rischio in un unico punteggio (0‑100).")
+
+    df_tech = get_technical_data(ticker)
+    qm = calculate_quant_metrics(
+        df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data
+    ) if df_tech is not None else {}
+    risk = calculate_risk_metrics(df_tech) if df_tech is not None else {
+        "Max Drawdown": 0.0, "CAGR": 0.0
+    }
+    if df_tech is not None:
+        df_calc_v = calculate_technical_indicators(df_tech)
+        timing_score, timing_reasons = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
+    else:
+        timing_score = 0
+        timing_reasons = []
+
+    verdict = compute_unified_verdict(
+        row=row,
+        timing_score=timing_score,
+        qm=qm,
+        risk=risk,
+        weights={"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
+    )
+
+    st.markdown(f"## {verdict['Emoji']} {verdict['Verdict']}  ({verdict['FinalScore']:.1f}/100)")
+    st.progress(int(verdict['FinalScore']))
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Qualità", f"{verdict['FQS']:.0f}/100")
+    col2.metric("Valutazione", f"{verdict['VAS']:.0f}/100")
+    col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
+    col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
+
+    with st.expander("🔍 Criteri analizzati"):
+        for d in verdict["Details"]:
+            st.write(d)
+
+    if timing_reasons:
+        with st.expander("📈 Dettaglio segnali tecnici"):
+            for r in timing_reasons:
+                st.write(r)
+
+    st.markdown('---')
+    st.subheader('Spiegazione AI')
+    ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, timing_score, timing_reasons, mode='Unificato')
+    st.session_state.burry_ai_live_context[ticker] = ai_context
+
+    if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
+        st.session_state.ai_ticker_chat_history = []
+        st.session_state.ai_ticker_chat_last_symbol = ticker
+
+    if st.button('🧠 Spiega con AI', key=f'ai_explain_{ticker}'):
+        with st.spinner('Analisi AI in corso...'):
+            ai_answer = ask_gemini_ticker_chat(
+                ai_context,
+                'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.',
+                mode='Unificato',
+            )
+        st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
+
+    if st.session_state.get('ai_ticker_chat_history'):
+        last_ai_msg = st.session_state.ai_ticker_chat_history[-1]
+        if last_ai_msg.get('role') == 'assistant':
+            st.markdown(last_ai_msg.get('content', ''))
+
+    st.subheader('Chat AI sul ticker')
+    for msg in st.session_state.get('ai_ticker_chat_history', []):
+        with st.chat_message(msg.get('role', 'assistant')):
+            st.markdown(msg.get('content', ''))
+
+    ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
+    if ai_user_prompt:
+        st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
+        conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
+        for m in st.session_state.ai_ticker_chat_history[:-1]:
+            conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
+        enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {ai_user_prompt}"
+
+        with st.chat_message('user'):
+            st.markdown(ai_user_prompt)
+        with st.chat_message('assistant'):
+            with st.spinner("L'AI sta rispondendo..."):
+                ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode='Unificato')
+            st.markdown(ai_reply)
+        st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
+
+
+def render_portafoglio_tab(ui):
+    st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita',"
+            " PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze,"
+            " concentrazione, ribilanciamento.")
+
+    base_currency = ui.get("base_currency") or st.session_state.get("base_currency", "EUR")
+    st.success(f"Valuta base portafoglio: **{base_currency}** | "
+               f"Conversione FX reale attiva.")
+
+    all_tickers_batch: List[str] = []
+    if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
+        all_tickers_batch = st.session_state.batch_results["Ticker"].tolist()
+
+    if all_tickers_batch:
+        st.markdown("#### Seleziona dal batch analizzato")
+        default_batch = [t for t in st.session_state.portfolio_tickers if t in all_tickers_batch]
+        selected_from_batch = st.multiselect(
+            "Titoli da includere nel portafoglio (da batch)",
+            all_tickers_batch, default=default_batch
+        )
+    else:
+        selected_from_batch = []
+
+    st.markdown("#### Aggiungi manualmente altri ticker")
+    manual_ticker = st.text_input(
+        "Ticker (incluso suffisso mercato, es. STLAM.MI, BMW.DE, AIR.PA, ULVR.L)", ""
+    )
+    if st.button("➕ Aggiungi ticker manuale al portafoglio"):
+        if manual_ticker.strip():
+            try:
+                t_clean = sanitize_ticker(manual_ticker)
+                if t_clean not in st.session_state.portfolio_tickers:
+                    st.session_state.portfolio_tickers.append(t_clean)
+                    st.session_state.holdings_quantity.setdefault(t_clean, 0.0)
+                    st.session_state.holdings_pmc.setdefault(t_clean, 0.0)
+                    st.session_state.holdings_currency.setdefault(t_clean, 'USD')
+                    if is_authenticated():
+                        save_user_portfolio_position(
+                            t_clean,
+                            st.session_state.holdings_quantity[t_clean],
+                            st.session_state.holdings_pmc[t_clean],
+                            st.session_state.holdings_currency[t_clean]
+                        )
+                    st.success(f"Aggiunto {t_clean} al portafoglio.")
+            except ValueError as e:
+                st.error(f"Ticker non valido: {e}")
+        else:
+            st.warning("Inserisci un ticker valido prima di aggiungere.")
+
+    portfolio_list = sorted(set(selected_from_batch + st.session_state.portfolio_tickers))
+    st.session_state.portfolio_tickers = portfolio_list
+
+    if portfolio_list:
+        st.markdown("#### Dati posizione per ogni ticker")
+        cols = st.columns(2)
+        holdings: Dict[str, float] = st.session_state.holdings
+        holdings_quantity: Dict[str, float] = st.session_state.holdings_quantity
+        holdings_pmc: Dict[str, float] = st.session_state.holdings_pmc
+
+        for i, t in enumerate(portfolio_list):
+            col = cols[i % 2]
+            col.markdown(f"##### {t}")
+            default_qty = float(holdings_quantity.get(t, 0.0))
+            default_pmc = float(holdings_pmc.get(t, 0.0))
+            qty = col.number_input(
+                f"{t} - Quantità / Quote",
+                min_value=0.0, value=default_qty, step=0.01, format="%.4f",
+                key=f"holding_qty_{t}"
+            )
+            pmc = col.number_input(
+                f"{t} - PMC", min_value=0.0, value=default_pmc, step=0.01, format="%.4f",
+                key=f"holding_pmc_{t}"
+            )
+            cur_default = st.session_state.holdings_currency.get(t, "USD")
+            cur_options = ["USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD"]
+            if cur_default not in cur_options:
+                cur_options = [cur_default] + cur_options
+            cur = col.selectbox(
+                f"{t} - Valuta posizione",
+                cur_options,
+                index=cur_options.index(cur_default) if cur_default in cur_options else 0,
+                key=f"currency_{t}"
+            )
+            st.session_state.holdings_currency[t] = cur
+
+            derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur) \
+                if qty > 0 and pmc > 0 else {
+                    'Importo Investito': 0.0, 'Prezzo Attuale': np.nan,
+                    'Valore di Mercato': 0.0, 'P&L': 0.0, 'P&L %': 0.0,
+                    'Valuta Nativa': cur, 'FX Native->User': 1.0,
+                }
+            holdings_quantity[t] = qty
+            holdings_pmc[t] = pmc
+            holdings[t] = float(derived['Importo Investito'])
+
+            if is_authenticated():
+                save_user_portfolio_position(t, qty, pmc, cur)
+
+            price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
+            native_cur = derived.get('Valuta Nativa', cur)
+            fx_used = derived.get('FX Native->User', 1.0)
+            col.caption(
+                f"Prezzo (in {cur}): {price_text} | Investito: {derived['Importo Investito']:.2f} | "
+                f"Valore: {derived['Valore di Mercato']:.2f} | P&L: {derived['P&L']:.2f} ({derived['P&L %']:.2f}%)"
+            )
+            if native_cur and native_cur != cur:
+                col.caption(f"⚠️ Valuta nativa: {native_cur}, FX applicato: {fx_used:.4f}")
+
+            if col.button("🗑 Rimuovi", key=f"remove_{t}"):
+                if t in st.session_state.portfolio_tickers:
+                    st.session_state.portfolio_tickers = [
+                        x for x in st.session_state.portfolio_tickers if x != t
+                    ]
+                for d in [st.session_state.holdings, st.session_state.holdings_currency,
+                          st.session_state.holdings_quantity, st.session_state.holdings_pmc]:
+                    d.pop(t, None)
+                if is_authenticated():
+                    delete_user_portfolio_position(t)
+                st.rerun()
+
+        st.session_state.holdings = holdings
+        st.session_state.holdings_quantity = holdings_quantity
+        st.session_state.holdings_pmc = holdings_pmc
+
+        if st.button("📊 Calcola pesi e analisi del portafoglio"):
+            positive_holdings = {t: a for t, a in holdings.items() if a > 0}
+            if not positive_holdings:
+                st.error("Imposta quantita' e PMC > 0 almeno per un titolo.")
+            else:
+                tot = sum(positive_holdings.values())
+                weights_pct = {t: a / tot * 100.0 for t, a in positive_holdings.items()}
+                built = build_portfolio_returns(list(positive_holdings.keys()), weights_pct)
+                if built is None:
+                    st.error("Impossibile costruire la serie dei rendimenti (dati insufficienti).")
+                else:
+                    df_rets, port_ret = built
+                    pm = calculate_portfolio_metrics(port_ret)
+
+                    st.markdown("#### Dettaglio posizioni e pesi")
+                    rows_pos = []
+                    for t in weights_pct.keys():
+                        qty = holdings_quantity.get(t, 0.0)
+                        pmc = holdings_pmc.get(t, 0.0)
+                        cur = st.session_state.holdings_currency.get(t, "USD")
+                        derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur)
+                        rows_pos.append({
+                            "Ticker": t, "Quantità": qty, "PMC": pmc,
+                            "Prezzo Attuale": derived['Prezzo Attuale'],
+                            "Importo Investito": derived['Importo Investito'],
+                            "Valore di Mercato": derived['Valore di Mercato'],
+                            "P&L": derived['P&L'],
+                            "P&L %": derived['P&L %'],
+                            "Peso %": weights_pct[t],
+                            "Valuta": cur,
+                        })
+                    df_weights = pd.DataFrame(rows_pos)
+                    st.dataframe(df_weights, width='stretch')
+
+                    csv_bytes = _portfolio_export_csv(df_weights)
+                    st.download_button(
+                        "💾 Scarica portafoglio (CSV)",
+                        data=csv_bytes,
+                        file_name="portfolio_burry.csv",
+                        mime="text/csv"
+                    )
+
+                    df_weights_base = enrich_portfolio_with_fx(df_weights, base_currency=base_currency)
+                    st.markdown(f"#### Portafoglio in valuta base ({base_currency})")
+                    st.dataframe(df_weights_base, width='stretch')
+
+                    st.markdown("#### Analisi fiscale teorica")
+                    tax_rate_input = st.slider(
+                        "Aliquota fiscale (%)", 0.0, 50.0,
+                        value=float(DEFAULT_TAX_RATE * 100.0), step=1.0,
+                        key="portfolio_tax_rate_slider"
+                    ) / 100.0
+
+                    df_tax = calculate_tax_impact(df_weights, tax_rate=tax_rate_input)
+                    if not df_tax.empty:
+                        st.dataframe(df_tax, width='stretch')
+                        total_tax = float(df_tax["Imposta Teorica"].sum())
+                        total_net_pnl = float(df_tax["Plus/Minus Netta"].sum())
+                        tax_c1, tax_c2 = st.columns(2)
+                        tax_c1.metric("Imposta teorica (no compensazione)", f"{total_tax:,.2f}")
+                        tax_c2.metric("P&L netto", f"{total_net_pnl:,.2f}")
+
+                    st.markdown("#### Compensazione fiscale (minusvalenze)")
+                    df_tax_comp, summary_comp = calculate_tax_with_loss_offset(
+                        df_weights_base, tax_rate=tax_rate_input
+                    )
+                    if summary_comp:
+                        ccol1, ccol2, ccol3 = st.columns(3)
+                        ccol1.metric("Plusvalenze tot.", f"{summary_comp['Plusvalenze totali']:,.2f}")
+                        ccol2.metric("Minusvalenze tot.", f"{summary_comp['Minusvalenze totali']:,.2f}")
+                        ccol3.metric("Risparmio fiscale", f"{summary_comp['Risparmio fiscale da compensazione']:,.2f}")
+                        st.caption(
+                            f"In Italia le minusvalenze realizzate possono essere usate per ridurre "
+                            f"l'imponibile sulle plusvalenze entro {TAX_LOSS_COMPENSATION_YEARS} anni "
+                            f"(art. 68 TUIR). Imposta teorica netta: "
+                            f"{summary_comp['Imposta teorica netta']:,.2f} {base_currency}."
+                        )
+
+                    st.markdown("#### Allocazione del portafoglio")
+                    df_alloc = build_portfolio_allocation_df(
+                        positive_holdings, st.session_state.holdings_currency
+                    )
+                    if not df_alloc.empty:
+                        st.dataframe(df_alloc, width='stretch')
+                        col_a1, col_a2, col_a3 = st.columns(3)
+                        with col_a1:
+                            st.markdown("**Per Asset Class**")
+                            df_asset = summarize_group_weights(df_alloc, "Asset Class")
+                            st.dataframe(df_asset, width='stretch')
+                        with col_a2:
+                            st.markdown("**Per Geografia**")
+                            df_geo = summarize_group_weights(df_alloc, "Geografia")
+                            st.dataframe(df_geo, width='stretch')
+                        with col_a3:
+                            st.markdown("**Per Valuta**")
+                            df_cur = summarize_group_weights(df_alloc, "Valuta")
+                            st.dataframe(df_cur, width='stretch')
+
+                        st.markdown("#### Concentrazione e diversificazione")
+                        conc = calculate_concentration_metrics(weights_pct)
+                        ccc1, ccc2, ccc3, ccc4 = st.columns(4)
+                        ccc1.metric("HHI", f"{conc['HHI']:.3f}")
+                        ccc2.metric("Numero effettivo titoli", f"{conc['ENS']:.1f}")
+                        ccc3.metric("Top 1 %", f"{conc['Top1 %']:.1f}%")
+                        ccc4.metric("Top 3 %", f"{conc['Top3 %']:.1f}%")
+                        st.caption(
+                            "HHI < 0.10 → portafoglio molto diversificato; HHI > 0.25 → "
+                            "concentrazione elevata. ENS = 1/HHI rappresenta il numero "
+                            "effettivo di titoli equivalenti equipesati."
+                        )
+
+                        st.markdown("#### Ribilanciamento automatico")
+                        rebalance_mode = st.radio(
+                            "Livello target",
+                            ["Ticker", "Asset Class", "Geografia", "Valuta"],
+                            horizontal=True, key="rebalance_mode_radio"
+                        )
+                        st.session_state.portfolio_target_mode = rebalance_mode
+
+                        mapping = {
+                            "Ticker": ("Ticker", df_alloc[["Ticker", "Peso %"]].copy()),
+                            "Asset Class": ("Asset Class", df_asset[["Asset Class", "Peso %"]].copy()),
+                            "Geografia": ("Geografia", df_geo[["Geografia", "Peso %"]].copy()),
+                            "Valuta": ("Valuta", df_cur[["Valuta", "Peso %"]].copy()),
+                        }
+                        label_col, current_target_df = mapping[rebalance_mode]
+
+                        target_inputs = {}
+                        cols_target = st.columns(3)
+                        for j, rec in enumerate(current_target_df.to_dict("records")):
+                            col_t = cols_target[j % 3]
+                            label = rec[label_col]
+                            current_weight = float(rec["Peso %"])
+                            key_target = f"{rebalance_mode}::{label}"
+                            default_target = float(
+                                st.session_state.portfolio_targets.get(key_target, current_weight)
+                            )
+                            target_val = col_t.number_input(
+                                f"Target {label}", min_value=0.0, max_value=100.0,
+                                value=default_target, step=1.0,
+                                key=f"target_{rebalance_mode}_{label}"
+                            )
+                            target_inputs[label] = target_val
+                            st.session_state.portfolio_targets[key_target] = target_val
+
+                        tolerance_pct = st.slider(
+                            "Tolleranza ribilanciamento (%)", 0.0, 10.0, 1.0, step=0.5
+                        )
+                        target_sum = sum(target_inputs.values())
+                        normalized_targets = (
+                            {k: v / target_sum * 100.0 for k, v in target_inputs.items()}
+                            if target_sum > 0 else target_inputs
+                        )
+                        rebalance_df = compute_rebalancing_actions(
+                            df_alloc=df_alloc, target_weights=normalized_targets,
+                            group_col=label_col, tolerance_pct=tolerance_pct
+                        )
+                        if not rebalance_df.empty:
+                            st.markdown("##### Azioni suggerite")
+                            st.dataframe(rebalance_df, width='stretch')
+                            fig_reb = go.Figure()
+                            fig_reb.add_trace(go.Bar(
+                                x=rebalance_df[label_col],
+                                y=rebalance_df["Peso %"], name="Peso attuale %"
+                            ))
+                            fig_reb.add_trace(go.Bar(
+                                x=rebalance_df[label_col],
+                                y=rebalance_df["Target %"], name="Target %"
+                            ))
+                            fig_reb.update_layout(
+                                barmode="group", template="plotly_dark", height=420,
+                                xaxis_title=label_col, yaxis_title="Peso %"
+                            )
+                            st.plotly_chart(fig_reb, width='stretch')
+
+                    if not df_weights_base.empty:
+                        total_invested_base = float(df_weights_base["Importo Investito Base"].sum())
+                        total_value_base = float(df_weights_base["Valore di Mercato Base"].sum())
+                        total_pnl_base = float(df_weights_base["P&L Base"].sum())
+                        total_pnl_pct_base = (
+                            total_pnl_base / total_invested_base * 100.0
+                            if total_invested_base > 0 else 0.0
+                        )
+                        ctot1, ctot2, ctot3, ctot4 = st.columns(4)
+                        ctot1.metric(f"Investito ({base_currency})", f"{total_invested_base:,.2f}")
+                        ctot2.metric(f"Valore ({base_currency})", f"{total_value_base:,.2f}")
+                        ctot3.metric(f"P&L ({base_currency})", f"{total_pnl_base:,.2f}")
+                        ctot4.metric("Rend. totale", f"{total_pnl_pct_base:.2f}%")
+
+                    cpa, cpv, cps, cpdd = st.columns(4)
+                    cpa.metric("Rend. annuo atteso", f"{pm['AnnRet']*100:.2f}%")
+                    cpv.metric("Volatilita' annua", f"{pm['AnnVol']*100:.2f}%")
+                    cps.metric("Sharpe portafoglio", f"{pm['Sharpe']:.2f}")
+                    cpdd.metric("Max Drawdown", f"{pm['MaxDD']*100:.1f}%")
+
+                    cps2, cps3, cps4 = st.columns(3)
+                    cps2.metric("Sortino", f"{pm['Sortino']:.2f}" if not np.isnan(pm['Sortino']) else "N/A")
+                    cps3.metric("Calmar", f"{pm['Calmar']:.2f}" if not np.isnan(pm['Calmar']) else "N/A")
+                    cps4.metric("CAGR portafoglio", f"{pm['CAGR']*100:.1f}%" if not np.isnan(pm['CAGR']) else "N/A")
+
+                    st.markdown("#### Esposizione di mercato (vs S&P 500)")
+                    beta_metrics = calculate_portfolio_beta(port_ret, benchmark_symbol=DEFAULT_BENCHMARK)
+                    bcol1, bcol2, bcol3 = st.columns(3)
+                    bcol1.metric("Beta", f"{beta_metrics['Beta']:.2f}" if not np.isnan(beta_metrics['Beta']) else "N/A")
+                    bcol2.metric("Alpha (annuo)", f"{beta_metrics['Alpha (ann.)']*100:.2f}%"
+                                 if not np.isnan(beta_metrics['Alpha (ann.)']) else "N/A")
+                    bcol3.metric("Correlazione", f"{beta_metrics['Corr']:.2f}"
+                                 if not np.isnan(beta_metrics['Corr']) else "N/A")
+
+                    equity_p = (1 + port_ret).cumprod()
+                    fig_p = go.Figure()
+                    fig_p.add_trace(go.Scatter(
+                        x=equity_p.index, y=equity_p.values, name="Equity portafoglio"
+                    ))
+                    fig_p.update_layout(
+                        template="plotly_dark", height=400,
+                        xaxis_title="Data", yaxis_title="Equity normalizzata"
+                    )
+                    st.plotly_chart(fig_p, width='stretch')
+
+                    corr = df_rets.corr()
+                    st.markdown("#### Correlazioni tra titoli in portafoglio")
+                    st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+    else:
+        st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
+
+    st.markdown("---")
+    st.markdown("Creato e sviluppato da Innovative Program", unsafe_allow_html=True)
 
 
 def main():
     init_auth_state()
     _init_session_state()
     st.title("💲 V-Quant Pro")
-    # [NEW-10.1] Timestamp ultimo aggiornamento dati (approssimativo)
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
 
@@ -2660,7 +3112,6 @@ def main():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. "
                 "Per salvare il portafoglio in modo permanente, effettua il login.")
 
-    # Pulsante "Avvia Analisi": batch o singolo
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2684,7 +3135,6 @@ def main():
                 except Exception as e:
                     analysis_errors.append(f'{t}: {e}')
 
-            # [NEW] Fetch parallelo
             with st.spinner(f"Analisi di {len(normalized_targets)} ticker in parallelo..."):
                 results, fetch_errors = fetch_metrics_batch(normalized_targets)
             analysis_errors.extend(fetch_errors)
@@ -2725,7 +3175,6 @@ def main():
 
             burry_ai_prompt = st.chat_input('Chiedi a BurryAi', key='burry_ai_prompt_sidebar')
             if burry_ai_prompt:
-                # Ora il modello è sempre Unificato
                 ctx = build_burry_ai_context(
                     st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
                     st.session_state.get('burry_ai_asset_type', 'Azione'),
@@ -2734,7 +3183,6 @@ def main():
 
                 st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
 
-                # [BUGFIX] Costruzione della memoria contestuale per l'IA (BurryAi Sidebar)
                 conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
                 for m in st.session_state.burry_ai_history[:-1]:
                     conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
@@ -2758,7 +3206,6 @@ def main():
         ["📊 FONDAMENTALI", "📉 TECNICO", "⚛️ QUANT", "⚖️ VERDETTO", "📁 PORTAFOGLIO"]
     )
 
-    # Selettore rapido ticker
     with st.expander("🎯 Analisi rapida senza ricerca",
                      expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
@@ -2805,626 +3252,17 @@ def main():
         st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio '
                 'oppure inseriscilo nel box "Ticker libero" qui sopra.')
 
-    # ----- TAB FONDAMENTALI -----
+    # RENDERING DEI TAB
     with tab_f:
-        if row is None:
-            st.info("Nessun ticker attivo. Usa il box 'Analisi rapida senza ricerca'.")
-            if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
-                st.dataframe(st.session_state.batch_results.drop(columns=['_raw_data'], errors='ignore'))
-        else:
-            st.info("💡 **Come leggere questa sezione:** qualita' del business prima, sostenibilita' "
-                    "finanziaria poi, prezzo/multipli alla fine.")
-            if analysis_source == 'batch' and st.session_state.batch_results is not None \
-               and not st.session_state.batch_results.empty:
-                st.dataframe(st.session_state.batch_results.drop(columns=['_raw_data'], errors='ignore'))
-            elif row is not None:
-                st.success(f'Analisi standalone attiva su: {ticker}')
-                st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'))
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
-                    unsafe_allow_html=True)
-
-    # ----- TAB TECNICO -----
+        render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
     with tab_t:
-        if row is None:
-            st.info("Nessun ticker attivo.")
-        else:
-            st.info("💡 **Come leggere il grafico:** SMA200 = trend di fondo, RSI = momentum, ADX = forza del trend.")
-            df_tech = get_technical_data(ticker)
-            if df_tech is not None:
-                df_calc = calculate_technical_indicators(df_tech)
-                score, reasons = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
-                st.metric("Timing Score", f"{score}/100")
-                with st.expander("Dettaglio segnali"):
-                    for r in reasons:
-                        st.write(r)
-                fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.5, 0.25, 0.25])
-                fig.add_trace(go.Candlestick(
-                    x=df_calc.index, open=df_calc['Open'], high=df_calc['High'],
-                    low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"
-                ), row=1, col=1)
-                fig.add_trace(go.Scatter(
-                    x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200",
-                    line=dict(color='blue')
-                ), row=1, col=1)
-                fig.add_trace(go.Scatter(
-                    x=df_calc.index, y=df_calc['RSI'], name="RSI",
-                    line=dict(color='purple')
-                ), row=2, col=1)
-                # [NEW-4] Aggiunta ADX al grafico
-                if 'ADX' in df_calc.columns:
-                    fig.add_trace(go.Scatter(
-                        x=df_calc.index, y=df_calc['ADX'], name="ADX",
-                        line=dict(color='orange')
-                    ), row=3, col=1)
-                fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_dark")
-                st.plotly_chart(fig, width='stretch')
-            else:
-                st.warning(f'Dati tecnici non disponibili per {ticker}.')
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
-                    unsafe_allow_html=True)
-
-    # ----- TAB QUANT -----
+        render_tecnico_tab(row, ticker)
     with tab_q:
-        if row is None:
-            st.info("Nessun ticker attivo.")
-        else:
-            st.info("💡 **Quant:** Sharpe (con rf dinamico), Sortino (rischio downside), Calmar "
-                    "(CAGR/MaxDD), Altman Z-Score e Z''-Score, VaR/CVaR, Monte Carlo bootstrap.")
-            df_tech = get_technical_data(ticker)
-            if df_tech is not None:
-                rf_eff = get_active_risk_free_rate()
-                qm = calculate_quant_metrics(
-                    df_tech,
-                    row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data,
-                    risk_free=rf_eff
-                )
-                risk = calculate_risk_metrics(df_tech)
-
-                c1, c2, c3 = st.columns(3)
-                c1.metric(f"Sharpe ({rf_eff*100:.1f}% Rf)", f"{qm['Sharpe Ratio']:.2f}")
-                c2.metric("Trend R-Squared", f"{qm['R-Squared']:.2f}")
-                z = qm['Altman Z-Score']
-                z2 = qm.get("Altman Z''-Score", "N/A")
-                c3.metric("Altman Z-Score", f"{z:.2f}" if isinstance(z, (int, float)) else "N/A")
-                if isinstance(z2, (int, float)):
-                    st.caption(f"Altman Z''-Score (emergenti): {z2:.2f}")
-
-                c4, c5, c6 = st.columns(3)
-                c4.metric("Max Drawdown", f"{risk['Max Drawdown']*100:.1f}%")
-                c5.metric("CAGR", f"{risk['CAGR']*100:.1f}%" if not np.isnan(risk['CAGR']) else "N/A")
-                c6.metric("VaR 95%", f"{risk['VaR_95']*100:.2f}%")
-
-                # [NEW] Sortino & Calmar
-                c7, c8, c9 = st.columns(3)
-                c7.metric("Sortino Ratio", f"{risk['Sortino']:.2f}" if not np.isnan(risk['Sortino']) else "N/A")
-                c8.metric("Calmar Ratio", f"{risk['Calmar']:.2f}" if not np.isnan(risk['Calmar']) else "N/A")
-                c9.metric("CVaR 95%", f"{risk['CVaR_95']*100:.2f}%" if not np.isnan(risk['CVaR_95']) else "N/A")
-
-                df_calc_q = calculate_technical_indicators(df_tech)
-                score_q, _ = calculate_timing_score(df_calc_q, df_calc_q['Close'].iloc[-1])
-                smart_w = st.session_state.get("smart_weights", DEFAULT_SMART_WEIGHTS)
-                smart = compute_smart_quant_score(row, score_q, qm, risk, weights=smart_w)
-                st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
-                st.caption(
-                    f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}"
-                )
-
-                with st.expander("📉 Distribuzione rendimenti & rischio"):
-                    st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
-                    returns = df_tech['Close'].pct_change().dropna()
-                    fig_r = go.Figure()
-                    fig_r.add_trace(go.Histogram(x=returns, nbinsx=50, name="Rendimenti giornalieri"))
-                    fig_r.update_layout(template="plotly_dark", bargap=0.05)
-                    st.plotly_chart(fig_r, width='stretch')
-
-                with st.expander("🎲 Simulazione Monte Carlo"):
-                    col_mc1, col_mc2, col_mc3 = st.columns(3)
-                    horizon_days = col_mc1.slider("Orizzonte (giorni)", 60, 756, 252, step=21)
-                    n_paths = col_mc2.slider("Numero traiettorie", 100, 3000, 1000, step=100)
-                    method = col_mc3.selectbox("Metodo", ["IID Bootstrap", "Block Bootstrap"])
-
-                    if method == "Block Bootstrap":
-                        mc = monte_carlo_block_bootstrap(df_tech, n_paths, horizon_days)
-                    else:
-                        mc = monte_carlo_equity(df_tech, n_paths, horizon_days)
-
-                    if mc["paths"] is not None:
-                        final_vals = mc["final_distribution"]
-                        p05 = np.quantile(final_vals, 0.05)
-                        p50 = np.quantile(final_vals, 0.50)
-                        c10, c11, c12 = st.columns(3)
-                        c10.metric("Prob. perdita > 20%", f"{(final_vals < 0.8).mean()*100:.1f}%")
-                        c11.metric("Mediana esito", f"{(p50-1)*100:.1f}%")
-                        c12.metric("5° percentile", f"{(p05-1)*100:.1f}%")
-
-                        x = np.arange(1, horizon_days + 1)
-                        fig_mc = go.Figure()
-                        fig_mc.add_trace(go.Scatter(x=x, y=mc["q50"], name="Mediana",
-                                                    line=dict(color="cyan")))
-                        fig_mc.add_trace(go.Scatter(x=x, y=mc["q95"], name="95° percentile",
-                                                    line=dict(color="green"), opacity=0.3))
-                        fig_mc.add_trace(go.Scatter(x=x, y=mc["q05"], name="5° percentile",
-                                                    line=dict(color="red"), opacity=0.3,
-                                                    fill="tonexty", fillcolor="rgba(255,0,0,0.1)"))
-                        fig_mc.update_layout(template="plotly_dark", height=400,
-                                             xaxis_title="Giorni", yaxis_title="Equity")
-                        st.plotly_chart(fig_mc, width='stretch')
-        st.markdown("---")
-        st.markdown("<p style='text-align:center;color:gray;'>creato e sviluppato da Innovative Program</p>",
-                    unsafe_allow_html=True)
-
-    # ----- TAB VERDETTO -----
+        render_quant_tab(row, ticker, standalone_raw_data)
     with tab_v:
-        if row is None:
-            st.info("Nessun ticker attivo.")
-        else:
-            st.info("💡 **Modello Unificato:** qualità, valutazione, timing e rischio in un unico punteggio (0‑100).")
-
-            df_tech = get_technical_data(ticker)
-            qm = calculate_quant_metrics(
-                df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data
-            ) if df_tech is not None else {}
-            risk = calculate_risk_metrics(df_tech) if df_tech is not None else {
-                "Max Drawdown": 0.0, "CAGR": 0.0
-            }
-            if df_tech is not None:
-                df_calc_v = calculate_technical_indicators(df_tech)
-                timing_score, timing_reasons = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
-            else:
-                timing_score = 0
-                timing_reasons = []
-
-            # Esegui il modello unificato
-            verdict = compute_unified_verdict(
-                row=row,
-                timing_score=timing_score,
-                qm=qm,
-                risk=risk,
-                weights={"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
-            )
-
-            # Mostra il verdetto grande
-            st.markdown(f"## {verdict['Emoji']} {verdict['Verdict']}  ({verdict['FinalScore']:.1f}/100)")
-
-            # Barra di progresso
-            st.progress(int(verdict['FinalScore']))
-
-            # Pannelli con i punteggi dei pilastri
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Qualità", f"{verdict['FQS']:.0f}/100")
-            col2.metric("Valutazione", f"{verdict['VAS']:.0f}/100")
-            col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
-            col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
-
-            # Checklist dettagliata
-            with st.expander("🔍 Criteri analizzati"):
-                for d in verdict["Details"]:
-                    st.write(d)
-
-            # Timing reasons
-            if timing_reasons:
-                with st.expander("📈 Dettaglio segnali tecnici"):
-                    for r in timing_reasons:
-                        st.write(r)
-
-            # AI context e chat (invariato)
-            st.markdown('---')
-            st.subheader('Spiegazione AI')
-            ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, timing_score, timing_reasons, mode='Unificato')
-            st.session_state.burry_ai_live_context[ticker] = ai_context
-
-            if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
-                st.session_state.ai_ticker_chat_history = []
-                st.session_state.ai_ticker_chat_last_symbol = ticker
-
-            if st.button('🧠 Spiega con AI', key=f'ai_explain_{ticker}'):
-                with st.spinner('Analisi AI in corso...'):
-                    ai_answer = ask_gemini_ticker_chat(
-                        ai_context,
-                        'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.',
-                        mode='Unificato',
-                    )
-                st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
-
-            if st.session_state.get('ai_ticker_chat_history'):
-                last_ai_msg = st.session_state.ai_ticker_chat_history[-1]
-                if last_ai_msg.get('role') == 'assistant':
-                    st.markdown(last_ai_msg.get('content', ''))
-
-            st.subheader('Chat AI sul ticker')
-            for msg in st.session_state.get('ai_ticker_chat_history', []):
-                with st.chat_message(msg.get('role', 'assistant')):
-                    st.markdown(msg.get('content', ''))
-
-            ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
-            if ai_user_prompt:
-                st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
-                
-                conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
-                for m in st.session_state.ai_ticker_chat_history[:-1]:
-                    conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
-                enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {ai_user_prompt}"
-
-                with st.chat_message('user'):
-                    st.markdown(ai_user_prompt)
-                with st.chat_message('assistant'):
-                    with st.spinner("L'AI sta rispondendo..."):
-                        ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode='Unificato')
-                    st.markdown(ai_reply)
-                st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
-
-    # ----- TAB PORTAFOGLIO -----
+        render_verdetto_tab(row, ticker, standalone_raw_data)
     with tab_p:
-        st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita',"
-                " PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze,"
-                " concentrazione, ribilanciamento.")
-
-        base_currency = ui.get("base_currency") or st.session_state.get("base_currency", "EUR")
-        st.success(f"Valuta base portafoglio: **{base_currency}** | "
-                   f"Conversione FX reale attiva.")
-
-        all_tickers_batch: List[str] = []
-        if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
-            all_tickers_batch = st.session_state.batch_results["Ticker"].tolist()
-
-        if all_tickers_batch:
-            st.markdown("#### Seleziona dal batch analizzato")
-            default_batch = [t for t in st.session_state.portfolio_tickers if t in all_tickers_batch]
-            selected_from_batch = st.multiselect(
-                "Titoli da includere nel portafoglio (da batch)",
-                all_tickers_batch, default=default_batch
-            )
-        else:
-            selected_from_batch = []
-
-        st.markdown("#### Aggiungi manualmente altri ticker")
-        manual_ticker = st.text_input(
-            "Ticker (incluso suffisso mercato, es. STLAM.MI, BMW.DE, AIR.PA, ULVR.L)", ""
-        )
-        if st.button("➕ Aggiungi ticker manuale al portafoglio"):
-            if manual_ticker.strip():
-                try:
-                    t_clean = sanitize_ticker(manual_ticker)
-                    if t_clean not in st.session_state.portfolio_tickers:
-                        st.session_state.portfolio_tickers.append(t_clean)
-                        st.session_state.holdings_quantity.setdefault(t_clean, 0.0)
-                        st.session_state.holdings_pmc.setdefault(t_clean, 0.0)
-                        st.session_state.holdings_currency.setdefault(t_clean, 'USD')
-                        if is_authenticated():
-                            save_user_portfolio_position(
-                                t_clean,
-                                st.session_state.holdings_quantity[t_clean],
-                                st.session_state.holdings_pmc[t_clean],
-                                st.session_state.holdings_currency[t_clean]
-                            )
-                        st.success(f"Aggiunto {t_clean} al portafoglio.")
-                except ValueError as e:
-                    st.error(f"Ticker non valido: {e}")
-            else:
-                st.warning("Inserisci un ticker valido prima di aggiungere.")
-
-        portfolio_list = sorted(set(selected_from_batch + st.session_state.portfolio_tickers))
-        st.session_state.portfolio_tickers = portfolio_list
-
-        if portfolio_list:
-            st.markdown("#### Dati posizione per ogni ticker")
-            cols = st.columns(2)
-            holdings: Dict[str, float] = st.session_state.holdings
-            holdings_quantity: Dict[str, float] = st.session_state.holdings_quantity
-            holdings_pmc: Dict[str, float] = st.session_state.holdings_pmc
-
-            for i, t in enumerate(portfolio_list):
-                col = cols[i % 2]
-                col.markdown(f"##### {t}")
-                default_qty = float(holdings_quantity.get(t, 0.0))
-                default_pmc = float(holdings_pmc.get(t, 0.0))
-                qty = col.number_input(
-                    f"{t} - Quantità / Quote",
-                    min_value=0.0, value=default_qty, step=0.01, format="%.4f",
-                    key=f"holding_qty_{t}"
-                )
-                pmc = col.number_input(
-                    f"{t} - PMC", min_value=0.0, value=default_pmc, step=0.01, format="%.4f",
-                    key=f"holding_pmc_{t}"
-                )
-                cur_default = st.session_state.holdings_currency.get(t, "USD")
-                cur_options = ["USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD"]
-                if cur_default not in cur_options:
-                    cur_options = [cur_default] + cur_options
-                cur = col.selectbox(
-                    f"{t} - Valuta posizione",
-                    cur_options,
-                    index=cur_options.index(cur_default) if cur_default in cur_options else 0,
-                    key=f"currency_{t}"
-                )
-                st.session_state.holdings_currency[t] = cur
-
-                derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur) \
-                    if qty > 0 and pmc > 0 else {
-                        'Importo Investito': 0.0, 'Prezzo Attuale': np.nan,
-                        'Valore di Mercato': 0.0, 'P&L': 0.0, 'P&L %': 0.0,
-                        'Valuta Nativa': cur, 'FX Native->User': 1.0,
-                    }
-                holdings_quantity[t] = qty
-                holdings_pmc[t] = pmc
-                holdings[t] = float(derived['Importo Investito'])
-
-                if is_authenticated():
-                    save_user_portfolio_position(t, qty, pmc, cur)
-
-                price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
-                native_cur = derived.get('Valuta Nativa', cur)
-                fx_used = derived.get('FX Native->User', 1.0)
-                col.caption(
-                    f"Prezzo (in {cur}): {price_text} | Investito: {derived['Importo Investito']:.2f} | "
-                    f"Valore: {derived['Valore di Mercato']:.2f} | P&L: {derived['P&L']:.2f} ({derived['P&L %']:.2f}%)"
-                )
-                if native_cur and native_cur != cur:
-                    col.caption(f"⚠️ Valuta nativa: {native_cur}, FX applicato: {fx_used:.4f}")
-
-                if col.button("🗑 Rimuovi", key=f"remove_{t}"):
-                    if t in st.session_state.portfolio_tickers:
-                        st.session_state.portfolio_tickers = [
-                            x for x in st.session_state.portfolio_tickers if x != t
-                        ]
-                    for d in [st.session_state.holdings, st.session_state.holdings_currency,
-                              st.session_state.holdings_quantity, st.session_state.holdings_pmc]:
-                        d.pop(t, None)
-                    if is_authenticated():
-                        delete_user_portfolio_position(t)
-                    st.rerun()
-
-            st.session_state.holdings = holdings
-            st.session_state.holdings_quantity = holdings_quantity
-            st.session_state.holdings_pmc = holdings_pmc
-
-            if st.button("📊 Calcola pesi e analisi del portafoglio"):
-                positive_holdings = {t: a for t, a in holdings.items() if a > 0}
-                if not positive_holdings:
-                    st.error("Imposta quantita' e PMC > 0 almeno per un titolo.")
-                else:
-                    tot = sum(positive_holdings.values())
-                    weights_pct = {t: a / tot * 100.0 for t, a in positive_holdings.items()}
-                    built = build_portfolio_returns(list(positive_holdings.keys()), weights_pct)
-                    if built is None:
-                        st.error("Impossibile costruire la serie dei rendimenti "
-                                 "(dati insufficienti).")
-                    else:
-                        df_rets, port_ret = built
-                        pm = calculate_portfolio_metrics(port_ret)
-
-                        # Tabella posizioni con FX-aware
-                        st.markdown("#### Dettaglio posizioni e pesi")
-                        rows_pos = []
-                        total_market_value = 0.0
-                        for t in weights_pct.keys():
-                            qty = holdings_quantity.get(t, 0.0)
-                            pmc = holdings_pmc.get(t, 0.0)
-                            cur = st.session_state.holdings_currency.get(t, "USD")
-                            derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur)
-                            total_market_value += derived['Valore di Mercato']
-                            rows_pos.append({
-                                "Ticker": t, "Quantità": qty, "PMC": pmc,
-                                "Prezzo Attuale": derived['Prezzo Attuale'],
-                                "Importo Investito": derived['Importo Investito'],
-                                "Valore di Mercato": derived['Valore di Mercato'],
-                                "P&L": derived['P&L'],
-                                "P&L %": derived['P&L %'],
-                                "Peso %": weights_pct[t],
-                                "Valuta": cur,
-                            })
-                        df_weights = pd.DataFrame(rows_pos)
-                        st.dataframe(df_weights, width='stretch')
-
-                        # [NEW] Export CSV
-                        csv_bytes = _portfolio_export_csv(df_weights)
-                        st.download_button(
-                            "💾 Scarica portafoglio (CSV)",
-                            data=csv_bytes,
-                            file_name="portfolio_burry.csv",
-                            mime="text/csv"
-                        )
-
-                        # [BUGFIX] enrich_portfolio_with_fx ora effettivamente usata
-                        df_weights_base = enrich_portfolio_with_fx(df_weights, base_currency=base_currency)
-
-                        st.markdown(f"#### Portafoglio in valuta base ({base_currency})")
-                        st.dataframe(df_weights_base, width='stretch')
-
-                        # ----- Analisi fiscale standard -----
-                        st.markdown("#### Analisi fiscale teorica")
-                        tax_rate_input = st.slider(
-                            "Aliquota fiscale (%)", 0.0, 50.0,
-                            value=float(DEFAULT_TAX_RATE * 100.0), step=1.0,
-                            key="portfolio_tax_rate_slider"
-                        ) / 100.0
-
-                        df_tax = calculate_tax_impact(df_weights, tax_rate=tax_rate_input)
-                        if not df_tax.empty:
-                            st.dataframe(df_tax, width='stretch')
-                            total_tax = float(df_tax["Imposta Teorica"].sum())
-                            total_net_pnl = float(df_tax["Plus/Minus Netta"].sum())
-                            tax_c1, tax_c2 = st.columns(2)
-                            tax_c1.metric("Imposta teorica (no compensazione)", f"{total_tax:,.2f}")
-                            tax_c2.metric("P&L netto", f"{total_net_pnl:,.2f}")
-
-                        # [NEW] Compensazione minusvalenze
-                        st.markdown("#### Compensazione fiscale (minusvalenze)")
-                        df_tax_comp, summary_comp = calculate_tax_with_loss_offset(
-                            df_weights_base, tax_rate=tax_rate_input
-                        )
-                        if summary_comp:
-                            ccol1, ccol2, ccol3 = st.columns(3)
-                            ccol1.metric("Plusvalenze tot.", f"{summary_comp['Plusvalenze totali']:,.2f}")
-                            ccol2.metric("Minusvalenze tot.", f"{summary_comp['Minusvalenze totali']:,.2f}")
-                            ccol3.metric("Risparmio fiscale", f"{summary_comp['Risparmio fiscale da compensazione']:,.2f}")
-                            st.caption(
-                                f"In Italia le minusvalenze realizzate possono essere usate per ridurre "
-                                f"l'imponibile sulle plusvalenze entro {TAX_LOSS_COMPENSATION_YEARS} anni "
-                                f"(art. 68 TUIR). Imposta teorica netta: "
-                                f"{summary_comp['Imposta teorica netta']:,.2f} {base_currency}."
-                            )
-
-                        # ----- Allocazione -----
-                        st.markdown("#### Allocazione del portafoglio")
-                        df_alloc = build_portfolio_allocation_df(
-                            positive_holdings, st.session_state.holdings_currency
-                        )
-                        if not df_alloc.empty:
-                            st.dataframe(df_alloc, width='stretch')
-                            col_a1, col_a2, col_a3 = st.columns(3)
-                            with col_a1:
-                                st.markdown("**Per Asset Class**")
-                                df_asset = summarize_group_weights(df_alloc, "Asset Class")
-                                st.dataframe(df_asset, width='stretch')
-                            with col_a2:
-                                st.markdown("**Per Geografia**")
-                                df_geo = summarize_group_weights(df_alloc, "Geografia")
-                                st.dataframe(df_geo, width='stretch')
-                            with col_a3:
-                                st.markdown("**Per Valuta**")
-                                df_cur = summarize_group_weights(df_alloc, "Valuta")
-                                st.dataframe(df_cur, width='stretch')
-
-                            # [NEW] Concentrazione & diversificazione
-                            st.markdown("#### Concentrazione e diversificazione")
-                            conc = calculate_concentration_metrics(weights_pct)
-                            ccc1, ccc2, ccc3, ccc4 = st.columns(4)
-                            ccc1.metric("HHI", f"{conc['HHI']:.3f}")
-                            ccc2.metric("Numero effettivo titoli", f"{conc['ENS']:.1f}")
-                            ccc3.metric("Top 1 %", f"{conc['Top1 %']:.1f}%")
-                            ccc4.metric("Top 3 %", f"{conc['Top3 %']:.1f}%")
-                            st.caption(
-                                "HHI < 0.10 → portafoglio molto diversificato; HHI > 0.25 → "
-                                "concentrazione elevata. ENS = 1/HHI rappresenta il numero "
-                                "effettivo di titoli equivalenti equipesati."
-                            )
-
-                            # ----- Ribilanciamento -----
-                            st.markdown("#### Ribilanciamento automatico")
-                            rebalance_mode = st.radio(
-                                "Livello target",
-                                ["Ticker", "Asset Class", "Geografia", "Valuta"],
-                                horizontal=True, key="rebalance_mode_radio"
-                            )
-                            st.session_state.portfolio_target_mode = rebalance_mode
-
-                            mapping = {
-                                "Ticker": ("Ticker", df_alloc[["Ticker", "Peso %"]].copy()),
-                                "Asset Class": ("Asset Class", df_asset[["Asset Class", "Peso %"]].copy()),
-                                "Geografia": ("Geografia", df_geo[["Geografia", "Peso %"]].copy()),
-                                "Valuta": ("Valuta", df_cur[["Valuta", "Peso %"]].copy()),
-                            }
-                            label_col, current_target_df = mapping[rebalance_mode]
-
-                            target_inputs = {}
-                            cols_target = st.columns(3)
-                            for j, rec in enumerate(current_target_df.to_dict("records")):
-                                col_t = cols_target[j % 3]
-                                label = rec[label_col]
-                                current_weight = float(rec["Peso %"])
-                                key_target = f"{rebalance_mode}::{label}"
-                                default_target = float(
-                                    st.session_state.portfolio_targets.get(key_target, current_weight)
-                                )
-                                target_val = col_t.number_input(
-                                    f"Target {label}", min_value=0.0, max_value=100.0,
-                                    value=default_target, step=1.0,
-                                    key=f"target_{rebalance_mode}_{label}"
-                                )
-                                target_inputs[label] = target_val
-                                st.session_state.portfolio_targets[key_target] = target_val
-
-                            tolerance_pct = st.slider(
-                                "Tolleranza ribilanciamento (%)", 0.0, 10.0, 1.0, step=0.5
-                            )
-                            target_sum = sum(target_inputs.values())
-                            normalized_targets = (
-                                {k: v / target_sum * 100.0 for k, v in target_inputs.items()}
-                                if target_sum > 0 else target_inputs
-                            )
-                            rebalance_df = compute_rebalancing_actions(
-                                df_alloc=df_alloc, target_weights=normalized_targets,
-                                group_col=label_col, tolerance_pct=tolerance_pct
-                            )
-                            if not rebalance_df.empty:
-                                st.markdown("##### Azioni suggerite")
-                                st.dataframe(rebalance_df, width='stretch')
-                                fig_reb = go.Figure()
-                                fig_reb.add_trace(go.Bar(
-                                    x=rebalance_df[label_col],
-                                    y=rebalance_df["Peso %"], name="Peso attuale %"
-                                ))
-                                fig_reb.add_trace(go.Bar(
-                                    x=rebalance_df[label_col],
-                                    y=rebalance_df["Target %"], name="Target %"
-                                ))
-                                fig_reb.update_layout(
-                                    barmode="group", template="plotly_dark", height=420,
-                                    xaxis_title=label_col, yaxis_title="Peso %"
-                                )
-                                st.plotly_chart(fig_reb, width='stretch')
-
-                        # ----- Totali in valuta base -----
-                        if not df_weights_base.empty:
-                            total_invested_base = float(df_weights_base["Importo Investito Base"].sum())
-                            total_value_base = float(df_weights_base["Valore di Mercato Base"].sum())
-                            total_pnl_base = float(df_weights_base["P&L Base"].sum())
-                            total_pnl_pct_base = (
-                                total_pnl_base / total_invested_base * 100.0
-                                if total_invested_base > 0 else 0.0
-                            )
-                            ctot1, ctot2, ctot3, ctot4 = st.columns(4)
-                            ctot1.metric(f"Investito ({base_currency})", f"{total_invested_base:,.2f}")
-                            ctot2.metric(f"Valore ({base_currency})", f"{total_value_base:,.2f}")
-                            ctot3.metric(f"P&L ({base_currency})", f"{total_pnl_base:,.2f}")
-                            ctot4.metric("Rend. totale", f"{total_pnl_pct_base:.2f}%")
-
-                        # ----- Metriche di portafoglio -----
-                        cpa, cpv, cps, cpdd = st.columns(4)
-                        cpa.metric("Rend. annuo atteso", f"{pm['AnnRet']*100:.2f}%")
-                        cpv.metric("Volatilita' annua", f"{pm['AnnVol']*100:.2f}%")
-                        cps.metric("Sharpe portafoglio", f"{pm['Sharpe']:.2f}")
-                        cpdd.metric("Max Drawdown", f"{pm['MaxDD']*100:.1f}%")
-
-                        cps2, cps3, cps4 = st.columns(3)
-                        cps2.metric("Sortino", f"{pm['Sortino']:.2f}" if not np.isnan(pm['Sortino']) else "N/A")
-                        cps3.metric("Calmar", f"{pm['Calmar']:.2f}" if not np.isnan(pm['Calmar']) else "N/A")
-                        cps4.metric("CAGR portafoglio", f"{pm['CAGR']*100:.1f}%" if not np.isnan(pm['CAGR']) else "N/A")
-
-                        # [NEW] Beta vs benchmark
-                        st.markdown("#### Esposizione di mercato (vs S&P 500)")
-                        beta_metrics = calculate_portfolio_beta(port_ret, benchmark_symbol=DEFAULT_BENCHMARK)
-                        bcol1, bcol2, bcol3 = st.columns(3)
-                        bcol1.metric("Beta", f"{beta_metrics['Beta']:.2f}" if not np.isnan(beta_metrics['Beta']) else "N/A")
-                        bcol2.metric("Alpha (annuo)", f"{beta_metrics['Alpha (ann.)']*100:.2f}%"
-                                     if not np.isnan(beta_metrics['Alpha (ann.)']) else "N/A")
-                        bcol3.metric("Correlazione", f"{beta_metrics['Corr']:.2f}"
-                                     if not np.isnan(beta_metrics['Corr']) else "N/A")
-
-                        # ----- Equity curve -----
-                        equity_p = (1 + port_ret).cumprod()
-                        fig_p = go.Figure()
-                        fig_p.add_trace(go.Scatter(
-                            x=equity_p.index, y=equity_p.values, name="Equity portafoglio"
-                        ))
-                        fig_p.update_layout(
-                            template="plotly_dark", height=400,
-                            xaxis_title="Data", yaxis_title="Equity normalizzata"
-                        )
-                        st.plotly_chart(fig_p, width='stretch')
-
-                        # ----- Correlazioni -----
-                        corr = df_rets.corr()
-                        st.markdown("#### Correlazioni tra titoli in portafoglio")
-                        st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
-        else:
-            st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
-
-        st.markdown("---")
-        st.markdown("Creato e sviluppato da Innovative Program", unsafe_allow_html=True)
+        render_portafoglio_tab(ui)
 
 
 if __name__ == "__main__":
