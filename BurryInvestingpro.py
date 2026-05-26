@@ -30,7 +30,6 @@ import logging
 import os
 import io
 import time
-import nltk
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -43,7 +42,6 @@ from burry_ai_prompts import (
     build_burry_ai_context,
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
-
 )
 
 # ==========================================================================
