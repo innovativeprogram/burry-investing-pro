@@ -10,3 +10,4 @@ scikit-learn
 supabase
 matplotlib
 google-genai
+import nltk; nltk.download('punkt')
