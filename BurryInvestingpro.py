@@ -43,8 +43,7 @@ from burry_ai_prompts import (
     build_burry_ai_context,
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
-import nltk
-nltk.download('punkt', quiet=True)
+
 )
 
 # ==========================================================================
