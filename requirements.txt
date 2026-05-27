@@ -7,7 +7,6 @@ plotly
 scikit-learn
 pandas-ta
 supabase
-pandas-datareader
 textblob
 nltk
 feedparser
