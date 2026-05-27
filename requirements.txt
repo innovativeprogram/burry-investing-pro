@@ -1,5 +1,5 @@
 streamlit
-yfinance==0.2.40
+yfinance
 yahooquery
 pandas
 numpy
@@ -16,7 +16,7 @@ fpdf
 reportlab
 arch
 scipy
-statsmodels==0.14.0
+statsmodels
 matplotlib
 google-generativeai
-websockets==12.0
+websockets
