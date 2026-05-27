@@ -4,7 +4,8 @@
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 # 
-# V-Quant Pro - Versione definitiva con menu laterale, AI contestuale e portafoglio completo
+# V-Quant Pro - Versione finale con fonti a cascata: yfinance, Polygon, yahooquery, AKShare, investpy
+# Velocizzata, ticker resolver automatico, AI contestuale, portafoglio completo, sfondo opzionale.
 """
 
 import streamlit as st
@@ -55,7 +56,13 @@ try:
     OPENFIGI_AVAILABLE = True
 except ImportError:
     OPENFIGI_AVAILABLE = False
-    # Non mostriamo warning perché non è essenziale
+
+try:
+    import investpy
+    INVESTPY_AVAILABLE = True
+except ImportError:
+    INVESTPY_AVAILABLE = False
+    logging.warning("investpy non installato. Installare: pip install investpy")
 
 try:
     from pandas_datareader import data as pdr
@@ -148,7 +155,7 @@ POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 POLYGON_BASE_URL = "https://api.polygon.io"
 
 # ==========================================================================
-# 0.B TICKER RESOLVER INTELLIGENTE
+# 0.B TICKER RESOLVER INTELLIGENTE (con supporto investpy)
 # ==========================================================================
 @st.cache_data(ttl=86400)
 def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
@@ -174,28 +181,23 @@ def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
             pass
     poly_sym = yf_sym.split('.')[0]
     akshare_sym = raw
+    # Per investpy, il simbolo spesso è lo stesso di yfinance ma senza suffisso (es. ENI)
+    investpy_sym = raw  # verrà risolto dinamicamente nella funzione
     return {
         "yfinance": yf_sym,
         "yahooquery": yf_sym,
         "polygon": poly_sym,
         "akshare": akshare_sym,
+        "investpy": investpy_sym,
     }
 
 # ==========================================================================
-# 0.C AGGREGATORE DATI A CASCATA PER FONDAMENTALI (con tracciamento fonte)
+# 0.C AGGREGATORE DATI A CASCATA PER FONDAMENTALI (ordine: yfinance -> Polygon -> yahooquery -> AKShare -> investpy)
 # ==========================================================================
 def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]], str]:
-    """
-    Restituisce (dati, nome_fonte)
-    """
     resolved = smart_ticker_resolver(symbol)
-    # 1. Polygon
-    if POLYGON_API_KEY:
-        poly_symbol = resolved["polygon"]
-        poly_data = get_polygon_fundamentals(poly_symbol)
-        if poly_data and (not poly_data["financials"].empty or not poly_data["balance_sheet"].empty):
-            return poly_data, "Polygon.io"
-    # 2. Yahoo Finance
+    
+    # 1. yfinance (primario, veloce)
     yf_symbol = resolved["yfinance"]
     try:
         stock = yf.Ticker(yf_symbol)
@@ -203,16 +205,26 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
         if info and ('symbol' in info or 'shortName' in info):
             if 'symbol' not in info:
                 info['symbol'] = yf_symbol
-            return {
-                "info": info,
-                "financials": stock.financials,
-                "balance_sheet": stock.balance_sheet,
-                "cashflow": stock.cashflow,
-                "symbol": yf_symbol
-            }, "Yahoo Finance (yfinance)"
+            # Verifica che i dati non siano vuoti (almeno una metrica)
+            if info.get('marketCap') or info.get('totalRevenue'):
+                return {
+                    "info": info,
+                    "financials": stock.financials,
+                    "balance_sheet": stock.balance_sheet,
+                    "cashflow": stock.cashflow,
+                    "symbol": yf_symbol
+                }, "Yahoo Finance (yfinance)"
     except Exception as e:
         logger.debug(f"yfinance fallito per {yf_symbol}: {e}")
-    # 3. YahooQuery
+    
+    # 2. Polygon (se API key presente)
+    if POLYGON_API_KEY:
+        poly_symbol = resolved["polygon"]
+        poly_data = get_polygon_fundamentals(poly_symbol)
+        if poly_data and (not poly_data["financials"].empty or not poly_data["balance_sheet"].empty):
+            return poly_data, "Polygon.io"
+    
+    # 3. yahooquery
     try:
         yq = YQ_Ticker(yf_symbol)
         summary = yq.summary_detail.get(yf_symbol, {}) if isinstance(yq.summary_detail, dict) else {}
@@ -252,35 +264,61 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
         return {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": yf_symbol}, "Yahoo Finance (yahooquery)"
     except Exception as e:
         logger.debug(f"yahooquery fallito per {yf_symbol}: {e}")
-    # 4. AKShare
+    
+    # 4. AKShare (solo mercati cinesi)
     if AKSHARE_AVAILABLE:
         aksymbol = resolved["akshare"]
         try:
             df = ak.stock_zh_a_hist(symbol=aksymbol, period="daily", start_date="20200101", end_date="20231231", adjust="qfq")
             if df is not None and not df.empty:
-                df = df.rename(columns={'日期': 'Date', '开盘': 'Open', '收盘': 'Close', '最高': 'High', '最低': 'Low', '成交量': 'Volume'})
-                df['Date'] = pd.to_datetime(df['Date'])
-                df.set_index('Date', inplace=True)
                 info = {"symbol": aksymbol, "longName": aksymbol, "currency": "CNY"}
                 return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": aksymbol}, "AKShare (Cina)"
         except Exception as e:
             logger.debug(f"AKShare fallito per {aksymbol}: {e}")
+    
+    # 5. investpy (se disponibile)
+    if INVESTPY_AVAILABLE:
+        inv_symbol = resolved["investpy"]
+        try:
+            # Prova a ottenere i dati storici (come minimo)
+            df = investpy.get_stock_historical_data(stock=inv_symbol, country='italy', from_date='01/01/2020', to_date=pd.Timestamp.now().strftime('%d/%m/%Y'))
+            if df is not None and not df.empty:
+                info = {"symbol": inv_symbol, "longName": inv_symbol, "currency": "EUR"}
+                # investpy non fornisce bilanci strutturati, ma almeno prezzi
+                return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": inv_symbol}, "investpy (Europe)"
+        except Exception as e:
+            logger.debug(f"investpy fallito per {inv_symbol}: {e}")
+    
     return None, "Nessuna fonte"
 
 # ==========================================================================
-# 0.D AGGREGATORE DATI TECNICI A CASCATA (con tracciamento fonte)
+# 0.D AGGREGATORE DATI TECNICI A CASCATA (prezzi storici) - con nuovo ordine
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str]:
     resolved = smart_ticker_resolver(symbol)
-    # 1. Polygon
+    
+    # 1. yfinance (veloce)
+    yf_symbol = resolved["yfinance"]
+    try:
+        df = yf.download(yf_symbol, period="1y", interval="1d", progress=False, auto_adjust=True)
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.loc[:, ~df.columns.duplicated(keep='first')]
+            if len(df) >= 60:
+                return df, "Yahoo Finance (yfinance)"
+    except Exception as e:
+        logger.debug(f"yfinance tecnico fallito per {yf_symbol}: {e}")
+    
+    # 2. Polygon
     if POLYGON_API_KEY:
         poly_symbol = resolved["polygon"]
         try:
             throttle_polygon()
             today = pd.Timestamp.now(tz='UTC')
-            two_years_ago = today - pd.DateOffset(years=2)
-            url = f"{POLYGON_BASE_URL}/v2/aggs/ticker/{poly_symbol}/range/1/day/{two_years_ago.strftime('%Y-%m-%d')}/{today.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&limit=5000&apiKey={POLYGON_API_KEY}"
+            one_year_ago = today - pd.DateOffset(years=1)
+            url = f"{POLYGON_BASE_URL}/v2/aggs/ticker/{poly_symbol}/range/1/day/{one_year_ago.strftime('%Y-%m-%d')}/{today.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&limit=5000&apiKey={POLYGON_API_KEY}"
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
@@ -294,22 +332,11 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
                         return df, "Polygon.io"
         except Exception as e:
             logger.debug(f"Polygon tecnico fallito per {poly_symbol}: {e}")
-    # 2. yfinance
-    yf_symbol = resolved["yfinance"]
-    try:
-        df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
-        if df is not None and not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df = df.loc[:, ~df.columns.duplicated(keep='first')]
-            if len(df) >= 60:
-                return df, "Yahoo Finance (yfinance)"
-    except Exception as e:
-        logger.debug(f"yfinance tecnico fallito per {yf_symbol}: {e}")
+    
     # 3. yahooquery
     try:
         t = YQ_Ticker(yf_symbol)
-        df_yq = t.history(period="2y", interval="1d")
+        df_yq = t.history(period="1y", interval="1d")
         if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
             if isinstance(df_yq.index, pd.MultiIndex):
                 try:
@@ -322,7 +349,8 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
                 return df_yq, "Yahoo Finance (yahooquery)"
     except Exception as e:
         logger.debug(f"yahooquery tecnico fallito per {yf_symbol}: {e}")
-    # 4. AKShare
+    
+    # 4. AKShare (Cina)
     if AKSHARE_AVAILABLE:
         aksymbol = resolved["akshare"]
         try:
@@ -335,6 +363,19 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
                     return df[['Open', 'High', 'Low', 'Close', 'Volume']], "AKShare (Cina)"
         except Exception as e:
             logger.debug(f"AKShare tecnico fallito per {aksymbol}: {e}")
+    
+    # 5. investpy (Europa)
+    if INVESTPY_AVAILABLE:
+        inv_symbol = resolved["investpy"]
+        try:
+            df = investpy.get_stock_historical_data(stock=inv_symbol, country='italy', from_date='01/01/2022', to_date=pd.Timestamp.now().strftime('%d/%m/%Y'))
+            if df is not None and not df.empty:
+                df = df.rename(columns={'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'})
+                df.index = pd.to_datetime(df.index)
+                return df[['Open', 'High', 'Low', 'Close', 'Volume']], "investpy (Europe)"
+        except Exception as e:
+            logger.debug(f"investpy tecnico fallito per {inv_symbol}: {e}")
+    
     return None, "Nessuna fonte"
 
 # ==========================================================================
@@ -501,7 +542,7 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     }
 
 # ==========================================================================
-# 0.G PORTFOLIO FX & TAX (funzioni originali)
+# 0.G PORTFOLIO FX & TAX (funzioni originali - invariato)
 # ==========================================================================
 def enrich_portfolio_with_fx(df_weights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
     if df_weights is None or df_weights.empty:
@@ -556,6 +597,19 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide", initial_sidebar_state="expanded")
+
+# (Sfondo commentato – decommentare e mettere URL o base64)
+# page_bg_img = """
+# <style>
+# .stApp {
+#     background-image: url("https://tuo-dominio/sfondo.jpg");
+#     background-size: cover;
+#     background-position: center;
+#     background-repeat: no-repeat;
+# }
+# </style>
+# """
+# st.markdown(page_bg_img, unsafe_allow_html=True)
 
 # ==========================================================================
 # 0.H AUTH SUPABASE
@@ -1698,7 +1752,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1803,13 +1857,11 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
 # ==========================================================================
 
 def get_ai_explanation(context: str, prompt: str) -> str:
-    """Chiamata unificata all'AI"""
     try:
         return ask_gemini_ticker_chat(context, prompt, mode='Unificato')
     except Exception as e:
         return f"Errore nella chiamata AI: {e}"
 
-# --------------------- Alert automatici ---------------------
 def check_alerts(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any], timing_score: int) -> List[str]:
     alerts = []
     if 'alert_thresholds' not in st.session_state:
@@ -1880,7 +1932,6 @@ def get_news_sentiment(ticker: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-# --------------------- Confronto titoli ---------------------
 def compare_tickers_radar(tickers_metrics: List[Dict[str, Any]], metrics_to_compare: List[str] = ['ROIC', 'FCF Yield', 'PEG Ratio', 'Debt/Equity', 'F-Score']):
     if not tickers_metrics:
         return None
@@ -1901,15 +1952,8 @@ def compare_tickers_radar(tickers_metrics: List[Dict[str, Any]], metrics_to_comp
     return fig
 
 # --------------------- Dati macro ---------------------
-try:
-    from pandas_datareader import data as pdr
-    MACRO_AVAILABLE = True
-except ImportError:
-    MACRO_AVAILABLE = False
-
-@st.cache_data(ttl=86400)
 def get_worldbank_indicator(indicator: str, country: str = "US") -> pd.Series:
-    if not MACRO_AVAILABLE:
+    if not PDR_AVAILABLE:
         return pd.Series()
     try:
         data = pdr.DataReader(indicator, 'worldbank', start=2000, end=2023)
@@ -1960,7 +2004,6 @@ def optimize_portfolio(returns_df: pd.DataFrame, method: str = 'max_sharpe', con
         opt = minimize(neg_sharpe, init_weights, method='SLSQP', bounds=bounds, constraints=constraints_list)
         return opt.x if opt.success else None
 
-# --------------------- Cointegrazione ---------------------
 def find_cointegrated_pairs(returns_df: pd.DataFrame, pvalue_threshold: float = 0.05) -> List[Tuple[str, str, float]]:
     if not STATSMODELS_AVAILABLE:
         return []
@@ -1973,7 +2016,6 @@ def find_cointegrated_pairs(returns_df: pd.DataFrame, pvalue_threshold: float = 
                 pairs.append((tickers[i], tickers[j], pvalue))
     return pairs
 
-# --------------------- Istituzionali ---------------------
 def get_institutional_holders(ticker: str) -> pd.DataFrame:
     try:
         ticker_yf = yf.Ticker(ticker)
@@ -1984,7 +2026,6 @@ def get_institutional_holders(ticker: str) -> pd.DataFrame:
         pass
     return pd.DataFrame()
 
-# --------------------- ESG ---------------------
 def get_esg_data(ticker: str) -> Dict[str, Any]:
     try:
         ticker_yf = yf.Ticker(ticker)
@@ -1996,7 +2037,6 @@ def get_esg_data(ticker: str) -> Dict[str, Any]:
         pass
     return {}
 
-# --------------------- Liquidità ---------------------
 def liquidity_analysis(ticker: str, quantity: float) -> Dict[str, Any]:
     df = get_technical_data(ticker)
     if df is None or df.empty:
@@ -2034,7 +2074,7 @@ def generate_pdf_report(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: D
         return f.read()
 
 # ==========================================================================
-# 7. UI: SIDEBAR (con menu a tendina, ticker vuoto, nessuna spiegazione lunga)
+# 7. UI: SIDEBAR (con menu a tendina, ticker vuoto, breve nota)
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("Download App Android (APK)", expanded=False):
@@ -2045,7 +2085,6 @@ def render_apk_download_box() -> None:
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
     
-    # Menu a tendina per la selezione della vista
     st.sidebar.header("📋 Seleziona vista")
     vista = st.sidebar.selectbox(
         "Strumento",
@@ -2063,7 +2102,6 @@ def setup_sidebar() -> Dict[str, Any]:
     if input_mode == "Batch CSV":
         file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
     else:
-        # Ticker vuoto di default
         manual = st.sidebar.text_input("Ticker", value="", placeholder="Es. AAPL, ENI, NVDA").upper().strip()
     
     st.sidebar.header("2. Mercato")
@@ -2074,7 +2112,6 @@ def setup_sidebar() -> Dict[str, Any]:
         if k in market: suffix = s; break
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
     
-    # Breve nota sul ticker (non più la lunga spiegazione)
     st.sidebar.caption("💡 Inserisci il simbolo dell'azienda (es. AAPL, ENI, NVDA). Il programma aggiunge automaticamente il suffisso corretto (es. .MI per l'Italia).")
     
     render_apk_download_box()
@@ -2152,7 +2189,6 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
 # ==========================================================================
 
 def show_ai_button(context: str, custom_prompt: str = None, key_suffix: str = ""):
-    """Mostra un pulsante che attiva l'AI con il contesto dato"""
     if st.button(f"🧠 Spiega con VqAi", key=f"ai_btn_{key_suffix}"):
         with st.spinner("VqAi sta analizzando..."):
             if custom_prompt:
@@ -2172,7 +2208,6 @@ def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
             st.dataframe(batch_results.drop(columns=['_raw_data'], errors='ignore'))
         elif row is not None:
             st.success(f'Analisi standalone attiva su: {ticker}')
-            # Mostra la fonte dei dati
             _, source_fund = get_fundamental_data_cascade(ticker)
             st.caption(f"📡 Fonte dati fondamentali: {source_fund}")
             st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'))
@@ -2190,7 +2225,6 @@ def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
                 if 'sentiment' in sentiment:
                     st.metric("Sentiment Notizie", sentiment['sentiment'], delta=f"{sentiment['average_polarity']:.2f}")
             
-            # AI contestuale
             context = f"Analisi fondamentale di {ticker}:\n" + "\n".join([f"{k}: {v}" for k, v in row.items() if not pd.isna(v) and k not in ['_raw_data']])
             show_ai_button(context, key_suffix=f"fund_{ticker}")
     
@@ -2225,7 +2259,6 @@ def render_tecnico_tab(row, ticker):
         fig.update_layout(height=800, xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, width='stretch')
         
-        # AI contestuale tecnica
         tech_summary = f"Timing Score: {score}/100. Segnali: {', '.join(reasons)}. RSI: {df_calc['RSI'].iloc[-1]:.1f}, ADX: {df_calc['ADX'].iloc[-1]:.1f if 'ADX' in df_calc else 'N/A'}"
         show_ai_button(tech_summary, custom_prompt="Spiega l'andamento tecnico di questo titolo e i segnali principali.", key_suffix=f"tech_{ticker}")
     else:
@@ -2298,7 +2331,6 @@ def render_quant_tab(row, ticker, standalone_raw_data):
                 fig_mc.update_layout(template="plotly_dark", height=400, xaxis_title="Giorni", yaxis_title="Equity")
                 st.plotly_chart(fig_mc, width='stretch')
         
-        # AI contestuale quant
         quant_summary = f"Sharpe: {qm['Sharpe Ratio']:.2f}, Sortino: {risk['Sortino']:.2f}, Calmar: {risk['Calmar']:.2f}, MaxDD: {risk['Max Drawdown']*100:.1f}%, Altman Z: {z}"
         show_ai_button(quant_summary, custom_prompt="Spiega i rischi e i rendimenti attesi di questo titolo sulla base delle metriche quantitative fornite.", key_suffix=f"quant_{ticker}")
     st.markdown("---")
@@ -2374,7 +2406,6 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_portafoglio_tab(ui):
-    # Questo è il portafoglio originale completo
     st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita', PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze, concentrazione, ribilanciamento.")
     base_currency = "EUR"
     st.success(f"Valuta base portafoglio: **{base_currency}** | Conversione FX reale attiva.")
@@ -2579,15 +2610,15 @@ def render_portafoglio_tab(ui):
                     corr = df_rets.corr()
                     st.markdown("#### Correlazioni tra titoli in portafoglio")
                     st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+                    
+                    # AI contestuale (ora pm è definita)
+                    if st.session_state.portfolio_tickers:
+                        port_summary = f"Portafoglio contiene {len(st.session_state.portfolio_tickers)} titoli. " + \
+                                       f"Rendimento annuo atteso: {pm.get('AnnRet', 0)*100:.2f}%, " + \
+                                       f"Sharpe: {pm.get('Sharpe', 0):.2f}, Max Drawdown: {pm.get('MaxDD', 0)*100:.1f}%"
+                        show_ai_button(port_summary, custom_prompt="Analizza il profilo di rischio/rendimento del portafoglio e suggerisci eventuali miglioramenti.", key_suffix="portfolio")
     else:
         st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
-    
-    # AI contestuale per il portafoglio
-    if st.session_state.portfolio_tickers:
-        port_summary = f"Portafoglio contiene {len(st.session_state.portfolio_tickers)} titoli. " + \
-                       f"Rendimento annuo atteso: {pm.get('AnnRet', 0)*100:.2f}%, " + \
-                       f"Sharpe: {pm.get('Sharpe', 0):.2f}, Max Drawdown: {pm.get('MaxDD', 0)*100:.1f}%"
-        show_ai_button(port_summary, custom_prompt="Analizza il profilo di rischio/rendimento del portafoglio e suggerisci eventuali miglioramenti.", key_suffix="portfolio")
     
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
@@ -2651,7 +2682,7 @@ def render_backtest_tab():
 
 def render_macro_tab():
     st.header("Indicatori macroeconomici")
-    if MACRO_AVAILABLE:
+    if PDR_AVAILABLE:
         inflation = get_inflation_rate()
         st.metric("Inflazione (CPI US ultimo anno)", f"{inflation*100:.2f}%")
         risk_free = get_active_risk_free_rate()
@@ -2772,14 +2803,13 @@ def main():
     st.title("💲 V-Quant Pro")
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
-    ui = setup_sidebar()  # ora ui contiene anche la vista selezionata
+    ui = setup_sidebar()
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
         st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
     
-    # Gestione del bottone "Avvia Analisi"
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2814,7 +2844,6 @@ def main():
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
     
-    # AI sidebar (VqAi)
     with st.sidebar:
         st.markdown('---')
         with st.expander('🤖 VqAi', expanded=False):
@@ -2837,7 +2866,6 @@ def main():
                     st.markdown(reply)
                 st.session_state.vq_ai_history.append({'role': 'assistant', 'content': reply})
     
-    # Box di selezione rapida ticker
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
         batch_options: List[str] = []
@@ -2866,7 +2894,6 @@ def main():
     if not ticker:
         st.info('Puoi usare gli strumenti anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
     
-    # Mostra la vista selezionata
     vista = ui["vista"]
     if vista == "📊 FONDAMENTALI":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
