@@ -19,7 +19,6 @@ scipy
 statsmodels
 akshare
 openfigi
-investpy
 matplotlib
 google-generativeai
 ml4t-data
