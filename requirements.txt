@@ -18,7 +18,6 @@ scipy
 statsmodels
 akshare
 openfigi
-investpy
 investiny
 pyinvesting
 matplotlib
