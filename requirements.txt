@@ -10,3 +10,13 @@ scikit-learn
 supabase
 matplotlib
 google-genai
+pandas-datareader
+textblob
+nltk
+feedparser
+beautifulsoup4
+lxml
+fpdf
+reportlab
+arch
+scipy
