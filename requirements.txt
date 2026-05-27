@@ -20,3 +20,4 @@ statsmodels
 akshare
 openfigi
 investpy
+matplotlib
