@@ -19,5 +19,8 @@ scipy
 statsmodels
 akshare
 openfigi
-git+https://github.com/alvarobartt/investpy.git@master
+investpy
+investiny
+pyinvesting
 matplotlib
+git+https://github.com/alvarobartt/investpy.git@master
