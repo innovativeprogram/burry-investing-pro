@@ -4,7 +4,7 @@
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 #
-# V-Quant Pro - Versione Unificata
+# V-Quant Pro (ex BurryInvestingPro) - Versione Unificata
 # Include: menu laterale, grafici avanzati, metriche quantitative, ML, macro, ticker resolver, cascata dati
 """
 
@@ -72,8 +72,8 @@ try:
 except ImportError:
     DEFEATBETA_AVAILABLE = False
 
-# Import prompts AI (file separato)
-from vq_ai_prompts import (
+# Import prompts AI (file separato con nome originale)
+from burry_ai_prompts import (
     build_ai_context_for_ticker,
     ask_gemini_ticker_chat,
     build_burry_ai_context,
