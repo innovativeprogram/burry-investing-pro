@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import streamlit as st
 import pandas as pd
 
-logger = logging.getLogger("VqQuantPro")
+logger = logging.getLogger("BurryInvestingPro")
 
 SYSTEM_PROMPT = dedent("""
 Sei l'assistente AI interno di V-Quant Pro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
@@ -141,32 +141,37 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
         )
     try:
-        from google import genai
-        from google.genai.types import GenerateContentConfig
-        client = genai.Client(api_key=api_key)
+        # Import corretto per google-generativeai
+        import google.generativeai as genai
+        from google.generativeai.types import GenerateContentConfig
+        
+        genai.configure(api_key=api_key)
         system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-        candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
         last_error = None
         output_tokens = min(max_tokens, 8192) if max_tokens else 8192
+        
         for model_name in candidate_models:
             for attempt in range(4):
                 try:
-                    resp = client.models.generate_content(
-                        model=model_name,
-                        contents=[system_prompt, user_prompt],
-                        config=GenerateContentConfig(
+                    model = genai.GenerativeModel(model_name)
+                    # Unisco system prompt e user prompt in un unico messaggio (Gemini non ha system prompt separato nelle API semplici)
+                    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+                    response = model.generate_content(
+                        full_prompt,
+                        generation_config=GenerateContentConfig(
                             temperature=0.2,
                             max_output_tokens=output_tokens
-                        ),
+                        )
                     )
-                    answer = getattr(resp, "text", None)
+                    answer = response.text
                     if answer and answer.strip():
                         return answer.strip()
                     return "Il modello non ha restituito testo utile."
                 except Exception as e:
                     err = str(e)
                     last_error = err
-                    transient = any(x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"])
+                    transient = any(x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "RateLimitError"])
                     if transient and attempt < 3:
                         wait_s = (2 ** attempt) + random.uniform(0.3, 1.2)
                         time.sleep(wait_s)
@@ -186,7 +191,7 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
         "note": "Usa la logica del programma per rispondere su azioni o ETF; se i dati completi non sono disponibili, dichiaralo esplicitamente."
     }
     try:
-        live_map = st.session_state.get('vq_ai_live_context', {}) or {}
+        live_map = st.session_state.get('burry_ai_live_context', {}) or {}
         if symbol_clean and symbol_clean in live_map:
             context['live_program_analysis'] = live_map[symbol_clean]
     except Exception as e:
