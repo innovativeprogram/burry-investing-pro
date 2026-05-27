@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import streamlit as st
 import pandas as pd
 
-logger = logging.getLogger("VqQuantPro")  # aggiornato il nome
+logger = logging.getLogger("VqQuantPro")
 
 SYSTEM_PROMPT = dedent("""
 Sei l'assistente AI interno di V-Quant Pro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
@@ -41,7 +41,7 @@ Ogni conclusione deve derivare da evidenze numeriche. Per ogni giudizio:
 
 QUANDO ANALIZZI UN SINGOLO TITOLO (Valuta se disponibili):
 1) Qualità del business e fondamentali (ROIC, PEG, Debt/Equity, Revenue Growth, Net Margin, FCF Margin, Interest Coverage, Altman Z-Score).
-2) Profilo quantitativo e rischio-rendimento (Sharpe, Sortino, Calmar, CAGR, Max Drawdown, Volatilità, VaR/CVaR, Skew, Kurtosis, R-Squared).
+2) Profilo quantitativo e rischio-rendimento (Sharpe, Sortino, Calmar, CAGR, Max Drawdown, Volatilità, VaR/CVaR, Skew, Kurtosis, R-Squared, Omega Ratio, Ulcer Index).
 3) Timing e analisi tecnica (Timing Score, SMA50/200, RSI, MACD, Bollinger).
 4) Esito sintetico: integra fondamentali, timing e quant. Segnala i segnali contrastanti.
 5) Limiti dell'analisi: cosa suggeriscono i dati e cosa NON possono garantire.
@@ -87,7 +87,6 @@ CONTESTO APP:
 {json_context}
 """).strip()
 
-
 def safe_get_secret(key: str, default=None):
     env_val = os.getenv(key)
     if env_val:
@@ -99,7 +98,6 @@ def safe_get_secret(key: str, default=None):
     except Exception:
         pass
     return default
-
 
 def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> tuple[str, str]:
     json_context = json.dumps(context, ensure_ascii=False, default=str, indent=2)
@@ -114,7 +112,6 @@ def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "
 
 def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any],
                                 score: float, reasons: List[str], mode: str) -> Dict[str, Any]:
-    """Costruisce un contesto compatto per l'assistente AI sul ticker."""
     row_dict = row.to_dict() if row is not None and hasattr(row, 'to_dict') else dict(row or {})
     return {
         'ticker': ticker,
@@ -130,17 +127,12 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
             'fcf_margin': row_dict.get('FCF Margin'),
             'net_margin': row_dict.get('Net Margin'),
             'revenue_growth': row_dict.get('Revenue Growth'),
-            'eps_growth': row_dict.get('EPS Growth'),
         },
         'quant': qm or {},
         'risk': risk or {},
     }
 
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
-    """
-    Chiamata a Gemini con contesto e possibilità di impostare la lunghezza massima della risposta.
-    - max_tokens: token di output (max 8192 per Gemini 2.0 Flash, default 8192 per risposte lunghe)
-    """
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
     if not api_key:
         return (
@@ -148,21 +140,14 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             f"Domanda ricevuta: {user_question}\n"
             f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
         )
-
     try:
         from google import genai
         from google.genai.types import GenerateContentConfig
-
         client = genai.Client(api_key=api_key)
         system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-
-        # Modelli supportati
         candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
         last_error = None
-
-        # Assicura che max_tokens sia entro i limiti (Gemini Flash supporta fino a 8192)
         output_tokens = min(max_tokens, 8192) if max_tokens else 8192
-
         for model_name in candidate_models:
             for attempt in range(4):
                 try:
@@ -171,7 +156,7 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                         contents=[system_prompt, user_prompt],
                         config=GenerateContentConfig(
                             temperature=0.2,
-                            max_output_tokens=output_tokens  # <-- ora dinamico
+                            max_output_tokens=output_tokens
                         ),
                     )
                     answer = getattr(resp, "text", None)
@@ -187,32 +172,25 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                         time.sleep(wait_s)
                         continue
                     break
-
         return "Servizio AI temporaneamente occupato. Riprova tra poco. Ultimo dettaglio tecnico: " + str(last_error)
     except Exception as e:
         logger.warning(f"Errore AI Gemini: {e}")
         return f"Errore AI: {e}"
 
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
-    """Contesto per VqAi (ex BurryAi) arricchito con risultati correnti e contesto live del verdetto."""
     symbol_clean = (symbol or "").upper().strip()
     context = {
         "ticker": symbol_clean,
         "asset_type": asset_type,
         "mode": mode,
-        "note": (
-            "Usa la logica del programma per rispondere su azioni o ETF; "
-            "se i dati completi non sono disponibili, dichiaralo esplicitamente."
-        ),
+        "note": "Usa la logica del programma per rispondere su azioni o ETF; se i dati completi non sono disponibili, dichiaralo esplicitamente."
     }
-
     try:
-        live_map = st.session_state.get('vq_ai_live_context', {}) or {}  # aggiornato nome
+        live_map = st.session_state.get('vq_ai_live_context', {}) or {}
         if symbol_clean and symbol_clean in live_map:
             context['live_program_analysis'] = live_map[symbol_clean]
     except Exception as e:
         logger.debug(f'VqAi live context fallback: {e}')
-
     try:
         df = st.session_state.get('batch_results')
         if df is not None and not df.empty and 'Ticker' in df.columns and symbol_clean:
@@ -223,35 +201,21 @@ def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi")
                 context['program_data'] = {
                     'company_name': row_dict.get('Company Name'),
                     'price': row_dict.get('Price'),
-                    'sector': row_dict.get('Sector'),
-                    'industry': row_dict.get('Industry'),
-                    'market_cap': row_dict.get('Market Cap'),
-                    'pe_ratio': row_dict.get('P/E'),
-                    'forward_pe': row_dict.get('Forward P/E'),
+                    'pe_ratio': row_dict.get('P/E Ratio'),
                     'peg_ratio': row_dict.get('PEG Ratio'),
                     'roic': row_dict.get('ROIC'),
-                    'roe': row_dict.get('ROE'),
-                    'gross_margin': row_dict.get('Gross Margin'),
-                    'operating_margin': row_dict.get('Operating Margin'),
-                    'net_margin': row_dict.get('Net Margin'),
-                    'fcf_margin': row_dict.get('FCF Margin'),
-                    'revenue_growth': row_dict.get('Revenue Growth'),
-                    'eps_growth': row_dict.get('EPS Growth'),
                     'debt_to_equity': row_dict.get('Debt/Equity'),
-                    'current_ratio': row_dict.get('Current Ratio'),
-                    'quick_ratio': row_dict.get('Quick Ratio'),
+                    'fcf_margin': row_dict.get('FCF Margin'),
+                    'net_margin': row_dict.get('Net Margin'),
+                    'revenue_growth': row_dict.get('Revenue Growth'),
                     'altman_zscore': row_dict.get('Altman Z-Score'),
-                    'piotroski_fscore': row_dict.get('Piotroski F-Score'),
-                    'verdict': row_dict.get('Verdetto') or row_dict.get('Verdict'),
-                    'signal': row_dict.get('Signal'),
+                    'piotroski_fscore': row_dict.get('F-Score'),
                 }
     except Exception as e:
         logger.debug(f'VqAi context fallback su batch_results: {e}')
-
     try:
         selected = (st.session_state.get('selected_ticker') or '').upper().strip()
         context['selected_ticker_match'] = bool(selected and selected == symbol_clean)
     except Exception:
         context['selected_ticker_match'] = False
-
     return context
