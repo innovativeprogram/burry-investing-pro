@@ -1849,10 +1849,18 @@ except ImportError:
     SENTIMENT_AVAILABLE = False
     logger.warning("TextBlob o feedparser non disponibili. Sentiment disabilitato.")
 
-import nltk; nltk.download('punkt', quiet=True)
+# Prova a importare nltk e scarica punkt solo se disponibile
+try:
+    import nltk
+    nltk.download('punkt', quiet=True)
+except ImportError:
+    SENTIMENT_AVAILABLE = False
+    logger.warning("NLTK non installato. Sentiment disabilitato.")
+
 def get_news_sentiment(ticker: str) -> Dict[str, Any]:
     if not SENTIMENT_AVAILABLE:
         return {"error": "Librerie sentiment non installate"}
+    # ... resto della funzione invariato
     try:
         # Yahoo Finance RSS (senza API key)
         url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
