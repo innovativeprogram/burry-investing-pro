@@ -16,10 +16,7 @@ fpdf
 reportlab
 arch
 scipy
-statsmodels
-openfigi
+statsmodels==0.14.0
 matplotlib
 google-generativeai
-ml4t-data
-finagg
-pywencai
+websockets==12.0
