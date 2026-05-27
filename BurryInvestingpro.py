@@ -1849,6 +1849,7 @@ except ImportError:
     SENTIMENT_AVAILABLE = False
     logger.warning("TextBlob o feedparser non disponibili. Sentiment disabilitato.")
 
+import nltk; nltk.download('punkt', quiet=True)
 def get_news_sentiment(ticker: str) -> Dict[str, Any]:
     if not SENTIMENT_AVAILABLE:
         return {"error": "Librerie sentiment non installate"}
