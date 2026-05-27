@@ -1,15 +1,12 @@
 streamlit
 yfinance
 yahooquery
-requests
 pandas
 numpy
-pandas-ta
 plotly
 scikit-learn
+pandas-ta
 supabase
-matplotlib
-google-genai
 pandas-datareader
 textblob
 nltk
@@ -20,3 +17,6 @@ fpdf
 reportlab
 arch
 scipy
+statsmodels
+akshare
+openfigi
