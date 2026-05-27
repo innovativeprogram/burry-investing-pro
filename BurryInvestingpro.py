@@ -5,6 +5,7 @@
 # La copia o distribuzione non autorizzata è severamente vietata.
 # 
 # V-Quant Pro - Versione con nuove fonti dati gratuite e AI integrata in tutti i tab
+# (senza tcs-macro-pulse, usa finagg e yfinance per macro)
 """
 
 import streamlit as st
@@ -74,13 +75,6 @@ except ImportError:
     logging.warning("ml4t-data non installato. Installare: pip install ml4t-data")
 
 try:
-    import tcs_macro_pulse as macro
-    TCS_MACRO_AVAILABLE = True
-except ImportError:
-    TCS_MACRO_AVAILABLE = False
-    logging.warning("tcs-macro-pulse non installato. Installare: pip install tcs-macro-pulse")
-
-try:
     from finagg import fred, sec
     FINAGG_AVAILABLE = True
 except ImportError:
@@ -93,6 +87,8 @@ try:
 except ImportError:
     PYWENCAI_AVAILABLE = False
     logging.warning("pywencai non installato. Installare: pip install pywencai")
+
+# tcs-macro-pulse rimosso perché non esiste su PyPI
 
 # Flag per scipy (ottimizzazione portafoglio)
 try:
@@ -179,7 +175,7 @@ POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 POLYGON_BASE_URL = "https://api.polygon.io"
 
 # ==========================================================================
-# 0.B TICKER RESOLVER INTELLIGENTE (potenziato per ml4t, pywencai, tcs-macro)
+# 0.B TICKER RESOLVER INTELLIGENTE (potenziato per ml4t, pywencai)
 # ==========================================================================
 @st.cache_data(ttl=86400)
 def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
@@ -676,19 +672,6 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 # CONFIGURAZIONE PAGINA UI
 # ==========================================================================
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide", initial_sidebar_state="expanded")
-
-# (Sfondo commentato – decommentare e mettere URL o base64 se si vuole)
-# page_bg_img = """
-# <style>
-# .stApp {
-#     background-image: url("https://tuo-dominio/sfondo.jpg");
-#     background-size: cover;
-#     background-position: center;
-#     background-repeat: no-repeat;
-# }
-# </style>
-# """
-# st.markdown(page_bg_img, unsafe_allow_html=True)
 
 # ==========================================================================
 # 0.H AUTH SUPABASE
@@ -1831,7 +1814,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1932,7 +1915,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. NUOVE FUNZIONI (AI contestuale, alert, sentiment, macro)
+# 6. NUOVE FUNZIONI (AI contestuale, alert, sentiment, macro senza tcs-macro-pulse)
 # ==========================================================================
 
 def get_ai_explanation(context: str, prompt: str) -> str:
@@ -2030,43 +2013,25 @@ def compare_tickers_radar(tickers_metrics: List[Dict[str, Any]], metrics_to_comp
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, title="Confronto titoli")
     return fig
 
-# --------------------- Dati macro alternativi (senza pandas_datareader) ---------------------
-def get_inflation_rate() -> float:
-    """Stima inflazione usando TLT (iShares 20+ Year Treasury Bond ETF) come proxy"""
-    # Se tcs-macro-pulse o finagg disponibili, prova a ottenere dati reali
-    if TCS_MACRO_AVAILABLE:
-        try:
-            # Esempio: macro.get_inflation('US') - dipende dall'implementazione
-            return 0.025
-        except:
-            pass
+# --------------------- Dati macro (senza tcs-macro-pulse) ---------------------
+def get_macro_indicators() -> Dict[str, float]:
+    indicators = {}
     if FINAGG_AVAILABLE:
         try:
-            # finagg.fred.get_series('CPIAUCSL') - indice prezzi al consumo
-            return 0.025
+            # Esempio: tasso di disoccupazione
+            # from finagg import fred
+            # data = fred.get_series('UNRATE')
+            # indicators['unemployment'] = data.iloc[-1] / 100.0
+            pass
         except:
             pass
     try:
-        tlt = yf.Ticker("TLT")
-        hist = tlt.history(period="1y")
-        if not hist.empty:
-            return 0.025
-    except:
-        pass
-    return 0.02
-
-def get_macro_indicators() -> Dict[str, float]:
-    """Restituisce un dizionario con indicatori macro (inflazione, PIL, disoccupazione)"""
-    indicators = {}
-    try:
-        # TLT come proxy inflazione
         tlt = yf.Ticker("TLT")
         hist = tlt.history(period="1y")
         if not hist.empty:
             indicators['inflation_proxy'] = 0.025
     except:
         indicators['inflation_proxy'] = 0.025
-    # Tasso di interesse a 10 anni (^TNX)
     try:
         tnx = yf.Ticker("^TNX")
         hist = tnx.history(period="1d")
@@ -2075,6 +2040,10 @@ def get_macro_indicators() -> Dict[str, float]:
     except:
         pass
     return indicators
+
+def get_inflation_rate() -> float:
+    macro = get_macro_indicators()
+    return macro.get('inflation_proxy', 0.025)
 
 # --------------------- Ottimizzazione portafoglio ---------------------
 def optimize_portfolio(returns_df: pd.DataFrame, method: str = 'max_sharpe', constraints: Optional[Dict] = None) -> Optional[np.ndarray]:
@@ -2226,8 +2195,8 @@ Sviluppato con passione da Innovative Program.
         """)
     with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
         st.markdown("""
-### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
-I dati sensibili sono detenuti in modo sicuro da Supabase. Utilizziamo cookie tecnici per il corretto funzionamento.
+### Informativa GDPR
+I dati sensibili sono detenuti in modo sicuro da Supabase.
         """)
     with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
         st.markdown("""
