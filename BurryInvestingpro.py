@@ -4,7 +4,7 @@
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 # 
-# V-Quant Pro - Versione definitiva senza pandas_datareader (compatibile Python 3.12)
+# V-Quant Pro - Versione con integrazione investiny e pyinvesting
 """
 
 import streamlit as st
@@ -62,6 +62,21 @@ try:
 except ImportError:
     INVESTPY_AVAILABLE = False
     logging.warning("investpy non installato. Installare: pip install investpy")
+
+# Nuove librerie aggiunte
+try:
+    import investiny
+    INVESTINY_AVAILABLE = True
+except ImportError:
+    INVESTINY_AVAILABLE = False
+    logging.warning("investiny non installato. Installare: pip install investiny")
+
+try:
+    import pyinvesting
+    PYINVESTING_AVAILABLE = True
+except ImportError:
+    PYINVESTING_AVAILABLE = False
+    logging.warning("pyinvesting non installato. Installare: pip install pyinvesting")
 
 # pandas_datareader rimosso (incompatibile con Python 3.12)
 # Usiamo yfinance per i dati macro alternativi
@@ -151,7 +166,7 @@ POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 POLYGON_BASE_URL = "https://api.polygon.io"
 
 # ==========================================================================
-# 0.B TICKER RESOLVER INTELLIGENTE
+# 0.B TICKER RESOLVER INTELLIGENTE (con supporto investiny e pyinvesting)
 # ==========================================================================
 @st.cache_data(ttl=86400)
 def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
@@ -177,21 +192,26 @@ def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
     poly_sym = yf_sym.split('.')[0]
     akshare_sym = raw
     investpy_sym = raw
+    # Per investiny e pyinvesting, usiamo il simbolo base (senza suffisso)
+    investiny_sym = raw
+    pyinvesting_sym = raw
     return {
         "yfinance": yf_sym,
         "yahooquery": yf_sym,
         "polygon": poly_sym,
         "akshare": akshare_sym,
         "investpy": investpy_sym,
+        "investiny": investiny_sym,
+        "pyinvesting": pyinvesting_sym,
     }
 
 # ==========================================================================
-# 0.C AGGREGATORE DATI A CASCATA PER FONDAMENTALI
+# 0.C AGGREGATORE DATI A CASCATA PER FONDAMENTALI (nuovo ordine)
 # ==========================================================================
 def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]], str]:
     resolved = smart_ticker_resolver(symbol)
     
-    # 1. yfinance (primario)
+    # 1. yfinance (primario, veloce)
     yf_symbol = resolved["yfinance"]
     try:
         stock = yf.Ticker(yf_symbol)
@@ -210,14 +230,70 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
     except Exception as e:
         logger.debug(f"yfinance fallito per {yf_symbol}: {e}")
     
-    # 2. Polygon
+    # 2. investiny (nuovo)
+    if INVESTINY_AVAILABLE:
+        inv_symbol = resolved["investiny"]
+        try:
+            # investiny.get_stock_data richiede paese (es. 'italy')
+            # Proviamo con un paese di default (italy) o lo ricaviamo dal ticker?
+            # Per semplicità assumiamo 'italy' se il simbolo contiene .MI altrimenti 'united states'
+            country = 'italy' if '.MI' in yf_symbol else 'united states'
+            data = investiny.get_stock_data(inv_symbol, country=country)
+            if data and isinstance(data, dict):
+                # investiny restituisce un dizionario con prezzi e info di base
+                info = {
+                    "symbol": inv_symbol,
+                    "longName": data.get('name', inv_symbol),
+                    "shortName": data.get('name', inv_symbol),
+                    "currency": data.get('currency', 'EUR'),
+                    "currentPrice": data.get('last_price'),
+                    "marketCap": data.get('market_cap'),
+                    "totalRevenue": data.get('revenue'),
+                }
+                # Crea dataframe vuoti per compatibilità (investiny non dà bilanci strutturati)
+                return {
+                    "info": info,
+                    "financials": pd.DataFrame(),
+                    "balance_sheet": pd.DataFrame(),
+                    "cashflow": pd.DataFrame(),
+                    "symbol": inv_symbol
+                }, "investiny"
+        except Exception as e:
+            logger.debug(f"investiny fallito per {inv_symbol}: {e}")
+    
+    # 3. pyinvesting
+    if PYINVESTING_AVAILABLE:
+        pyinv_symbol = resolved["pyinvesting"]
+        try:
+            # pyinvesting.get_stock_data
+            data = pyinvesting.get_stock_data(pyinv_symbol)
+            if data and isinstance(data, dict):
+                info = {
+                    "symbol": pyinv_symbol,
+                    "longName": data.get('name', pyinv_symbol),
+                    "shortName": data.get('name', pyinv_symbol),
+                    "currency": data.get('currency', 'EUR'),
+                    "currentPrice": data.get('last_price'),
+                    "marketCap": data.get('market_cap'),
+                }
+                return {
+                    "info": info,
+                    "financials": pd.DataFrame(),
+                    "balance_sheet": pd.DataFrame(),
+                    "cashflow": pd.DataFrame(),
+                    "symbol": pyinv_symbol
+                }, "pyinvesting"
+        except Exception as e:
+            logger.debug(f"pyinvesting fallito per {pyinv_symbol}: {e}")
+    
+    # 4. Polygon (se API key presente)
     if POLYGON_API_KEY:
         poly_symbol = resolved["polygon"]
         poly_data = get_polygon_fundamentals(poly_symbol)
         if poly_data and (not poly_data["financials"].empty or not poly_data["balance_sheet"].empty):
             return poly_data, "Polygon.io"
     
-    # 3. yahooquery
+    # 5. yahooquery
     try:
         yq = YQ_Ticker(yf_symbol)
         summary = yq.summary_detail.get(yf_symbol, {}) if isinstance(yq.summary_detail, dict) else {}
@@ -258,7 +334,7 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
     except Exception as e:
         logger.debug(f"yahooquery fallito per {yf_symbol}: {e}")
     
-    # 4. AKShare
+    # 6. AKShare (solo mercati cinesi)
     if AKSHARE_AVAILABLE:
         aksymbol = resolved["akshare"]
         try:
@@ -269,11 +345,11 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
         except Exception as e:
             logger.debug(f"AKShare fallito per {aksymbol}: {e}")
     
-    # 5. investpy
+    # 7. investpy (ultimo, meno affidabile)
     if INVESTPY_AVAILABLE:
         inv_symbol = resolved["investpy"]
         try:
-            df = investpy.get_stock_historical_data(stock=inv_symbol, country='italy', from_date='01/01/2020', to_date=pd.Timestamp.now().strftime('%d/%m/%Y'))
+            df = investpy.get_stock_historical_data(stock=inv_symbol, country='italy', from_date='01/01/2022', to_date=pd.Timestamp.now().strftime('%d/%m/%Y'))
             if df is not None and not df.empty:
                 info = {"symbol": inv_symbol, "longName": inv_symbol, "currency": "EUR"}
                 return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": inv_symbol}, "investpy (Europe)"
@@ -283,7 +359,7 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
     return None, "Nessuna fonte"
 
 # ==========================================================================
-# 0.D AGGREGATORE DATI TECNICI A CASCATA (prezzi storici)
+# 0.D AGGREGATORE DATI TECNICI A CASCATA (prezzi storici) - stesso ordine
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str]:
@@ -302,7 +378,40 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
     except Exception as e:
         logger.debug(f"yfinance tecnico fallito per {yf_symbol}: {e}")
     
-    # 2. Polygon
+    # 2. investiny
+    if INVESTINY_AVAILABLE:
+        inv_symbol = resolved["investiny"]
+        try:
+            country = 'italy' if '.MI' in yf_symbol else 'united states'
+            data = investiny.get_stock_data(inv_symbol, country=country)
+            if data and isinstance(data, dict) and 'historical' in data:
+                hist = data['historical']
+                df = pd.DataFrame(hist)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+                if len(df) >= 60:
+                    return df[['Open', 'High', 'Low', 'Close', 'Volume']], "investiny"
+        except Exception as e:
+            logger.debug(f"investiny tecnico fallito per {inv_symbol}: {e}")
+    
+    # 3. pyinvesting
+    if PYINVESTING_AVAILABLE:
+        pyinv_symbol = resolved["pyinvesting"]
+        try:
+            data = pyinvesting.get_stock_data(pyinv_symbol)
+            if data and isinstance(data, dict) and 'historical' in data:
+                hist = data['historical']
+                df = pd.DataFrame(hist)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+                if len(df) >= 60:
+                    return df[['Open', 'High', 'Low', 'Close', 'Volume']], "pyinvesting"
+        except Exception as e:
+            logger.debug(f"pyinvesting tecnico fallito per {pyinv_symbol}: {e}")
+    
+    # 4. Polygon
     if POLYGON_API_KEY:
         poly_symbol = resolved["polygon"]
         try:
@@ -324,7 +433,7 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
         except Exception as e:
             logger.debug(f"Polygon tecnico fallito per {poly_symbol}: {e}")
     
-    # 3. yahooquery
+    # 5. yahooquery
     try:
         t = YQ_Ticker(yf_symbol)
         df_yq = t.history(period="1y", interval="1d")
@@ -341,7 +450,7 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
     except Exception as e:
         logger.debug(f"yahooquery tecnico fallito per {yf_symbol}: {e}")
     
-    # 4. AKShare
+    # 6. AKShare
     if AKSHARE_AVAILABLE:
         aksymbol = resolved["akshare"]
         try:
@@ -355,7 +464,7 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
         except Exception as e:
             logger.debug(f"AKShare tecnico fallito per {aksymbol}: {e}")
     
-    # 5. investpy
+    # 7. investpy
     if INVESTPY_AVAILABLE:
         inv_symbol = resolved["investpy"]
         try:
@@ -370,7 +479,7 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
     return None, "Nessuna fonte"
 
 # ==========================================================================
-# 0.E PRICE / FX / RISK-FREE PROVIDERS
+# 0.E PRICE / FX / RISK-FREE PROVIDERS (invariati)
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=False)
 def get_current_price_safe(ticker_symbol: str) -> float:
@@ -423,7 +532,7 @@ def get_active_risk_free_rate() -> float:
     return get_dynamic_risk_free_rate()
 
 # ==========================================================================
-# 0.F POLYGON FUNDAMENTAL DATA PROVIDER
+# 0.F POLYGON FUNDAMENTAL DATA PROVIDER (invariato)
 # ==========================================================================
 def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     if not POLYGON_API_KEY:
@@ -589,21 +698,8 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 # ==========================================================================
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide", initial_sidebar_state="expanded")
 
-# (Sfondo commentato – decommentare e mettere URL o base64 se si vuole)
-# page_bg_img = """
-# <style>
-# .stApp {
-#     background-image: url("https://tuo-dominio/sfondo.jpg");
-#     background-size: cover;
-#     background-position: center;
-#     background-repeat: no-repeat;
-# }
-# </style>
-# """
-# st.markdown(page_bg_img, unsafe_allow_html=True)
-
 # ==========================================================================
-# 0.H AUTH SUPABASE
+# 0.H AUTH SUPABASE (invariato)
 # ==========================================================================
 def get_app_base_url() -> str:
     candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
@@ -834,7 +930,7 @@ def render_auth_sidebar() -> None:
     st.sidebar.markdown('---')
 
 # ==========================================================================
-# 1. MODELLI DATI
+# 1. MODELLI DATI (invariato)
 # ==========================================================================
 @dataclass
 class FundamentalMetrics:
@@ -891,7 +987,7 @@ class FundamentalMetrics:
         }
 
 # ==========================================================================
-# 2. HELPER & VALIDAZIONE
+# 2. HELPER & VALIDAZIONE (invariato)
 # ==========================================================================
 def sanitize_ticker(ticker: str) -> str:
     clean = str(ticker or '').strip().upper()
@@ -919,7 +1015,7 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE
+# 3. DATA ENGINE: ANALISI FONDAMENTALE (rimangono uguali, usano la cascata)
 # ==========================================================================
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     data, _ = get_fundamental_data_cascade(symbol)
@@ -1222,7 +1318,7 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA
+# 4. DATA ENGINE: ANALISI TECNICA (invariata, usa get_technical_data)
 # ==========================================================================
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     df, _ = get_technical_data_cascade(symbol)
@@ -1348,7 +1444,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. MOTORE QUANTISTICO
+# 5. MOTORE QUANTISTICO (invariato)
 # ==========================================================================
 def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]], risk_free: Optional[float] = None) -> Dict[str, Any]:
     rf = risk_free if risk_free is not None else get_active_risk_free_rate()
@@ -2588,8 +2684,11 @@ def render_portafoglio_tab(ui):
                     fig_p.update_layout(template="plotly_dark", height=400, xaxis_title="Data", yaxis_title="Equity normalizzata")
                     st.plotly_chart(fig_p, width='stretch')
                     corr = df_rets.corr()
-                    st.markdown("#### Correlazioni tra titoli in portafoglio")
-                    st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+                    # Gestione matplotlib optional
+                    try:
+                        st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+                    except ImportError:
+                        st.dataframe(corr)
                     
                     # AI contestuale
                     if st.session_state.portfolio_tickers:
