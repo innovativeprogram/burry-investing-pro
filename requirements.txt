@@ -24,3 +24,5 @@ investiny
 pyinvesting
 matplotlib
 git+https://github.com/alvarobartt/investpy.git@master
+websockets>=10.0,<13.0
+yfinance>=0.2.40
