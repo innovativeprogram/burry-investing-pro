@@ -23,6 +23,5 @@ investpy
 matplotlib
 google-generativeai
 ml4t-data
-tcs-macro-pulse
 finagg
 pywencai
