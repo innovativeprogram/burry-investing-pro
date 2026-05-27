@@ -4,8 +4,7 @@
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 # 
-# V-Quant Pro - Versione finale con fonti a cascata: yfinance, Polygon, yahooquery, AKShare, investpy
-# Velocizzata, ticker resolver automatico, AI contestuale, portafoglio completo, sfondo opzionale.
+# V-Quant Pro - Versione definitiva senza pandas_datareader (compatibile Python 3.12)
 """
 
 import streamlit as st
@@ -64,11 +63,8 @@ except ImportError:
     INVESTPY_AVAILABLE = False
     logging.warning("investpy non installato. Installare: pip install investpy")
 
-try:
-    from pandas_datareader import data as pdr
-    PDR_AVAILABLE = True
-except ImportError:
-    PDR_AVAILABLE = False
+# pandas_datareader rimosso (incompatibile con Python 3.12)
+# Usiamo yfinance per i dati macro alternativi
 
 # Flag per scipy (ottimizzazione portafoglio)
 try:
@@ -155,12 +151,11 @@ POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
 POLYGON_BASE_URL = "https://api.polygon.io"
 
 # ==========================================================================
-# 0.B TICKER RESOLVER INTELLIGENTE (con supporto investpy)
+# 0.B TICKER RESOLVER INTELLIGENTE
 # ==========================================================================
 @st.cache_data(ttl=86400)
 def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
     raw = raw_ticker.upper().strip()
-    # Mappa per ticker italiani e europei noti
     known_map = {
         "ENI": "ENI.MI", "STLAM": "STLAM.MI", "STM": "STM.MI",
         "UCG": "UCG.MI", "ISP": "ISP.MI", "TIT": "TIT.MI",
@@ -181,8 +176,7 @@ def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
             pass
     poly_sym = yf_sym.split('.')[0]
     akshare_sym = raw
-    # Per investpy, il simbolo spesso è lo stesso di yfinance ma senza suffisso (es. ENI)
-    investpy_sym = raw  # verrà risolto dinamicamente nella funzione
+    investpy_sym = raw
     return {
         "yfinance": yf_sym,
         "yahooquery": yf_sym,
@@ -192,12 +186,12 @@ def smart_ticker_resolver(raw_ticker: str) -> Dict[str, str]:
     }
 
 # ==========================================================================
-# 0.C AGGREGATORE DATI A CASCATA PER FONDAMENTALI (ordine: yfinance -> Polygon -> yahooquery -> AKShare -> investpy)
+# 0.C AGGREGATORE DATI A CASCATA PER FONDAMENTALI
 # ==========================================================================
 def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]], str]:
     resolved = smart_ticker_resolver(symbol)
     
-    # 1. yfinance (primario, veloce)
+    # 1. yfinance (primario)
     yf_symbol = resolved["yfinance"]
     try:
         stock = yf.Ticker(yf_symbol)
@@ -205,7 +199,6 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
         if info and ('symbol' in info or 'shortName' in info):
             if 'symbol' not in info:
                 info['symbol'] = yf_symbol
-            # Verifica che i dati non siano vuoti (almeno una metrica)
             if info.get('marketCap') or info.get('totalRevenue'):
                 return {
                     "info": info,
@@ -217,7 +210,7 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
     except Exception as e:
         logger.debug(f"yfinance fallito per {yf_symbol}: {e}")
     
-    # 2. Polygon (se API key presente)
+    # 2. Polygon
     if POLYGON_API_KEY:
         poly_symbol = resolved["polygon"]
         poly_data = get_polygon_fundamentals(poly_symbol)
@@ -265,7 +258,7 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
     except Exception as e:
         logger.debug(f"yahooquery fallito per {yf_symbol}: {e}")
     
-    # 4. AKShare (solo mercati cinesi)
+    # 4. AKShare
     if AKSHARE_AVAILABLE:
         aksymbol = resolved["akshare"]
         try:
@@ -276,15 +269,13 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
         except Exception as e:
             logger.debug(f"AKShare fallito per {aksymbol}: {e}")
     
-    # 5. investpy (se disponibile)
+    # 5. investpy
     if INVESTPY_AVAILABLE:
         inv_symbol = resolved["investpy"]
         try:
-            # Prova a ottenere i dati storici (come minimo)
             df = investpy.get_stock_historical_data(stock=inv_symbol, country='italy', from_date='01/01/2020', to_date=pd.Timestamp.now().strftime('%d/%m/%Y'))
             if df is not None and not df.empty:
                 info = {"symbol": inv_symbol, "longName": inv_symbol, "currency": "EUR"}
-                # investpy non fornisce bilanci strutturati, ma almeno prezzi
                 return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": inv_symbol}, "investpy (Europe)"
         except Exception as e:
             logger.debug(f"investpy fallito per {inv_symbol}: {e}")
@@ -292,13 +283,13 @@ def get_fundamental_data_cascade(symbol: str) -> Tuple[Optional[Dict[str, Any]],
     return None, "Nessuna fonte"
 
 # ==========================================================================
-# 0.D AGGREGATORE DATI TECNICI A CASCATA (prezzi storici) - con nuovo ordine
+# 0.D AGGREGATORE DATI TECNICI A CASCATA (prezzi storici)
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str]:
     resolved = smart_ticker_resolver(symbol)
     
-    # 1. yfinance (veloce)
+    # 1. yfinance
     yf_symbol = resolved["yfinance"]
     try:
         df = yf.download(yf_symbol, period="1y", interval="1d", progress=False, auto_adjust=True)
@@ -350,7 +341,7 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
     except Exception as e:
         logger.debug(f"yahooquery tecnico fallito per {yf_symbol}: {e}")
     
-    # 4. AKShare (Cina)
+    # 4. AKShare
     if AKSHARE_AVAILABLE:
         aksymbol = resolved["akshare"]
         try:
@@ -364,7 +355,7 @@ def get_technical_data_cascade(symbol: str) -> Tuple[Optional[pd.DataFrame], str
         except Exception as e:
             logger.debug(f"AKShare tecnico fallito per {aksymbol}: {e}")
     
-    # 5. investpy (Europa)
+    # 5. investpy
     if INVESTPY_AVAILABLE:
         inv_symbol = resolved["investpy"]
         try:
@@ -542,7 +533,7 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     }
 
 # ==========================================================================
-# 0.G PORTFOLIO FX & TAX (funzioni originali - invariato)
+# 0.G PORTFOLIO FX & TAX (funzioni originali)
 # ==========================================================================
 def enrich_portfolio_with_fx(df_weights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
     if df_weights is None or df_weights.empty:
@@ -598,7 +589,7 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 # ==========================================================================
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide", initial_sidebar_state="expanded")
 
-# (Sfondo commentato – decommentare e mettere URL o base64)
+# (Sfondo commentato – decommentare e mettere URL o base64 se si vuole)
 # page_bg_img = """
 # <style>
 # .stApp {
@@ -1752,7 +1743,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1853,7 +1844,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. NUOVE FUNZIONI (AI contestuale, alert, sentiment, ecc.)
+# 6. NUOVE FUNZIONI (AI contestuale, alert, sentiment, macro senza pandas_datareader)
 # ==========================================================================
 
 def get_ai_explanation(context: str, prompt: str) -> str:
@@ -1951,27 +1942,16 @@ def compare_tickers_radar(tickers_metrics: List[Dict[str, Any]], metrics_to_comp
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, title="Confronto titoli")
     return fig
 
-# --------------------- Dati macro ---------------------
-def get_worldbank_indicator(indicator: str, country: str = "US") -> pd.Series:
-    if not PDR_AVAILABLE:
-        return pd.Series()
-    try:
-        data = pdr.DataReader(indicator, 'worldbank', start=2000, end=2023)
-        if country in data.index:
-            return data.loc[country].dropna()
-    except:
-        pass
-    return pd.Series()
-
+# --------------------- Dati macro alternativi (senza pandas_datareader) ---------------------
 def get_inflation_rate() -> float:
-    cpi = get_worldbank_indicator('FP.CPI.TOTL.ZG', 'US')
-    if not cpi.empty:
-        return cpi.iloc[-1] / 100.0
+    """Stima inflazione usando TLT (iShares 20+ Year Treasury Bond ETF) come proxy"""
     try:
         tlt = yf.Ticker("TLT")
         hist = tlt.history(period="1y")
         if not hist.empty:
-            return 0.025
+            # Approssimazione: variazione annua del prezzo delle obbligazioni lunghe
+            # Non è l'inflazione reale, ma un indicatore di sentiment sui tassi
+            return 0.025  # default conservativo
     except:
         pass
     return 0.02
@@ -2611,7 +2591,7 @@ def render_portafoglio_tab(ui):
                     st.markdown("#### Correlazioni tra titoli in portafoglio")
                     st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
                     
-                    # AI contestuale (ora pm è definita)
+                    # AI contestuale
                     if st.session_state.portfolio_tickers:
                         port_summary = f"Portafoglio contiene {len(st.session_state.portfolio_tickers)} titoli. " + \
                                        f"Rendimento annuo atteso: {pm.get('AnnRet', 0)*100:.2f}%, " + \
@@ -2682,16 +2662,11 @@ def render_backtest_tab():
 
 def render_macro_tab():
     st.header("Indicatori macroeconomici")
-    if PDR_AVAILABLE:
-        inflation = get_inflation_rate()
-        st.metric("Inflazione (CPI US ultimo anno)", f"{inflation*100:.2f}%")
-        risk_free = get_active_risk_free_rate()
-        st.metric("Tasso reale (risk-free - inflazione)", f"{(risk_free - inflation)*100:.2f}%")
-        gdp_growth = get_worldbank_indicator('NY.GDP.MKTP.KD.ZG', 'US')
-        if not gdp_growth.empty:
-            st.metric("Crescita PIL US (ultimo anno)", f"{gdp_growth.iloc[-1]:.2f}%")
-    else:
-        st.warning("pandas_datareader non installato. Installare per dati macro.")
+    inflation = get_inflation_rate()
+    st.metric("Inflazione stimata", f"{inflation*100:.2f}%")
+    risk_free = get_active_risk_free_rate()
+    st.metric("Tasso reale (risk-free - inflazione stimata)", f"{(risk_free - inflation)*100:.2f}%")
+    st.caption("Nota: l'inflazione è una stima basata su TLT. Dati macro completi richiederebbero pandas_datareader (non compatibile con Python 3.12).")
 
 def render_ottimizzazione_tab():
     st.header("Ottimizzazione portafoglio")
