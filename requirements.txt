@@ -5,7 +5,7 @@ pandas
 numpy
 plotly
 scikit-learn
-pandas-ta==
+pandas-ta
 supabase
 textblob
 nltk
