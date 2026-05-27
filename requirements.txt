@@ -17,7 +17,6 @@ reportlab
 arch
 scipy
 statsmodels
-akshare
 openfigi
 matplotlib
 google-generativeai
