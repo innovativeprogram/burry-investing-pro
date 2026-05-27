@@ -20,3 +20,4 @@ statsmodels
 matplotlib
 google-generativeai
 websockets
+google-genai
