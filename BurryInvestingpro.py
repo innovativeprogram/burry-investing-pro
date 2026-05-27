@@ -1,6 +1,6 @@
 """
 # Copyright (c) 2026 InnovativeProgram
-# Tutti i diritti riservati. 
+# Tutti i diritti riservati.
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
 """
@@ -34,8 +34,6 @@ from burry_ai_prompts import (
     build_ai_context_for_ticker,
     ask_gemini_ticker_chat,
     build_burry_ai_context,
-    SYSTEM_PROMPT,
-    USER_PROMPT_TEMPLATE,
 )
 
 # ==========================================================================
@@ -683,7 +681,7 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 2.A RISOLUZIONE AUTOMATICA TICKER (NUOVA FUNZIONE)
+# 2.A RISOLUZIONE AUTOMATICA TICKER (NUOVA)
 # ==========================================================================
 def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
     """
@@ -704,7 +702,6 @@ def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
     }
     if symbol_clean in it_map:
         return it_map[symbol_clean], "MIL"
-    # Altre mappe possono essere aggiunte
     return symbol_clean, None
 
 # ==========================================================================
@@ -762,7 +759,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         if not bal_sheet.empty:
             bal_sheet.rename(index={'TotalDebt': 'Total Debt','StockholdersEquity': 'Stockholders Equity','TotalAssets': 'Total Assets','CurrentAssets': 'Current Assets','CurrentLiabilities': 'Current Liabilities','RetainedEarnings': 'Retained Earnings'}, inplace=True)
         if not cash_flow.empty:
-            cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpenditure': 'Capital Expenditure'}, inplace=True)
+            cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpediture': 'Capital Expenditure'}, inplace=True)
         return {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": symbol}
     except Exception as e:
         logger.error(f"Tutte le API hanno fallito per fondamentali di {symbol}: {e}")
@@ -1184,15 +1181,12 @@ def fit_garch(returns: pd.Series) -> Optional[Dict[str, float]]:
         return None
 
 def get_macro_indicators() -> Dict[str, float]:
-    """Recupera Treasury 10Y e CPI (USA) usando pandas_datareader se disponibile"""
     result = {"treasury_10y": np.nan, "cpi_yoy": np.nan}
     try:
         import pandas_datareader.data as web
-        # Treasury 10Y
         treasury = web.DataReader('DGS10', 'fred', start=pd.Timestamp.now() - pd.DateOffset(days=30))
         if not treasury.empty:
             result["treasury_10y"] = safe_float(treasury.iloc[-1, 0], np.nan) / 100.0
-        # CPI YoY
         cpi = web.DataReader('CPIAUCSL', 'fred', start=pd.Timestamp.now() - pd.DateOffset(months=13))
         if len(cpi) >= 13:
             cpi_series = cpi.iloc[:, 0]
@@ -1582,7 +1576,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1683,123 +1677,58 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR (con menu laterale di navigazione)
+# 6. UI: SIDEBAR (semplificata)
 # ==========================================================================
-def render_apk_download_box() -> None:
-    with st.sidebar.expander("Download App Android (APK)", expanded=False):
-        st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
-        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
-        st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute.")
-
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
-    with st.sidebar.expander("⚙️ Impostazioni globali", expanded=False):
-        base_currency = st.selectbox("Valuta base portafoglio", ["EUR", "USD", "GBP", "CHF"], index=0, key="base_currency_sel")
-        rf_mode = st.radio("Tasso risk-free", ["Dinamico (^IRX)", "Manuale", "Default 4%"], index=0, key="rf_mode_sel")
-        if rf_mode == "Manuale":
-            rf_manual = st.number_input("Tasso risk-free manuale (%)", 0.0, 15.0, value=DEFAULT_RISK_FREE_RATE * 100, step=0.1)
-            st.session_state["risk_free_override"] = rf_manual / 100.0
-        elif rf_mode == "Default 4%": st.session_state["risk_free_override"] = DEFAULT_RISK_FREE_RATE
-        else: st.session_state["risk_free_override"] = None
-        rf_eff = get_active_risk_free_rate()
-        st.caption(f"Tasso risk-free effettivo: {rf_eff*100:.2f}%")
-        if st.session_state["risk_free_override"] is None and rf_eff == DEFAULT_RISK_FREE_RATE:
-            st.warning("⚠️ Tasso risk-free dinamico non disponibile. Uso 4% default.")
-        st.markdown("**Pesi Smart Quant Score**")
-        col_w1, col_w2, col_w3 = st.columns(3)
-        wF = col_w1.number_input("F", 0.0, 1.0, DEFAULT_SMART_WEIGHTS["F"], 0.05)
-        wT = col_w2.number_input("T", 0.0, 1.0, DEFAULT_SMART_WEIGHTS["T"], 0.05)
-        wQ = col_w3.number_input("Q", 0.0, 1.0, DEFAULT_SMART_WEIGHTS["Q"], 0.05)
-        s = wF + wT + wQ
-        if s > 0: st.session_state["smart_weights"] = {"F": wF/s, "T": wT/s, "Q": wQ/s}
-        else: st.session_state["smart_weights"] = DEFAULT_SMART_WEIGHTS
-        if st.button("🧹 Pulisci cache", width='stretch'):
-            st.cache_data.clear(); st.cache_resource.clear()
-            st.success("Cache pulita. I dati verranno ricaricati.")
-    st.session_state["base_currency"] = base_currency
+    
     st.sidebar.header("1. Selezione Asset")
     input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
     file, manual = None, None
-    if input_mode == "Batch CSV": file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
-    else: manual = st.sidebar.text_input("Ticker", value="").upper().strip()
+    if input_mode == "Batch CSV": 
+        file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
+    else: 
+        manual = st.sidebar.text_input("Ticker", value="").upper().strip()
+    
     st.sidebar.header("2. Mercato")
     market = st.sidebar.selectbox("Borsa", ["USA", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Spagna (.MC)", "Svizzera (.SW)", "Canada (.TO)", "Giappone (.T)", "Hong Kong (.HK)", "Australia (.AX)", "India (.NS)", "Crypto", "Custom"])
     suffix_lookup = {"Italia": ".MI", "Germania": ".DE", "Francia": ".PA", "GB": ".L", "Spagna": ".MC", "Svizzera": ".SW", "Canada": ".TO", "Giappone": ".T", "Hong Kong": ".HK", "Australia": ".AX", "India": ".NS"}
     suffix = ""
     for k, s in suffix_lookup.items():
         if k in market: suffix = s; break
+    
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
-    with st.sidebar.expander("⚙️ Parametri Fondamentali"):
-        cfg = {
-            "roic": st.number_input("Min ROIC %", value=10.0, step=0.5),
-            "fcf": st.number_input("Min FCF (Mld)", value=0.0, step=1e9),
-            "peg": st.number_input("Max PEG Ratio", value=1.5, step=0.1),
-            "pe": st.number_input("Max PE (Fallback)", value=25.0),
-            "intcov": st.number_input("Min Int. Coverage", value=3.0),
-            "custom_max_de": st.number_input("Custom Max Debt/Equity", value=1.0, step=0.1),
-            "custom_min_fcf_margin": st.number_input("Custom Min FCF Margin", value=0.08, step=0.01, format="%.2f"),
-            "custom_min_net_margin": st.number_input("Custom Min Net Margin", value=0.10, step=0.01, format="%.2f"),
-            "perfectonly": st.checkbox("Solo All Green"),
-        }
-    with st.sidebar.expander("❓ Come cercare il ticker corretto"):
-        st.markdown("""
-- Azioni USA: solo ticker, es. AAPL, MSFT.
-- Italia: aggiungi `.MI` (es. STLAM.MI, ENI.MI).
-- Germania: `.DE` (BMW.DE, SAP.DE).
-- Francia: `.PA` (AIR.PA, OR.PA).
-- UK: `.L` (ULVR.L).
-- Spagna: `.MC`, Svizzera: `.SW`.
-- Canada: `.TO`, Giappone: `.T`, Hong Kong: `.HK`.
-- Crypto: coppia con valuta, es. `BTC-USD`, `ETH-USD`.
-- In dubbio: cerca su Yahoo Finance e copia il ticker esatto.
-        """)
-    render_apk_download_box()
-    with st.sidebar.expander("ℹ️ Chi Siamo", expanded=False):
-        st.markdown("""
-### Benvenuti su V-QUANT PRO
-V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
-La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF , Crypto e singoli titoli azionari ed obbligazionari.
-Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
-### Cosa facciamo:
-- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
-- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
-- Strumenti di supporto decisionale basati su modelli matematici
-### ⚠️ Disclaimer Legale
-V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
-Sviluppato con passione da Innovative Program.
-        """)
-    with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
-        st.markdown("""
-### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
-#### 1. Conservazione dei Dati 
-Tutti i dati sensibili, inclusi i dati di autenticazione (email e password) e le configurazioni del tuo portafoglio, sono **detenuti e gestiti in modo sicuro da Supabase. 
-#### Supabase è una piattaforma di database di livello enterprise che garantisce la crittografia dei dati a riposo e in transito.
-Le password sono archiviate tramite hashing sicuro e non sono mai accessibili in chiaro agli amministratori di V-QUANT PRO.
-#### 2. Analisi Finanziaria e Cookie
-Questo sito utilizza  Google AdSense per la visualizzazione di annunci pubblicitari e cookie tecnici per il corretto funzionamento della Dashboard.
-Google utilizza i cookie per pubblicare annunci basati sulle tue visite precedenti.
-Puoi gestire le preferenze sugli annunci visitando le impostazioni di Google.
-#### 3. Diritti dell'Utente
-Poiché i dati sono detenuti su infrastruttura Supabase, puoi richiedere in ogni momento la cancellazione totale del tuo account e dei dati associati attraverso le impostazioni del profilo o contattandoci..
-#### 4. Esclusione di Responsabilità
-V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi . L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
-#### 5. Sicurezza
-Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
-        """)
-    with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
-        st.markdown("""
-        ### Perché una donazione?
-        V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
-        Mantenere l'infrastruttura, aggiornare i dati in tempo reale e sviluppare nuove funzionalità ha dei costi vivi.
-        Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
-        """)
-        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
-        st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
-    with st.sidebar.expander("Contatti", expanded=False):
-        st.write("Per supporto tecnico, collaborazioni o richieste:")
-        st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
-        st.caption("Risposta normalmente entro 24/48 ore.")
-    return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "cfg": cfg, "base_currency": base_currency}
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("## 📑 Navigazione")
+    tab_selection = st.sidebar.selectbox(
+        "Vai a:",
+        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
+        key="nav_select"
+    )
+    st.sidebar.caption("ℹ️ Il ticker verrà automaticamente adattato al suffisso corretto in base alla fonte dati utilizzata.")
+    
+    with st.sidebar.expander("🤖 VqAi", expanded=False):
+        st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
+        st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
+        st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
+        for msg in st.session_state.get('burry_ai_history', []):
+            with st.chat_message(msg.get('role', 'assistant')): st.markdown(msg.get('content', ''))
+        burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
+        if burry_ai_prompt:
+            ctx = build_burry_ai_context(st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''), st.session_state.get('burry_ai_asset_type', 'Azione'), mode='Unificato')
+            st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
+            conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
+            for m in st.session_state.burry_ai_history[:-1]: conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
+            enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
+            with st.chat_message('user'): st.markdown(burry_ai_prompt)
+            with st.chat_message('assistant'):
+                with st.spinner('VqAi sta rispondendo...'):
+                    reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
+                st.markdown(reply)
+            st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
+    
+    return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
 
 def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
     ticker = st.session_state.get('selected_ticker')
@@ -1845,7 +1774,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# FUNZIONI DI RENDERING DEI TAB (con footer aggiornato)
+# FUNZIONI DI RENDERING DEI TAB (con footer)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if row is None:
@@ -2234,11 +2163,14 @@ def main():
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
     ui = setup_sidebar()
+    
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
         st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
+    
+    # Avvia analisi se premuto il pulsante
     if ui["btn"]:
         targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2268,40 +2200,15 @@ def main():
             analysis_errors.extend(fetch_errors)
             st.session_state.batch_results = pd.DataFrame(results)
             st.session_state.analysis_errors = analysis_errors
-            if results: st.session_state.selected_ticker = results[0]["Ticker"]
-            else: st.session_state.selected_ticker = None
+            if results: 
+                st.session_state.selected_ticker = results[0]["Ticker"]
+            else: 
+                st.session_state.selected_ticker = None
+    
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
-    with st.sidebar:
-        st.markdown('---')
-        with st.expander('🤖 VqAi', expanded=False):
-            st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti e la logica del programma.')
-            st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
-            st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
-            for msg in st.session_state.get('burry_ai_history', []):
-                with st.chat_message(msg.get('role', 'assistant')): st.markdown(msg.get('content', ''))
-            burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
-            if burry_ai_prompt:
-                ctx = build_burry_ai_context(st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''), st.session_state.get('burry_ai_asset_type', 'Azione'), mode='Unificato')
-                st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
-                conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
-                for m in st.session_state.burry_ai_history[:-1]: conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
-                enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
-                with st.chat_message('user'): st.markdown(burry_ai_prompt)
-                with st.chat_message('assistant'):
-                    with st.spinner('VqAi sta rispondendo...'):
-                        reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
-                    st.markdown(reply)
-                st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
-    # Menu laterale di navigazione (sempre visibile)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("## 📑 Navigazione")
-    tab_selection = st.sidebar.radio(
-        "Vai a:",
-        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
-        key="nav_radio"
-    )
+    
     # Analisi rapida senza ricerca
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
@@ -2326,19 +2233,21 @@ def main():
         if manual_quick:
             st.session_state.selected_ticker = None
             st.session_state.standalone_ticker_input = manual_quick
+    
     ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
     if not ticker:
         st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
-    # Mostra il tab selezionato
-    if tab_selection == "📊 Fondamentali":
+    
+    # Mostra il tab selezionato dal menu a tendina
+    if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
-    elif tab_selection == "📉 Tecnico":
+    elif ui["tab_selection"] == "📉 Tecnico":
         render_tecnico_tab(row, ticker)
-    elif tab_selection == "⚛️ Quant":
+    elif ui["tab_selection"] == "⚛️ Quant":
         render_quant_tab(row, ticker, standalone_raw_data)
-    elif tab_selection == "⚖️ Verdetto":
+    elif ui["tab_selection"] == "⚖️ Verdetto":
         render_verdetto_tab(row, ticker, standalone_raw_data)
-    elif tab_selection == "📁 Portafoglio":
+    elif ui["tab_selection"] == "📁 Portafoglio":
         render_portafoglio_tab(ui)
 
 if __name__ == "__main__":
