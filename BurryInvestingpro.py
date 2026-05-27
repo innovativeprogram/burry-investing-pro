@@ -3028,4 +3028,4 @@ def main():
             st.info("Seleziona un ticker attivo per l'analisi di liquidità.")
 
 if __name__ == "__main__":
-    main()
+    main() 
