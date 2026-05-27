@@ -1,5 +1,4 @@
 streamlit
-yfinance
 yahooquery
 pandas
 numpy
@@ -23,4 +22,5 @@ investpy
 investiny
 pyinvesting
 matplotlib
-websockets>=10.0,<13.0
+yfinance==0.2.40
+websockets==12.0
