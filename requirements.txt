@@ -10,7 +10,4 @@ supabase>=1.0.3
 google-generativeai>=0.3.0
 requests>=2.31.0
 pandas-datareader>=0.10.0
-akshare>=1.14.0
-ticker-classifier>=0.1.2
 arch>=6.0.0
-setuptools>=70.0.0
