@@ -15,6 +15,7 @@ beautifulsoup4
 lxml
 fpdf
 reportlab
+arch
 scipy
 statsmodels
 akshare
