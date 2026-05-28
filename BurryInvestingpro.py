@@ -434,7 +434,6 @@ def load_user_portfolio() -> None:
     except Exception as e:
         logger.warning(f'Load portfolio skipped: {e}')
         return
-    # Pulisci prima di ricaricare
     st.session_state.portfolio_tickers = []
     st.session_state.holdings = {}
     st.session_state.holdings_quantity = {}
@@ -600,6 +599,7 @@ def render_auth_sidebar() -> None:
     st.sidebar.caption('Auth gestita con Supabase email/password.')
     st.sidebar.markdown('---')
 
+
 # ==========================================================================
 # 1. MODELLI DATI
 # ==========================================================================
@@ -645,6 +645,7 @@ class FundamentalMetrics:
             "Currency": self.currency, "_raw_data": self.raw_data,
         }
 
+
 # ==========================================================================
 # 2. HELPER & VALIDAZIONE
 # ==========================================================================
@@ -653,14 +654,6 @@ def sanitize_ticker(ticker: str) -> str:
     if not clean: raise ValueError('Ticker vuoto')
     if not re.match(r'^[A-Z0-9\-\.=^]+$', clean): raise ValueError(f'Ticker non valido: {clean}')
     return clean
-
-def normalize_ticker(ticker: str, suffix: str) -> str:
-    clean_ticker = sanitize_ticker(ticker)
-    if "-" in clean_ticker or clean_ticker.startswith("^"): return clean_ticker
-    clean_suffix = str(suffix).strip().upper()
-    if clean_suffix and not re.match(r"^\.[A-Z]+$", clean_suffix): clean_suffix = ""
-    if clean_suffix and not clean_ticker.endswith(clean_suffix): return f"{clean_ticker}{clean_suffix}"
-    return clean_ticker
 
 def safe_float(value: Any, default: float = np.nan) -> float:
     try:
@@ -681,69 +674,119 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
         if qt in {"CRYPTOCURRENCY", "CURRENCY", "FUTURE", "INDEX", "ETF", "MUTUALFUND"}: return True
     return False
 
-# ==========================================================================
-# 2.A RISOLUZIONE AUTOMATICA TICKER (NUOVA)
-# ==========================================================================
-def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
-    """
-    Converte ticker semplice (es. ENI) in formato completo (ENI.MI)
-    usando mappa predefinita. Restituisce (ticker_risolto, exchange)
-    """
-    symbol_clean = symbol.upper().strip()
-    # Se ha già suffisso, lascia invariato
-    suffixes = ('.MI', '.DE', '.PA', '.L', '.MC', '.SW', '.TO', '.T', '.HK', '.AX', '.NS')
-    if any(symbol_clean.endswith(suf) for suf in suffixes):
-        return symbol_clean, None
-    # Mappa per ticker italiani noti
-    it_map = {
-        'ENI': 'ENI.MI', 'STLAM': 'STLAM.MI', 'STLAP': 'STLAP.MI', 'STM': 'STM.MI',
-        'ISP': 'ISP.MI', 'UCG': 'UCG.MI', 'TIT': 'TIT.MI', 'RACE': 'RACE.MI',
-        'CNHI': 'CNHI.MI', 'PIRC': 'PIRC.MI', 'BAMI': 'BAMI.MI', 'NEXI': 'NEXI.MI',
-        'MONC': 'MONC.MI', 'PRY': 'PRY.MI', 'FBK': 'FBK.MI', 'BPE': 'BPE.MI'
-    }
-    if symbol_clean in it_map:
-        return it_map[symbol_clean], "MIL"
-    # Altre mappe possono essere aggiunte
-    return symbol_clean, None
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK (POLYGON PRIMARIO)
+# 2.A RISOLUZIONE ADATTIVA DEL TICKER (A CASCATA SUFFISSI)
+# ==========================================================================
+def _test_ticker_on_yfinance(symbol: str) -> bool:
+    """Verifica se il ticker esiste su Yahoo Finance."""
+    try:
+        t = yf.Ticker(symbol)
+        info = t.info
+        if info and ('symbol' in info or 'regularMarketPrice' in info):
+            return True
+        return False
+    except Exception:
+        return False
+
+def _test_ticker_on_polygon(symbol: str) -> bool:
+    """Verifica se il ticker esiste su Polygon."""
+    if not POLYGON_API_KEY:
+        return False
+    try:
+        throttle_polygon()
+        url = f"{POLYGON_BASE_URL}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}"
+        resp = requests.get(url, timeout=5)
+        return resp.status_code == 200 and resp.json().get('status') == 'OK'
+    except Exception:
+        return False
+
+def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> str:
+    """
+    Risolve automaticamente il ticker testando una lista di suffissi comuni.
+    Cerca prima su yfinance, poi su Polygon.
+    La cache in sessione evita tentativi ripetuti.
+    """
+    symbol_clean = symbol.upper().strip()
+    if not symbol_clean:
+        return symbol_clean
+
+    # Cache in sessione
+    if 'ticker_resolution_cache' not in st.session_state:
+        st.session_state.ticker_resolution_cache = {}
+    cache = st.session_state.ticker_resolution_cache
+    if not force_refresh and symbol_clean in cache:
+        return cache[symbol_clean]
+
+    # Lista dei suffissi da testare (in ordine di probabilità)
+    suffixes = ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS',
+                '.SW', '.MC', '.BR', '.MX', '.SA', '.BO', '.KS', '.SS', '.SZ',
+                '-USD', '-EUR']  # per crypto
+    # Per ticker che già hanno un suffisso o sono speciali
+    if any(symbol_clean.endswith(suf) for suf in ['.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS', '.SW', '.MC', '.BR', '.MX', '.SA', '.BO', '.KS', '.SS', '.SZ', '-USD', '-EUR']):
+        # Se ha già un suffisso, usalo direttamente
+        return symbol_clean
+
+    # Tentativi
+    for suffix in suffixes:
+        candidate = symbol_clean + suffix
+        # Test su yfinance
+        if _test_ticker_on_yfinance(candidate):
+            logger.info(f"Risolto {symbol_clean} -> {candidate} via yfinance")
+            cache[symbol_clean] = candidate
+            return candidate
+        # Test su Polygon (solo per suffissi vuoti o .XX)
+        if suffix in ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS']:
+            if _test_ticker_on_polygon(candidate):
+                logger.info(f"Risolto {symbol_clean} -> {candidate} via Polygon")
+                cache[symbol_clean] = candidate
+                return candidate
+    # Se nessun test funziona, restituisci il simbolo originale
+    logger.warning(f"Nessuna risoluzione per {symbol_clean}, uso originale")
+    cache[symbol_clean] = symbol_clean
+    return symbol_clean
+
+
+# ==========================================================================
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
+    # Prima risolvi il ticker
+    resolved = auto_resolve_ticker_adaptive(symbol)
     # 1. Polygon
-    poly_data = get_polygon_fundamentals(symbol)
+    poly_data = get_polygon_fundamentals(resolved)
     if poly_data is not None:
         if (not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty):
             return poly_data
         else:
-            logger.info(f"Polygon insufficiente per {symbol}, provo yfinance")
+            logger.info(f"Polygon insufficiente per {resolved}, provo yfinance")
     # 2. yfinance
     try:
-        stock = yf.Ticker(symbol)
+        stock = yf.Ticker(resolved)
         info = stock.info
         if info and ('symbol' in info or 'shortName' in info):
-            if 'symbol' not in info: info['symbol'] = symbol
-            return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": symbol}
+            if 'symbol' not in info: info['symbol'] = resolved
+            return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": resolved}
     except Exception as e:
-        logger.info(f"yfinance fallito per {symbol}: {e}")
-    # 3. YahooQuery (codice invariato)
+        logger.info(f"yfinance fallito per {resolved}: {e}")
+    # 3. YahooQuery
     try:
-        yq = YQ_Ticker(symbol)
-        summary = yq.summary_detail.get(symbol, {}) if isinstance(yq.summary_detail, dict) else {}
-        price = yq.price.get(symbol, {}) if isinstance(yq.price, dict) else {}
-        financial_data = yq.financial_data.get(symbol, {}) if isinstance(yq.financial_data, dict) else {}
+        yq = YQ_Ticker(resolved)
+        summary = yq.summary_detail.get(resolved, {}) if isinstance(yq.summary_detail, dict) else {}
+        price = yq.price.get(resolved, {}) if isinstance(yq.price, dict) else {}
+        financial_data = yq.financial_data.get(resolved, {}) if isinstance(yq.financial_data, dict) else {}
         if isinstance(summary, str): summary = {}
         if isinstance(price, str): price = {}
         if isinstance(financial_data, str): financial_data = {}
         combined_info = {**summary, **price, **financial_data}
-        combined_info['symbol'] = symbol
+        combined_info['symbol'] = resolved
         if 'regularMarketPrice' in combined_info: combined_info['currentPrice'] = combined_info['regularMarketPrice']
         def format_yq_df(df_yq):
             if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
                 df_yq = df_yq.copy()
                 if isinstance(df_yq.index, pd.MultiIndex):
-                    try: df_yq = df_yq.xs(symbol, level=0)
+                    try: df_yq = df_yq.xs(resolved, level=0)
                     except KeyError: return pd.DataFrame()
                 if 'asOfDate' in df_yq.columns: df_yq.set_index('asOfDate', inplace=True)
                 df_t = df_yq.transpose()
@@ -762,9 +805,9 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             bal_sheet.rename(index={'TotalDebt': 'Total Debt','StockholdersEquity': 'Stockholders Equity','TotalAssets': 'Total Assets','CurrentAssets': 'Current Assets','CurrentLiabilities': 'Current Liabilities','RetainedEarnings': 'Retained Earnings'}, inplace=True)
         if not cash_flow.empty:
             cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpediture': 'Capital Expenditure'}, inplace=True)
-        return {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": symbol}
+        return {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": resolved}
     except Exception as e:
-        logger.error(f"Tutte le API hanno fallito per fondamentali di {symbol}: {e}")
+        logger.error(f"Tutte le API hanno fallito per fondamentali di {resolved}: {e}")
         return None
 
 def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
@@ -992,6 +1035,7 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
             time.sleep(BATCH_RATE_LIMIT_SEC)
     return results, errors
 
+
 # ==========================================================================
 # 4. DATA ENGINE: ANALISI TECNICA
 # ==========================================================================
@@ -1115,6 +1159,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
         elif adx < 20: score -= 5; reasons.append("⚠️ Trend debole/assente (ADX < 20)")
     score = int(np.clip(score, 0, 100))
     return score, reasons
+
 
 # ==========================================================================
 # 5. METRICHE QUANTITATIVE AVANZATE
@@ -1666,8 +1711,9 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     merged["Azione"] = np.where(merged["Azione €"] > threshold, "Compra", np.where(merged["Azione €"] < -threshold, "Riduci", "In target"))
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
+
 # ==========================================================================
-# 6. UI: SIDEBAR
+# 6. UI: SIDEBAR (senza selezione borsa, solo custom)
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -1740,12 +1786,7 @@ def setup_sidebar() -> Dict[str, Any]:
     else:
         manual = st.sidebar.text_input("Ticker", value="").upper().strip()
     
-    st.sidebar.header("2. Mercato")
-    market = st.sidebar.selectbox("Borsa", ["USA", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Spagna (.MC)", "Svizzera (.SW)", "Canada (.TO)", "Giappone (.T)", "Hong Kong (.HK)", "Australia (.AX)", "India (.NS)", "Crypto", "Custom"])
-    suffix_lookup = {"Italia": ".MI", "Germania": ".DE", "Francia": ".PA", "GB": ".L", "Spagna": ".MC", "Svizzera": ".SW", "Canada": ".TO", "Giappone": ".T", "Hong Kong": ".HK", "Australia": ".AX", "India": ".NS"}
-    suffix = ""
-    for k, s in suffix_lookup.items():
-        if k in market: suffix = s; break
+    st.sidebar.caption("🔍 Il ticker verrà automaticamente risolto (es. 'ENI' → 'ENI.MI', 'BMW' → 'BMW.DE' ecc.)")
     
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
     
@@ -1756,7 +1797,6 @@ def setup_sidebar() -> Dict[str, Any]:
         ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
         key="nav_select"
     )
-    st.sidebar.caption("ℹ️ Il ticker verrà automaticamente adattato al suffisso corretto in base alla fonte dati utilizzata.")
     
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
@@ -1784,7 +1824,8 @@ def setup_sidebar() -> Dict[str, Any]:
     render_sostieni()
     render_contatti()
     
-    return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
+    return {"mode": input_mode, "file": file, "manual": manual, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
+
 
 def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
     ticker = st.session_state.get('selected_ticker')
@@ -1829,30 +1870,30 @@ def _init_session_state() -> None:
 def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
+
 # ==========================================================================
 # 7. FUNZIONI DI RENDERING DEI TAB
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
-    if row is None:
-        st.info("Nessun ticker attivo. Usa il box 'Analisi rapida senza ricerca'.")
-        if batch_results is not None and not batch_results.empty:
-            st.dataframe(batch_results.drop(columns=['_raw_data'], errors='ignore'))
+    if batch_results is not None and not batch_results.empty:
+        st.info("💡 **Tabella riassuntiva dei fondamentali per tutti i ticker analizzati**")
+        # Mostra tabella con tutte le metriche
+        df_display = batch_results.drop(columns=['_raw_data'], errors='ignore')
+        st.dataframe(df_display, width='stretch', use_container_width=True)
+    elif row is not None:
+        st.info("💡 **Metriche fondamentali**")
+        st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'), use_container_width=True)
     else:
-        st.info("💡 **Come leggere questa sezione:** qualita' del business prima, sostenibilita' finanziaria poi, prezzo/multipli alla fine.")
-        if analysis_source == 'batch' and batch_results is not None and not batch_results.empty:
-            st.dataframe(batch_results.drop(columns=['_raw_data'], errors='ignore'))
-        elif row is not None:
-            st.success(f'Analisi standalone attiva su: {ticker}')
-            st.dataframe(pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore'))
+        st.info("Nessun dato fondamentale disponibile. Esegui una ricerca.")
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_tecnico_tab(row, ticker):
-    if row is None:
-        st.info("Nessun ticker attivo.")
+    if row is None or ticker is None:
+        st.info("Nessun ticker attivo. Seleziona un ticker dalla ricerca.")
         st.markdown(FOOTER_HTML, unsafe_allow_html=True)
         return
-    st.info("💡 **Come leggere il grafico:** SMA200 = trend di fondo, RSI = momentum, ADX = forza del trend.")
+    st.info("💡 **Grafico prezzi, medie mobili, RSI e ADX**")
     df_tech = get_technical_data(ticker)
     if df_tech is not None:
         df_calc = calculate_technical_indicators(df_tech)
@@ -1868,17 +1909,30 @@ def render_tecnico_tab(row, ticker):
             fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['ADX'], name="ADX", line=dict(color='orange')), row=3, col=1)
         fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, width='stretch')
+        
+        # Rolling volatility e Sharpe
+        returns = df_calc['Close'].pct_change().dropna()
+        rolling_vol = returns.rolling(21).std() * np.sqrt(252)
+        rolling_sharpe = (returns.rolling(21).mean() / returns.rolling(21).std()) * np.sqrt(252)
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Scatter(x=rolling_vol.index, y=rolling_vol*100, name="Volatilità rolling (21gg)", line=dict(color='orange')))
+        fig_vol.update_layout(title="Volatilità storica (annualizzata)", template="plotly_dark", height=300)
+        st.plotly_chart(fig_vol, width='stretch')
+        fig_sharpe = go.Figure()
+        fig_sharpe.add_trace(go.Scatter(x=rolling_sharpe.index, y=rolling_sharpe, name="Sharpe rolling (21gg)", line=dict(color='green')))
+        fig_sharpe.update_layout(title="Sharpe ratio rolling (21gg)", template="plotly_dark", height=300)
+        st.plotly_chart(fig_sharpe, width='stretch')
     else:
         st.warning(f'Dati tecnici non disponibili per {ticker}.')
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_quant_tab(row, ticker, standalone_raw_data):
-    if row is None:
+    if row is None or ticker is None:
         st.info("Nessun ticker attivo.")
         st.markdown(FOOTER_HTML, unsafe_allow_html=True)
         return
-    st.info("💡 **Quant:** Sharpe, Sortino, Omega, Jensen, Ulcer, GARCH, Monte Carlo, etc.")
+    st.info("💡 **Metriche quantitative: Sharpe, Sortino, Omega, Ulcer, GARCH, Monte Carlo**")
     df_tech = get_technical_data(ticker)
     if df_tech is not None:
         rf_eff = get_active_risk_free_rate()
@@ -1939,7 +1993,7 @@ def render_quant_tab(row, ticker, standalone_raw_data):
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_verdetto_tab(row, ticker, standalone_raw_data):
-    if row is None:
+    if row is None or ticker is None:
         st.info("Nessun ticker attivo.")
         st.markdown(FOOTER_HTML, unsafe_allow_html=True)
         return
@@ -2213,6 +2267,7 @@ def render_portafoglio_tab(ui):
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
+
 # ==========================================================================
 # MAIN
 # ==========================================================================
@@ -2228,6 +2283,8 @@ def main():
         st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
+    
+    # Avvia analisi batch
     if ui["btn"]:
         targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2246,10 +2303,9 @@ def main():
             analysis_errors = []
             for t in targets:
                 try:
-                    # Applica risoluzione automatica ticker
-                    resolved, _ = auto_resolve_ticker(t)
-                    # Poi normalizza con suffisso selezionato
-                    normalized_targets.append(normalize_ticker(resolved, ui["suffix"]))
+                    # Risoluzione automatica ticker (adattiva)
+                    resolved = auto_resolve_ticker_adaptive(t)
+                    normalized_targets.append(resolved)
                 except Exception as e:
                     analysis_errors.append(f'{t}: {e}')
             with st.spinner(f"Analisi di {len(normalized_targets)} ticker in parallelo..."):
@@ -2261,9 +2317,11 @@ def main():
                 st.session_state.selected_ticker = results[0]["Ticker"]
             else:
                 st.session_state.selected_ticker = None
+    
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
+    
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
         batch_options = []
@@ -2289,9 +2347,12 @@ def main():
         if manual_quick:
             st.session_state.selected_ticker = None
             st.session_state.standalone_ticker_input = manual_quick
+    
     ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
     if not ticker:
-        st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
+        st.info('Seleziona un ticker dal box "Analisi rapida" oppure carica un batch e scegli un ticker.')
+    
+    # Mostra il tab selezionato
     if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
     elif ui["tab_selection"] == "📉 Tecnico":
