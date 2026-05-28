@@ -13,4 +13,4 @@ pandas-datareader>=0.10.0
 arch>=6.0.0
 matplotlib>=3.5.0
 huggingface-hub>=0.20.0
-llama-cpp-python==0.2.20 --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.2.20
