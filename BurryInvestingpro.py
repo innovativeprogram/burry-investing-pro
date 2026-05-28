@@ -434,6 +434,7 @@ def load_user_portfolio() -> None:
     except Exception as e:
         logger.warning(f'Load portfolio skipped: {e}')
         return
+    # Pulisci prima di ricaricare
     st.session_state.portfolio_tickers = []
     st.session_state.holdings = {}
     st.session_state.holdings_quantity = {}
@@ -681,13 +682,19 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 2.A RISOLUZIONE AUTOMATICA TICKER
+# 2.A RISOLUZIONE AUTOMATICA TICKER (NUOVA)
 # ==========================================================================
 def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
+    """
+    Converte ticker semplice (es. ENI) in formato completo (ENI.MI)
+    usando mappa predefinita. Restituisce (ticker_risolto, exchange)
+    """
     symbol_clean = symbol.upper().strip()
+    # Se ha già suffisso, lascia invariato
     suffixes = ('.MI', '.DE', '.PA', '.L', '.MC', '.SW', '.TO', '.T', '.HK', '.AX', '.NS')
     if any(symbol_clean.endswith(suf) for suf in suffixes):
         return symbol_clean, None
+    # Mappa per ticker italiani noti
     it_map = {
         'ENI': 'ENI.MI', 'STLAM': 'STLAM.MI', 'STLAP': 'STLAP.MI', 'STM': 'STM.MI',
         'ISP': 'ISP.MI', 'UCG': 'UCG.MI', 'TIT': 'TIT.MI', 'RACE': 'RACE.MI',
@@ -696,16 +703,22 @@ def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
     }
     if symbol_clean in it_map:
         return it_map[symbol_clean], "MIL"
+    # Altre mappe possono essere aggiunte
     return symbol_clean, None
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK (POLYGON PRIMARIO)
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
+    # 1. Polygon
     poly_data = get_polygon_fundamentals(symbol)
-    if poly_data is not None and ((not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty)):
-        return poly_data
+    if poly_data is not None:
+        if (not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty):
+            return poly_data
+        else:
+            logger.info(f"Polygon insufficiente per {symbol}, provo yfinance")
+    # 2. yfinance
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
@@ -714,6 +727,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": symbol}
     except Exception as e:
         logger.info(f"yfinance fallito per {symbol}: {e}")
+    # 3. YahooQuery (codice invariato)
     try:
         yq = YQ_Ticker(symbol)
         summary = yq.summary_detail.get(symbol, {}) if isinstance(yq.summary_detail, dict) else {}
@@ -983,6 +997,7 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
+    # 1. Polygon
     if POLYGON_API_KEY:
         try:
             throttle_polygon()
@@ -1001,6 +1016,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     if len(df) >= 60: return df
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {symbol}: {e}")
+    # 2. yfinance
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
         if df is not None and not df.empty:
@@ -1009,6 +1025,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
             if len(df) >= 60: return df
     except Exception as e:
         logger.info(f"yfinance tecnico fallito per {symbol}: {e}")
+    # 3. yahooquery
     try:
         t = YQ_Ticker(symbol)
         df_yq = t.history(period="2y", interval="1d")
@@ -1713,6 +1730,7 @@ def render_contatti() -> None:
 
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
+    
     st.sidebar.header("1. Selezione Asset")
     input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
     file = None
@@ -1721,13 +1739,16 @@ def setup_sidebar() -> Dict[str, Any]:
         file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
     else:
         manual = st.sidebar.text_input("Ticker", value="").upper().strip()
+    
     st.sidebar.header("2. Mercato")
     market = st.sidebar.selectbox("Borsa", ["USA", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Spagna (.MC)", "Svizzera (.SW)", "Canada (.TO)", "Giappone (.T)", "Hong Kong (.HK)", "Australia (.AX)", "India (.NS)", "Crypto", "Custom"])
     suffix_lookup = {"Italia": ".MI", "Germania": ".DE", "Francia": ".PA", "GB": ".L", "Spagna": ".MC", "Svizzera": ".SW", "Canada": ".TO", "Giappone": ".T", "Hong Kong": ".HK", "Australia": ".AX", "India": ".NS"}
     suffix = ""
     for k, s in suffix_lookup.items():
         if k in market: suffix = s; break
+    
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
+    
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 📑 Navigazione")
     tab_selection = st.sidebar.selectbox(
@@ -1736,6 +1757,7 @@ def setup_sidebar() -> Dict[str, Any]:
         key="nav_select"
     )
     st.sidebar.caption("ℹ️ Il ticker verrà automaticamente adattato al suffisso corretto in base alla fonte dati utilizzata.")
+    
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
@@ -1755,11 +1777,13 @@ def setup_sidebar() -> Dict[str, Any]:
                     reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
                 st.markdown(reply)
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
+    
     render_apk_download_box()
     render_chi_siamo()
     render_privacy()
     render_sostieni()
     render_contatti()
+    
     return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
 
 def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
@@ -2222,7 +2246,9 @@ def main():
             analysis_errors = []
             for t in targets:
                 try:
+                    # Applica risoluzione automatica ticker
                     resolved, _ = auto_resolve_ticker(t)
+                    # Poi normalizza con suffisso selezionato
                     normalized_targets.append(normalize_ticker(resolved, ui["suffix"]))
                 except Exception as e:
                     analysis_errors.append(f'{t}: {e}')
