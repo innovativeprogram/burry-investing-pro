@@ -141,43 +141,19 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
         )
     try:
-        # Import corretto per google-generativeai
         import google.generativeai as genai
-        from google.generativeai.types import GenerateContentConfig
-        
         genai.configure(api_key=api_key)
         system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-        candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
-        last_error = None
-        output_tokens = min(max_tokens, 8192) if max_tokens else 8192
-        
-        for model_name in candidate_models:
-            for attempt in range(4):
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    # Unisco system prompt e user prompt in un unico messaggio (Gemini non ha system prompt separato nelle API semplici)
-                    full_prompt = f"{system_prompt}\n\n{user_prompt}"
-                    response = model.generate_content(
-                        full_prompt,
-                        generation_config=GenerateContentConfig(
-                            temperature=0.2,
-                            max_output_tokens=output_tokens
-                        )
-                    )
-                    answer = response.text
-                    if answer and answer.strip():
-                        return answer.strip()
-                    return "Il modello non ha restituito testo utile."
-                except Exception as e:
-                    err = str(e)
-                    last_error = err
-                    transient = any(x in err for x in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "RateLimitError"])
-                    if transient and attempt < 3:
-                        wait_s = (2 ** attempt) + random.uniform(0.3, 1.2)
-                        time.sleep(wait_s)
-                        continue
-                    break
-        return "Servizio AI temporaneamente occupato. Riprova tra poco. Ultimo dettaglio tecnico: " + str(last_error)
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        response = model.generate_content(
+            full_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=min(max_tokens, 8192)
+            )
+        )
+        return response.text.strip() if response.text else "Il modello non ha restituito testo utile."
     except Exception as e:
         logger.warning(f"Errore AI Gemini: {e}")
         return f"Errore AI: {e}"
