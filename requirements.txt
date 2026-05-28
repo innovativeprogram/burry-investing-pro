@@ -11,3 +11,4 @@ google-generativeai>=0.3.0
 requests>=2.31.0
 pandas-datareader>=0.10.0
 arch>=6.0.0
+matplotlib>=3.5.0
