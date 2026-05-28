@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import random
 import time
 from textwrap import dedent
 from typing import Any, Dict, List
@@ -9,18 +8,18 @@ from typing import Any, Dict, List
 import streamlit as st
 import pandas as pd
 
-# Tentativo di import per il backup locale con transformers
+# Tentativo di import per llama-cpp-python
 try:
-    import torch
-    from transformers import pipeline
-    TRANSFORMERS_AVAILABLE = True
+    from llama_cpp import Llama
+    from huggingface_hub import hf_hub_download
+    LLAMA_AVAILABLE = True
 except ImportError:
-    TRANSFORMERS_AVAILABLE = False
+    LLAMA_AVAILABLE = False
 
 logger = logging.getLogger("BurryInvestingPro")
 
 # ==========================================================================
-# PROMPT DI SISTEMA (identico a prima)
+# PROMPT DI SISTEMA (identico)
 # ==========================================================================
 SYSTEM_PROMPT = dedent("""
 Sei l'assistente AI interno di V-Quant Pro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
@@ -98,9 +97,6 @@ CONTESTO APP:
 {json_context}
 """).strip()
 
-# ==========================================================================
-# FUNZIONI DI SUPPORTO
-# ==========================================================================
 def safe_get_secret(key: str, default=None):
     env_val = os.getenv(key)
     if env_val:
@@ -147,13 +143,75 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
     }
 
 # ==========================================================================
-# FUNZIONE PRINCIPALE CON BACKUP LOCALE (transformers)
+# BACKUP LOCALE CON LLAMA.CPP
+# ==========================================================================
+def _get_llama_model():
+    """Scarica e carica il modello GGUF leggero (SmolLM2 135M)"""
+    if not LLAMA_AVAILABLE:
+        return None
+    try:
+        model_filename = "smollm2-135m-instruct-q8_0.gguf"
+        model_path = hf_hub_download(
+            repo_id="HackNetAyush/smollm2-135M-instruct-gguf-q8",
+            filename=model_filename,
+            local_dir=os.getenv("HF_HOME", "./models")
+        )
+        return Llama(
+            model_path=model_path,
+            n_ctx=2048,
+            n_threads=2,
+            n_batch=512,
+            verbose=False
+        )
+    except Exception as e:
+        logger.error(f"Errore caricamento modello llama.cpp: {e}")
+        return None
+
+def ask_llama_fallback(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
+    """
+    Chiamata al modello locale tramite llama.cpp.
+    Viene usata solo se Gemini fallisce.
+    """
+    if not LLAMA_AVAILABLE:
+        return "⚠️ **Backup locale non disponibile**: libreria `llama-cpp-python` non installata."
+    
+    # Inizializza il modello (una volta sola, in cache)
+    if "llama_model" not in st.session_state:
+        with st.spinner("Caricamento AI locale (primo avvio, ~10 secondi)..."):
+            st.session_state.llama_model = _get_llama_model()
+    
+    llm = st.session_state.llama_model
+    if llm is None:
+        return "⚠️ **Backup locale non disponibile**: impossibile caricare il modello."
+    
+    system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.2,
+            max_tokens=512,
+            stop=["</s>", "User:", "Assistant:"]
+        )
+        answer = response['choices'][0]['message']['content'].strip()
+        if not answer:
+            answer = "Il modello locale non ha generato una risposta valida."
+        return answer + "\n\n---\n*🧠 Risposta generata da AI locale (gratuita, senza limiti).*"
+    except Exception as e:
+        logger.error(f"Errore durante inferenza llama.cpp: {e}")
+        return f"⚠️ **Errore nel backup locale**: {e}"
+
+# ==========================================================================
+# FUNZIONE PRINCIPALE CON FALLBACK
 # ==========================================================================
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
     """
     Tenta prima con Google Gemini (se API key configurata).
-    In caso di errore 429 (quota esaurita) o fallimento, utilizza un modello locale
-    (distilgpt2) tramite transformers come backup gratuito e senza limiti.
+    In caso di errore (429, quota, rete, etc.) passa a llama.cpp (backup locale).
     """
     # --------------------------------------------------------------
     # 1. TENTATIVO CON GEMINI API
@@ -177,64 +235,19 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
                 return response.text.strip()
         except Exception as e:
             error_msg = str(e)
+            logger.warning(f"Gemini fallito: {error_msg}")
             if "429" in error_msg or "quota" in error_msg.lower():
-                logger.warning(f"Quota Gemini esaurita, passo al backup locale. Errore: {error_msg}")
-                st.info("⚠️ Limite di Gemini raggiunto. Attivazione AI locale (gratuita)...")
+                st.info("⚠️ Quota Gemini esaurita. Passo all'AI locale (gratuita)...")
             else:
-                logger.warning(f"Errore generico Gemini: {error_msg}, passo al backup.")
-                st.info("⚠️ Errore con Gemini. Attivazione AI locale...")
-
+                st.info(f"⚠️ Errore Gemini ({error_msg[:100]}). Passo all'AI locale...")
+    
     # --------------------------------------------------------------
-    # 2. FALLBACK: MODELLO LOCALE CON TRANSFORMERS
+    # 2. FALLBACK: LLAMA.CPP (BACKUP LOCALE)
     # --------------------------------------------------------------
-    if not TRANSFORMERS_AVAILABLE:
-        return (
-            "⚠️ **Backup locale non disponibile**\n\n"
-            "Le librerie necessarie (transformers, torch) non sono installate.\n"
-            "Per usare il backup, aggiungi `transformers>=4.46.0` e `torch>=2.5.0` al requirements.txt."
-        )
-
-    try:
-        # Inizializza il generatore di testo locale (una sola volta, in cache)
-        if "local_llm" not in st.session_state:
-            with st.spinner("Caricamento AI locale (prima volta, richiede ~10-15 secondi)..."):
-                # Usa un modello molto leggero: distilgpt2
-                st.session_state.local_llm = pipeline(
-                    "text-generation",
-                    model="distilgpt2",
-                    device_map="cpu",
-                    torch_dtype=torch.float32,
-                    max_new_tokens=300,
-                    do_sample=True,
-                    temperature=0.8,
-                    top_p=0.95,
-                    repetition_penalty=1.15
-                )
-        generator = st.session_state.local_llm
-        system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-        # Formatta il prompt per il modello locale
-        full_prompt = f"Sistema: {system_prompt}\nUtente: {user_prompt}\nAssistente:"
-        # Genera la risposta
-        result = generator(full_prompt, max_new_tokens=300)[0]['generated_text']
-        # Estrae solo la parte dopo "Assistente:"
-        if "Assistente:" in result:
-            ai_reply = result.split("Assistente:", 1)[-1].strip()
-        else:
-            ai_reply = result.replace(full_prompt, "").strip()
-        if not ai_reply:
-            ai_reply = "L'AI locale non ha generato una risposta valida. Riprova."
-        # Aggiunge una nota informativa
-        return ai_reply + "\n\n---\n*🧠 Risposta generata da AI locale (gratuita, senza limiti).*"
-    except Exception as e:
-        logger.error(f"Errore con il modello AI locale: {e}")
-        return (
-            "⚠️ **Errore nel backup locale**\n\n"
-            f"Dettaglio tecnico: {e}\n\n"
-            "Riprova più tardi o configura una chiave API Gemini funzionante."
-        )
+    return ask_llama_fallback(context, user_question, mode)
 
 # ==========================================================================
-# FUNZIONE PER IL CONTESTO DELLA SIDEBAR (VqAi)
+# CONTESTO PER LA SIDEBAR (VqAi)
 # ==========================================================================
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
     symbol_clean = (symbol or "").upper().strip()
