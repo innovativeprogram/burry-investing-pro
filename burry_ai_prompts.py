@@ -9,8 +9,19 @@ from typing import Any, Dict, List
 import streamlit as st
 import pandas as pd
 
+# Tentativo di import per il backup locale con transformers
+try:
+    import torch
+    from transformers import pipeline
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
 logger = logging.getLogger("BurryInvestingPro")
 
+# ==========================================================================
+# PROMPT DI SISTEMA (identico a prima)
+# ==========================================================================
 SYSTEM_PROMPT = dedent("""
 Sei l'assistente AI interno di V-Quant Pro, un'app Python/Streamlit di analisi finanziaria e portafoglio.
 
@@ -87,6 +98,9 @@ CONTESTO APP:
 {json_context}
 """).strip()
 
+# ==========================================================================
+# FUNZIONI DI SUPPORTO
+# ==========================================================================
 def safe_get_secret(key: str, default=None):
     env_val = os.getenv(key)
     if env_val:
@@ -132,39 +146,96 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
         'risk': risk or {},
     }
 
+# ==========================================================================
+# FUNZIONE PRINCIPALE CON BACKUP LOCALE (transformers)
+# ==========================================================================
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
+    """
+    Tenta prima con Google Gemini (se API key configurata).
+    In caso di errore 429 (quota esaurita) o fallimento, utilizza un modello locale
+    (distilgpt2) tramite transformers come backup gratuito e senza limiti.
+    """
+    # --------------------------------------------------------------
+    # 1. TENTATIVO CON GEMINI API
+    # --------------------------------------------------------------
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
-    if not api_key:
-        return (
-            "AI non configurata: imposta GEMINI_API_KEY nelle variabili d'ambiente o in st.secrets.\n\n"
-            f"Domanda ricevuta: {user_question}\n"
-            f"Ticker: {context.get('ticker', 'N/A')} | Modalità: {mode}"
-        )
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        response = model.generate_content(
-            full_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=min(max_tokens, 8192)
+    if api_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            response = model.generate_content(
+                full_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=min(max_tokens, 8192)
+                )
             )
-        )
-        return response.text.strip() if response.text else "Il modello non ha restituito testo utile."
-    except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg or "quota" in error_msg.lower():
-            return (
-                "⚠️ **Limite di utilizzo dell'API Gemini raggiunto (quota gratuita esaurita).**\n\n"
-                "Riprova più tardi o configura una chiave API a pagamento.\n\n"
-                f"Dettaglio: {error_msg[:200]}"
-            )
-        logger.warning(f"Errore AI Gemini: {e}")
-        return f"Errore AI: {e}"
+            if response.text and response.text.strip():
+                return response.text.strip()
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "quota" in error_msg.lower():
+                logger.warning(f"Quota Gemini esaurita, passo al backup locale. Errore: {error_msg}")
+                st.info("⚠️ Limite di Gemini raggiunto. Attivazione AI locale (gratuita)...")
+            else:
+                logger.warning(f"Errore generico Gemini: {error_msg}, passo al backup.")
+                st.info("⚠️ Errore con Gemini. Attivazione AI locale...")
 
+    # --------------------------------------------------------------
+    # 2. FALLBACK: MODELLO LOCALE CON TRANSFORMERS
+    # --------------------------------------------------------------
+    if not TRANSFORMERS_AVAILABLE:
+        return (
+            "⚠️ **Backup locale non disponibile**\n\n"
+            "Le librerie necessarie (transformers, torch) non sono installate.\n"
+            "Per usare il backup, aggiungi `transformers>=4.46.0` e `torch>=2.5.0` al requirements.txt."
+        )
+
+    try:
+        # Inizializza il generatore di testo locale (una sola volta, in cache)
+        if "local_llm" not in st.session_state:
+            with st.spinner("Caricamento AI locale (prima volta, richiede ~10-15 secondi)..."):
+                # Usa un modello molto leggero: distilgpt2
+                st.session_state.local_llm = pipeline(
+                    "text-generation",
+                    model="distilgpt2",
+                    device_map="cpu",
+                    torch_dtype=torch.float32,
+                    max_new_tokens=300,
+                    do_sample=True,
+                    temperature=0.8,
+                    top_p=0.95,
+                    repetition_penalty=1.15
+                )
+        generator = st.session_state.local_llm
+        system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
+        # Formatta il prompt per il modello locale
+        full_prompt = f"Sistema: {system_prompt}\nUtente: {user_prompt}\nAssistente:"
+        # Genera la risposta
+        result = generator(full_prompt, max_new_tokens=300)[0]['generated_text']
+        # Estrae solo la parte dopo "Assistente:"
+        if "Assistente:" in result:
+            ai_reply = result.split("Assistente:", 1)[-1].strip()
+        else:
+            ai_reply = result.replace(full_prompt, "").strip()
+        if not ai_reply:
+            ai_reply = "L'AI locale non ha generato una risposta valida. Riprova."
+        # Aggiunge una nota informativa
+        return ai_reply + "\n\n---\n*🧠 Risposta generata da AI locale (gratuita, senza limiti).*"
+    except Exception as e:
+        logger.error(f"Errore con il modello AI locale: {e}")
+        return (
+            "⚠️ **Errore nel backup locale**\n\n"
+            f"Dettaglio tecnico: {e}\n\n"
+            "Riprova più tardi o configura una chiave API Gemini funzionante."
+        )
+
+# ==========================================================================
+# FUNZIONE PER IL CONTESTO DELLA SIDEBAR (VqAi)
+# ==========================================================================
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
     symbol_clean = (symbol or "").upper().strip()
     context = {
