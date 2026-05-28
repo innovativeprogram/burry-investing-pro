@@ -155,6 +155,13 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
         )
         return response.text.strip() if response.text else "Il modello non ha restituito testo utile."
     except Exception as e:
+        error_msg = str(e)
+        if "429" in error_msg or "quota" in error_msg.lower():
+            return (
+                "⚠️ **Limite di utilizzo dell'API Gemini raggiunto (quota gratuita esaurita).**\n\n"
+                "Riprova più tardi o configura una chiave API a pagamento.\n\n"
+                f"Dettaglio: {error_msg[:200]}"
+            )
         logger.warning(f"Errore AI Gemini: {e}")
         return f"Errore AI: {e}"
 
