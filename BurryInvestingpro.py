@@ -14,7 +14,7 @@ import numpy as np
 
 try:
     import pandas_ta as ta
-except Exception:
+except ImportError:
     ta = None
 
 import plotly.graph_objects as go
@@ -50,10 +50,11 @@ else:
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-logger = logging.getLogger("BurryInvestingPro")
+logger = logging.getLogger("VQuantPro")
 
 DEFAULT_TAX_RATE = 0.26
-SAFE_INTEREST_COVERAGE = 100.0
+# Valore molto alto per interest coverage in assenza di debito
+SAFE_INTEREST_COVERAGE = 1e9
 TRADING_DAYS_YEAR = 252
 MAX_CSV_ROWS = 100
 MAX_WORKERS = 3
@@ -65,7 +66,7 @@ ALTMAN_SAFE_THRESHOLD = 1.81
 DEFAULT_BENCHMARK = "^GSPC"
 DEFAULT_SMART_WEIGHTS = {"F": 0.40, "T": 0.30, "Q": 0.30}
 TAX_LOSS_COMPENSATION_YEARS = 4
-BENEISH_THRESHOLD = -1.78
+BENEISH_THRESHOLD = -1.78  # ora utilizzato
 
 POLYGON_RATE_LIMIT_SEC = 12.0
 _last_polygon_call = 0.0
@@ -92,15 +93,16 @@ FOOTER_HTML = """
 # 0.A SAFE SECRETS / CONFIG ACCESS
 # ==========================================================================
 def safe_get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
-    env_val = os.getenv(key)
-    if env_val:
-        return env_val.strip()
+    # Priorità a st.secrets (tipico di Streamlit Cloud)
     try:
         if key in st.secrets:
             val = st.secrets[key]
             return str(val).strip() if val is not None else default
     except Exception:
         pass
+    env_val = os.getenv(key)
+    if env_val:
+        return env_val.strip()
     return default
 
 POLYGON_API_KEY = safe_get_secret("POLYGON_API_KEY", default=None)
@@ -109,12 +111,13 @@ POLYGON_BASE_URL = "https://api.polygon.io"
 # ==========================================================================
 # 0.B PRICE / FX / RISK-FREE PROVIDERS
 # ==========================================================================
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)  # ridotto a 5 minuti per prezzi più freschi
 def get_current_price_safe(ticker_symbol: str) -> float:
     symbol = (ticker_symbol or "").upper().strip()
     if not symbol:
         return 0.0
 
+    # Polygon solo se il simbolo non contiene punti (non supporta suffissi di borsa)
     if POLYGON_API_KEY and "." not in symbol and "-" not in symbol:
         try:
             throttle_polygon()
@@ -171,7 +174,8 @@ def get_fx_rate(from_currency: str, to_currency: str) -> float:
 
 
 @st.cache_data(ttl=RISK_FREE_TTL_SECONDS, show_spinner=False)
-def get_dynamic_risk_free_rate() -> float:
+def get_short_term_risk_free_rate() -> float:
+    """Tasso privo di rischio a breve termine (13 settimane)"""
     try:
         irx = yf.Ticker("^IRX").history(period="5d")
         if irx is not None and not irx.empty and 'Close' in irx.columns:
@@ -192,15 +196,18 @@ def get_active_risk_free_rate() -> float:
             return float(override)
     except Exception:
         pass
-    return get_dynamic_risk_free_rate()
+    return get_short_term_risk_free_rate()
 
 
 # ==========================================================================
-# 0.C POLYGON FUNDAMENTAL DATA PROVIDER
+# 0.C POLYGON FUNDAMENTAL DATA PROVIDER (MIGLIORATO)
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     if not POLYGON_API_KEY:
+        return None
+    # Polygon non supporta ticker con punto (suffissi borsa)
+    if '.' in symbol:
         return None
 
     logger.info(f"Tentativo Polygon per {symbol}")
@@ -233,12 +240,12 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
 
     throttle_polygon()
     try:
+        # Uso dell'endpoint stabile v2 (anziché vX)
         fin_resp = requests.get(
-            f"{POLYGON_BASE_URL}/vX/reference/financials",
+            f"{POLYGON_BASE_URL}/v2/reference/financials",
             params={
                 "ticker": symbol,
                 "timeframe": "annual",
-                "include_sources": "false",
                 "limit": 4,
                 "apiKey": POLYGON_API_KEY,
             },
@@ -309,7 +316,7 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 # ==========================================================================
-# 0.D PORTFOLIO FX & TAX
+# 0.D PORTFOLIO FX & TAX (CON GESTIONE NaN)
 # ==========================================================================
 def enrich_portfolio_with_fx(df_weights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
     if df_weights is None or df_weights.empty:
@@ -330,10 +337,12 @@ def calculate_tax_impact_df_base(df_weights_base: pd.DataFrame, tax_rate: float 
     if df_weights_base is None or df_weights_base.empty:
         return pd.DataFrame()
     df_tax = df_weights_base.copy()
+    # Gestione NaN in P&L Base
+    pl_base = df_tax["P&L Base"].fillna(0.0).astype(float)
     df_tax["Aliquota Fiscale %"] = tax_rate * 100.0
-    df_tax["Plus/Minus Lorda Base"] = df_tax["P&L Base"].astype(float)
-    df_tax["Imposta Teorica Base"] = np.where(df_tax["Plus/Minus Lorda Base"] > 0, df_tax["Plus/Minus Lorda Base"] * tax_rate, 0.0)
-    df_tax["Plus/Minus Netta Base"] = df_tax["Plus/Minus Lorda Base"] - df_tax["Imposta Teorica Base"]
+    df_tax["Plus/Minus Lorda Base"] = pl_base
+    df_tax["Imposta Teorica Base"] = np.where(pl_base > 0, pl_base * tax_rate, 0.0)
+    df_tax["Plus/Minus Netta Base"] = pl_base - df_tax["Imposta Teorica Base"]
     df_tax["Valore Netto Post Imposta Base"] = df_tax["Valore di Mercato Base"] - df_tax["Imposta Teorica Base"]
     df_tax["Rendimento Netto Base %"] = np.where(df_tax["Importo Investito Base"] > 0, df_tax["Plus/Minus Netta Base"] / df_tax["Importo Investito Base"] * 100.0, 0.0)
     return df_tax
@@ -343,7 +352,7 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
     if df_weights_base is None or df_weights_base.empty:
         return pd.DataFrame(), {}
     df = df_weights_base.copy()
-    pl_lorda = df["P&L Base"].astype(float)
+    pl_lorda = df["P&L Base"].fillna(0.0).astype(float)
     gains = pl_lorda.clip(lower=0).sum()
     losses = (-pl_lorda.clip(upper=0)).sum()
     compensable = min(gains, losses)
@@ -369,7 +378,7 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide")
 
 # ==========================================================================
-# 0.E AUTH SUPABASE
+# 0.E AUTH SUPABASE (SENZA CAMBIAMENTI SOSTANZIALI)
 # ==========================================================================
 def get_app_base_url() -> str:
     candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
@@ -652,6 +661,7 @@ class FundamentalMetrics:
 def sanitize_ticker(ticker: str) -> str:
     clean = str(ticker or '').strip().upper()
     if not clean: raise ValueError('Ticker vuoto')
+    # Permette lettere, numeri, punti, trattini, uguale, accento circonflesso
     if not re.match(r'^[A-Z0-9\-\.=^]+$', clean): raise ValueError(f'Ticker non valido: {clean}')
     return clean
 
@@ -676,10 +686,9 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
 
 
 # ==========================================================================
-# 2.A RISOLUZIONE ADATTIVA DEL TICKER (A CASCATA SUFFISSI)
+# 2.A RISOLUZIONE ADATTIVA DEL TICKER (MIGLIORATA)
 # ==========================================================================
 def _test_ticker_on_yfinance(symbol: str) -> bool:
-    """Verifica se il ticker esiste su Yahoo Finance."""
     try:
         t = yf.Ticker(symbol)
         info = t.info
@@ -690,7 +699,9 @@ def _test_ticker_on_yfinance(symbol: str) -> bool:
         return False
 
 def _test_ticker_on_polygon(symbol: str) -> bool:
-    """Verifica se il ticker esiste su Polygon."""
+    # Polygon non supporta ticker con punto (suffissi borsa)
+    if '.' in symbol:
+        return False
     if not POLYGON_API_KEY:
         return False
     try:
@@ -702,40 +713,27 @@ def _test_ticker_on_polygon(symbol: str) -> bool:
         return False
 
 def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> str:
-    """
-    Risolve automaticamente il ticker testando una lista di suffissi comuni.
-    Cerca prima su yfinance, poi su Polygon.
-    La cache in sessione evita tentativi ripetuti.
-    """
     symbol_clean = symbol.upper().strip()
     if not symbol_clean:
         return symbol_clean
 
-    # Cache in sessione
     if 'ticker_resolution_cache' not in st.session_state:
         st.session_state.ticker_resolution_cache = {}
     cache = st.session_state.ticker_resolution_cache
     if not force_refresh and symbol_clean in cache:
         return cache[symbol_clean]
 
-    # Lista dei suffissi da testare (in ordine di probabilità)
     suffixes = ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS',
                 '.SW', '.MC', '.BR', '.MX', '.SA', '.BO', '.KS', '.SS', '.SZ',
-                '-USD', '-EUR']  # per crypto
-    # Per ticker che già hanno un suffisso o sono speciali
-    if any(symbol_clean.endswith(suf) for suf in ['.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS', '.SW', '.MC', '.BR', '.MX', '.SA', '.BO', '.KS', '.SS', '.SZ', '-USD', '-EUR']):
-        # Se ha già un suffisso, usalo direttamente
-        return symbol_clean
-
-    # Tentativi
+                '-USD', '-EUR']
+    # Se ha già un suffisso, usalo direttamente (ma testiamo comunque)
     for suffix in suffixes:
         candidate = symbol_clean + suffix
-        # Test su yfinance
         if _test_ticker_on_yfinance(candidate):
             logger.info(f"Risolto {symbol_clean} -> {candidate} via yfinance")
             cache[symbol_clean] = candidate
             return candidate
-        # Test su Polygon (solo per suffissi vuoti o .XX)
+        # Test Polygon solo per suffissi che non contengono punto (già controllato in _test_ticker_on_polygon)
         if suffix in ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS']:
             if _test_ticker_on_polygon(candidate):
                 logger.info(f"Risolto {symbol_clean} -> {candidate} via Polygon")
@@ -752,10 +750,11 @@ def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> st
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
-    # Prima risolvi il ticker
     resolved = auto_resolve_ticker_adaptive(symbol)
-    # 1. Polygon
-    poly_data = get_polygon_fundamentals(resolved)
+    # 1. Polygon (solo se il simbolo risolto non ha punti)
+    poly_data = None
+    if '.' not in resolved:
+        poly_data = get_polygon_fundamentals(resolved)
     if poly_data is not None:
         if (not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty):
             return poly_data
@@ -884,14 +883,20 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         total_assets = get_first(bs, 'Total Assets', 0.0)
         cur_assets = get_first(bs, 'Current Assets', 0.0)
         cur_liab = get_first(bs, 'Current Liabilities', 0.0)
-        cash = safe_float(info.get('totalCash', 0.0), 0.0)
+        # Tentativo di prendere cash dal bilancio, altrimenti da info
+        cash = get_first(bs, 'Cash And Cash Equivalents', 0.0)
+        if cash == 0.0:
+            cash = safe_float(info.get('totalCash', 0.0), 0.0)
         total_debt = get_first(bs, 'Total Debt', 0.0)
         equity = get_first(bs, 'Stockholders Equity', 1.0)
         revenue = safe_float(info.get('totalRevenue', 0.0), 0.0)
         cogs = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[0], 0.0) if 'Cost Of Goods Sold' in fin.index else 0.0
         net_income = safe_float(info.get('netIncomeToCommon', 0.0), 0.0)
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
-        depreciation = safe_float(info.get('depreciationExpense', 0.0), 0.0)
+        # Depreciation: prima dal CF, poi da info
+        depreciation = get_first(cf, 'Depreciation', 0.0)
+        if depreciation == 0.0:
+            depreciation = safe_float(info.get('depreciationExpense', 0.0), 0.0)
         total_assets_prev = safe_float(bs.loc['Total Assets'].iloc[1], total_assets)
         cur_assets_prev = safe_float(bs.loc['Current Assets'].iloc[1], cur_assets)
         cur_liab_prev = safe_float(bs.loc['Current Liabilities'].iloc[1], cur_liab)
@@ -902,7 +907,7 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         cogs_prev = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[1], cogs) if 'Cost Of Goods Sold' in fin.index else cogs
         net_income_prev = safe_float(fin.loc['Net Income'].iloc[1] if 'Net Income' in fin.index else net_income, net_income)
         op_cash_prev = safe_float(cf.loc['Operating Cash Flow'].iloc[1] if 'Operating Cash Flow' in cf.index else op_cash, op_cash)
-        depreciation_prev = safe_float(info.get('depreciationExpense', depreciation), depreciation)
+        depreciation_prev = safe_float(cf.loc['Depreciation'].iloc[1] if 'Depreciation' in cf.index else depreciation, depreciation)
         def safe_ratio(num, den, default=0.0):
             return num/den if den != 0 else default
         reliable = True
@@ -970,7 +975,10 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             peg = float(pe / (growth * 100))
             peg_src = "Estimated"
         int_exp = get_first(fin, 'Interest Expense', 0.0)
-        int_cov = float(ebit / abs(int_exp)) if int_exp != 0 else SAFE_INTEREST_COVERAGE
+        if int_exp == 0.0:
+            interest_coverage = SAFE_INTEREST_COVERAGE
+        else:
+            interest_coverage = float(ebit / abs(int_exp)) if ebit != 0 else 0.0
         total_revenue = info.get('totalRevenue')
         net_income = info.get('netIncomeToCommon')
         revenue_growth = info.get('revenueGrowth')
@@ -999,7 +1007,7 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             fcf=fcf, roic=roic, croic=croic,
             peg_ratio=safe_float(peg, None) if peg is not None else None, peg_source=peg_src,
             pe_ratio=safe_float(pe, None) if pe is not None else None,
-            interest_coverage=int_cov, debt_to_equity=debt_to_equity,
+            interest_coverage=interest_coverage, debt_to_equity=debt_to_equity,
             revenue_growth=safe_float(revenue_growth, None) if revenue_growth is not None else None,
             net_margin=net_margin, fcf_margin=fcf_margin,
             fcf_yield=fcf_yield, ev_to_ebit=ev_to_ebit, ev_to_ebitda=ev_to_ebitda,
@@ -1037,12 +1045,12 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
 
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA
+# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA)
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    # 1. Polygon
-    if POLYGON_API_KEY:
+    # Polygon solo se non ha punti
+    if POLYGON_API_KEY and '.' not in symbol:
         try:
             throttle_polygon()
             today = pd.Timestamp.now(tz='UTC')
@@ -1060,7 +1068,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     if len(df) >= 60: return df
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {symbol}: {e}")
-    # 2. yfinance
+    # yfinance
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
         if df is not None and not df.empty:
@@ -1069,7 +1077,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
             if len(df) >= 60: return df
     except Exception as e:
         logger.info(f"yfinance tecnico fallito per {symbol}: {e}")
-    # 3. yahooquery
+    # yahooquery
     try:
         t = YQ_Ticker(symbol)
         df_yq = t.history(period="2y", interval="1d")
@@ -1089,6 +1097,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = pd.to_numeric(data['Close'], errors='coerce')
     high = pd.to_numeric(data['High'], errors='coerce')
     low = pd.to_numeric(data['Low'], errors='coerce')
+    # Calcoli base sempre eseguiti
     data['SMA_50'] = close.rolling(50, min_periods=50).mean()
     data['SMA_200'] = close.rolling(200, min_periods=200).mean()
     delta = close.diff()
@@ -1102,7 +1111,23 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     std20 = close.rolling(20, min_periods=20).std(ddof=0)
     data['BB_Lower'] = ma20 - 2 * std20
     data['BB_Upper'] = ma20 + 2 * std20
-    macd_ok = False
+    # MACD manuale
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    data['MACD'] = ema12 - ema26
+    data['MACD_signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    # ADX manuale
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+    plus_dm = high.diff()
+    minus_dm = low.diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm > 0] = 0
+    plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
+    minus_di = 100 * (minus_dm.abs().rolling(14).mean() / atr)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    data['ADX'] = dx.rolling(14).mean()
+    # Se pandas_ta è disponibile, sovrascriviamo (opzionale)
     if ta is not None:
         try:
             data['SMA_50'] = ta.sma(close, length=50)
@@ -1120,18 +1145,13 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
                 s_col = macd.filter(like='MACDs_')
                 if not m_col.empty:
                     data['MACD'] = m_col.iloc[:, 0]
-                    macd_ok = True
                 if not s_col.empty: data['MACD_signal'] = s_col.iloc[:, 0]
             adx_df = ta.adx(high=high, low=low, close=close, length=14)
             if adx_df is not None:
                 adx_col = adx_df.filter(like='ADX_')
                 if not adx_col.empty: data['ADX'] = adx_col.iloc[:, 0]
-        except Exception: pass
-    if not macd_ok:
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        data['MACD'] = ema12 - ema26
-        data['MACD_signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+        except Exception:
+            pass
     return data
 
 def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[int, List[str]]:
@@ -1162,16 +1182,36 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
 
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE
+# 5. METRICHE QUANTITATIVE AVANZATE (CORRETTE)
 # ==========================================================================
-def omega_ratio(returns: pd.Series, rf_annual: float = 0.04, threshold: float = 0.0) -> float:
-    if returns.empty or len(returns) < 2: return np.nan
-    rf_daily = rf_annual / TRADING_DAYS_YEAR
-    excess = returns - rf_daily - threshold
+def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
+    """Rapporto tra guadagni e perdite sopra/sotto una soglia (non Omega ratio puro)."""
+    if returns.empty or len(returns) < 2:
+        return np.nan
+    excess = returns - threshold
     gains = excess[excess > 0].sum()
     losses = -excess[excess < 0].sum()
-    if losses == 0: return np.inf if gains > 0 else np.nan
+    if losses == 0:
+        return np.inf if gains > 0 else np.nan
     return gains / losses
+
+def omega_ratio(returns: pd.Series, rf_annual: float = 0.04, threshold: float = 0.0) -> float:
+    """Calcola l'Omega ratio corretto: ∫(1-F(x))dx / ∫F(x)dx."""
+    if returns.empty or len(returns) < 2:
+        return np.nan
+    # Soglia di rendimento minimo (spesso 0 o risk-free)
+    sorted_returns = np.sort(returns)
+    # Approssimazione: integrale empirico
+    above = returns[returns > threshold]
+    below = returns[returns <= threshold]
+    if len(below) == 0:
+        return np.inf
+    # Integrale della coda superiore (semplificato)
+    gain_integral = (above - threshold).sum() if len(above) > 0 else 0.0
+    loss_integral = (threshold - below).sum()
+    if loss_integral == 0:
+        return np.inf
+    return gain_integral / loss_integral
 
 def jensens_alpha(port_ret: pd.Series, bench_ret: pd.Series, rf_annual: float = 0.04) -> float:
     if len(port_ret) < 30 or len(bench_ret) < 30: return np.nan
@@ -1208,7 +1248,7 @@ def fit_garch(returns: pd.Series) -> Optional[Dict[str, float]]:
     if len(returns) < 100: return None
     try:
         returns_clean = returns.dropna() * 100
-        model = arch_model(returns_clean, vol='Garch', p=1, q=1, dist='normal')
+        model = arch_model(returns_clean, vol='Garch', p=1, q=1, dist='t')  # uso t-Student per code pesanti
         res = model.fit(update_freq=0, disp='off')
         forecast = res.forecast(horizon=1)
         cond_vol = np.sqrt(forecast.variance.iloc[-1, 0]) / 100.0
@@ -1292,7 +1332,8 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     ann_excess_ret = (returns.mean() - rf_daily) * TRADING_DAYS_YEAR
     sortino = ann_excess_ret / downside_dev if downside_dev and downside_dev > 0 else np.nan
     calmar = cagr / abs(max_dd) if max_dd and max_dd < 0 and not np.isnan(cagr) else np.nan
-    omega = omega_ratio(returns, rf_annual=get_active_risk_free_rate())
+    # Omega ratio corretto
+    omega = omega_ratio(returns, rf_annual=get_active_risk_free_rate(), threshold=0.0)
     ulcer = ulcer_index(returns)
     garch = fit_garch(returns)
     return {"Max Drawdown": float(max_dd), "CAGR": float(cagr) if not np.isnan(cagr) else np.nan, "VaR_95": float(var_95), "CVaR_95": float(cvar_95) if not np.isnan(cvar_95) else np.nan, "Skew": float(skew), "Kurt": float(kurt), "Sortino": float(sortino) if not np.isnan(sortino) else np.nan, "Calmar": float(calmar) if not np.isnan(calmar) else np.nan, "Downside Deviation": float(downside_dev) if not np.isnan(downside_dev) else np.nan, "Omega Ratio": omega, "Ulcer Index": ulcer, "GARCH Vol (next)": garch['garch_vol'] if garch else np.nan}
@@ -1401,6 +1442,7 @@ def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], r
     return {"SmartScore": smart, "FundamentalScore": f_score, "TechnicalScore": t_score, "QuantRiskScore": q_score}
 
 def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], macro: Dict[str, float]) -> Dict[str, Any]:
+    # Pesi per il verdetto unificato (leggermente diverso dallo smart score)
     weights = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
     thresholds = {"roic_min": 0.10, "croic_min": 0.05, "fcf_margin_min": 0.08, "net_margin_min": 0.10, "de_max": 1.0, "interest_cov_min": 3.0, "fscore_min": 4, "mscore_max": -1.78, "altman_safe": ALTMAN_SAFE_THRESHOLD, "peg_max": 1.5, "ev_ebit_max": 15, "fcf_yield_min": 0.04, "pb_max": 3.0}
     fqs = 0.0
@@ -1611,7 +1653,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1624,7 +1666,7 @@ def inject_pwa_support():
       const appleIcon = document.createElement('link'); appleIcon.rel = 'apple-touch-icon'; appleIcon.href = 'data:image/png;base64,' + base64Png; document.head.appendChild(appleIcon);
       const meta1 = document.createElement('meta'); meta1.name = 'apple-mobile-web-app-capable'; meta1.content = 'yes'; document.head.appendChild(meta1);
       const meta2 = document.createElement('meta'); meta2.name = 'apple-mobile-web-app-status-bar-style'; meta2.content = 'black-translucent'; document.head.appendChild(meta2);
-      const meta3 = document.createElement('meta'); meta3.name = 'apple-mobile-web-app-title'; meta3.content = 'BurryPro'; document.head.appendChild(meta3);
+      const meta3 = document.createElement('meta'); meta3.name = 'apple-mobile-web-app-title'; meta3.content = 'VQuantPro'; document.head.appendChild(meta3);
       const meta4 = document.createElement('meta'); meta4.name = 'theme-color'; meta4.content = '#0e1117'; document.head.appendChild(meta4);
     })();
     </script>
@@ -1713,7 +1755,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
 
 
 # ==========================================================================
-# 6. UI: SIDEBAR (senza selezione borsa, solo custom)
+# 6. UI: SIDEBAR (SENZA SELEZIONE BORSA, SOLO CUSTOM)
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -1872,12 +1914,11 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
 
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB
+# 7. FUNZIONI DI RENDERING DEI TAB (INVARIATE)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
         st.info("💡 **Tabella riassuntiva dei fondamentali per tutti i ticker analizzati**")
-        # Mostra tabella con tutte le metriche
         df_display = batch_results.drop(columns=['_raw_data'], errors='ignore')
         st.dataframe(df_display, width='stretch', use_container_width=True)
     elif row is not None:
@@ -1910,7 +1951,6 @@ def render_tecnico_tab(row, ticker):
         fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, width='stretch')
         
-        # Rolling volatility e Sharpe
         returns = df_calc['Close'].pct_change().dropna()
         rolling_vol = returns.rolling(21).std() * np.sqrt(252)
         rolling_sharpe = (returns.rolling(21).mean() / returns.rolling(21).std()) * np.sqrt(252)
@@ -2297,13 +2337,22 @@ def main():
                 if 'Ticker' not in csv_df.columns:
                     st.error('Il CSV deve contenere una colonna Ticker.')
                 else:
-                    targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
+                    # Pulizia e risoluzione ticker
+                    raw_targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
+                    targets = []
+                    for t in raw_targets:
+                        try:
+                            # Sanitizza e risolve
+                            clean_t = sanitize_ticker(t)
+                            resolved = auto_resolve_ticker_adaptive(clean_t)
+                            targets.append(resolved)
+                        except Exception as e:
+                            st.session_state.analysis_errors.append(f'{t}: {e}')
         if targets:
             normalized_targets = []
             analysis_errors = []
             for t in targets:
                 try:
-                    # Risoluzione automatica ticker (adattiva)
                     resolved = auto_resolve_ticker_adaptive(t)
                     normalized_targets.append(resolved)
                 except Exception as e:
