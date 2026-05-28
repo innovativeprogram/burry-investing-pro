@@ -12,7 +12,5 @@ requests>=2.31.0
 pandas-datareader>=0.10.0
 arch>=6.0.0
 matplotlib>=3.5.0
-# Backup locale AI
-transformers>=4.46.0
-torch>=2.5.0
-accelerate>=0.30.0   # opzionale ma consigliato per performance
+llama-cpp-python>=0.2.0
+huggingface-hub>=0.20.0
