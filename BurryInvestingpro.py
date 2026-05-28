@@ -434,7 +434,6 @@ def load_user_portfolio() -> None:
     except Exception as e:
         logger.warning(f'Load portfolio skipped: {e}')
         return
-    # Pulisci prima di ricaricare
     st.session_state.portfolio_tickers = []
     st.session_state.holdings = {}
     st.session_state.holdings_quantity = {}
@@ -682,7 +681,7 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 2.A RISOLUZIONE AUTOMATICA TICKER (NUOVA)
+# 2.A RISOLUZIONE AUTOMATICA TICKER
 # ==========================================================================
 def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
     symbol_clean = symbol.upper().strip()
@@ -704,11 +703,9 @@ def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
-    # Polygon
     poly_data = get_polygon_fundamentals(symbol)
     if poly_data is not None and ((not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty)):
         return poly_data
-    # yfinance
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
@@ -717,7 +714,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": symbol}
     except Exception as e:
         logger.info(f"yfinance fallito per {symbol}: {e}")
-    # yahooquery
     try:
         yq = YQ_Ticker(symbol)
         summary = yq.summary_detail.get(symbol, {}) if isinstance(yq.summary_detail, dict) else {}
@@ -987,7 +983,6 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    # Polygon
     if POLYGON_API_KEY:
         try:
             throttle_polygon()
@@ -1006,7 +1001,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     if len(df) >= 60: return df
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {symbol}: {e}")
-    # yfinance
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
         if df is not None and not df.empty:
@@ -1015,7 +1009,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
             if len(df) >= 60: return df
     except Exception as e:
         logger.info(f"yfinance tecnico fallito per {symbol}: {e}")
-    # yahooquery
     try:
         t = YQ_Ticker(symbol)
         df_yq = t.history(period="2y", interval="1d")
@@ -1414,7 +1407,6 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     elif max_dd < -0.30: qrs -= 10
     qrs = np.clip(qrs, 0, 100)
     details.append(f"📉 Rischio Quant (Sharpe {sharpe:.2f}, MaxDD {max_dd*100:.1f}%)")
-    # Macro
     treasury = macro.get("treasury_10y", np.nan)
     if not np.isnan(treasury): details.append(f"🏦 Treasury 10Y: {treasury*100:.2f}%")
     cpi = macro.get("cpi_yoy", np.nan)
@@ -1658,7 +1650,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR (con tutte le sezioni)
+# 6. UI: SIDEBAR
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -1721,7 +1713,6 @@ def render_contatti() -> None:
 
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
-    
     st.sidebar.header("1. Selezione Asset")
     input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
     file = None
@@ -1730,16 +1721,13 @@ def setup_sidebar() -> Dict[str, Any]:
         file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
     else:
         manual = st.sidebar.text_input("Ticker", value="").upper().strip()
-    
     st.sidebar.header("2. Mercato")
     market = st.sidebar.selectbox("Borsa", ["USA", "Italia (.MI)", "Germania (.DE)", "Francia (.PA)", "GB (.L)", "Spagna (.MC)", "Svizzera (.SW)", "Canada (.TO)", "Giappone (.T)", "Hong Kong (.HK)", "Australia (.AX)", "India (.NS)", "Crypto", "Custom"])
     suffix_lookup = {"Italia": ".MI", "Germania": ".DE", "Francia": ".PA", "GB": ".L", "Spagna": ".MC", "Svizzera": ".SW", "Canada": ".TO", "Giappone": ".T", "Hong Kong": ".HK", "Australia": ".AX", "India": ".NS"}
     suffix = ""
     for k, s in suffix_lookup.items():
         if k in market: suffix = s; break
-    
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
-    
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 📑 Navigazione")
     tab_selection = st.sidebar.selectbox(
@@ -1748,7 +1736,6 @@ def setup_sidebar() -> Dict[str, Any]:
         key="nav_select"
     )
     st.sidebar.caption("ℹ️ Il ticker verrà automaticamente adattato al suffisso corretto in base alla fonte dati utilizzata.")
-    
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
@@ -1768,14 +1755,11 @@ def setup_sidebar() -> Dict[str, Any]:
                     reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
                 st.markdown(reply)
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
-    
-    # Sezioni informative ripristinate
     render_apk_download_box()
     render_chi_siamo()
     render_privacy()
     render_sostieni()
     render_contatti()
-    
     return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
 
 def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
@@ -2194,7 +2178,12 @@ def render_portafoglio_tab(ui):
                     st.plotly_chart(fig_p, width='stretch')
                     corr = df_rets.corr()
                     st.markdown("#### Correlazioni tra titoli in portafoglio")
-                    st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+                    try:
+                        import matplotlib
+                        st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+                    except ImportError:
+                        st.dataframe(corr)
+                        st.caption("Nota: installa matplotlib per visualizzare la matrice con gradienti di colore.")
     else:
         st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
     st.markdown("---")
@@ -2210,14 +2199,11 @@ def main():
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
     ui = setup_sidebar()
-    
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
         st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
-    
-    # Avvia analisi
     if ui["btn"]:
         targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2249,12 +2235,9 @@ def main():
                 st.session_state.selected_ticker = results[0]["Ticker"]
             else:
                 st.session_state.selected_ticker = None
-    
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
-    
-    # Analisi rapida
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
         batch_options = []
@@ -2280,12 +2263,9 @@ def main():
         if manual_quick:
             st.session_state.selected_ticker = None
             st.session_state.standalone_ticker_input = manual_quick
-    
     ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
     if not ticker:
         st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
-    
-    # Mostra tab selezionato
     if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
     elif ui["tab_selection"] == "📉 Tecnico":
