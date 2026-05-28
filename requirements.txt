@@ -12,5 +12,5 @@ requests>=2.31.0
 pandas-datareader>=0.10.0
 arch>=6.0.0
 matplotlib>=3.5.0
-llama-cpp-python>=0.2.0
+llama-cpp-python
 huggingface-hub>=0.20.0
