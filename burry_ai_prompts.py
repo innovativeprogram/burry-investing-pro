@@ -148,7 +148,7 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
     }
 
 # ==========================================================================
-# MOTORE LOCALE (SmolLM2)
+# MODELLO LOCALE (SmolLM2-135M)
 # ==========================================================================
 @st.cache_resource(show_spinner=False)
 def load_local_model():
