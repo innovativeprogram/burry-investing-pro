@@ -1,17 +1,22 @@
 import json
 import logging
 import os
-import time
 from textwrap import dedent
 from typing import Any, Dict, List
 
 import streamlit as st
 import pandas as pd
 
-# Tentativo di import per llama-cpp-python
+# Tentativi di import per i due motori
 try:
-    from llama_cpp import Llama
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+try:
     from huggingface_hub import hf_hub_download
+    from llama_cpp import Llama
     LLAMA_AVAILABLE = True
 except ImportError:
     LLAMA_AVAILABLE = False
@@ -143,46 +148,38 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
     }
 
 # ==========================================================================
-# BACKUP LOCALE CON LLAMA.CPP
+# MOTORE LOCALE (SmolLM2)
 # ==========================================================================
-def _get_llama_model():
-    """Scarica e carica il modello GGUF leggero (SmolLM2 135M)"""
+@st.cache_resource(show_spinner=False)
+def load_local_model():
+    """Scarica e carica il modello SmolLM2-135M in formato GGUF."""
     if not LLAMA_AVAILABLE:
         return None
     try:
         model_filename = "smollm2-135m-instruct-q8_0.gguf"
-        model_path = hf_hub_download(
-            repo_id="HackNetAyush/smollm2-135M-instruct-gguf-q8",
-            filename=model_filename,
-            local_dir=os.getenv("HF_HOME", "./models")
-        )
+        repo_id = "HackNetAyush/smollm2-135M-instruct-gguf-q8"
+        model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
         return Llama(
             model_path=model_path,
-            n_ctx=2048,
+            n_ctx=1024,
             n_threads=2,
             n_batch=512,
             verbose=False
         )
     except Exception as e:
-        logger.error(f"Errore caricamento modello llama.cpp: {e}")
+        logger.error(f"Errore caricamento modello locale: {e}")
         return None
 
-def ask_llama_fallback(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
-    """
-    Chiamata al modello locale tramite llama.cpp.
-    Viene usata solo se Gemini fallisce.
-    """
+def ask_local_fallback(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
+    """Usa SmolLM2 locale come fallback quando Gemini fallisce."""
     if not LLAMA_AVAILABLE:
-        return "⚠️ **Backup locale non disponibile**: libreria `llama-cpp-python` non installata."
+        return "⚠️ **Backup locale non disponibile**: librerie mancanti."
     
-    # Inizializza il modello (una volta sola, in cache)
-    if "llama_model" not in st.session_state:
-        with st.spinner("Caricamento AI locale (primo avvio, ~10 secondi)..."):
-            st.session_state.llama_model = _get_llama_model()
+    with st.spinner("Caricamento AI locale (primo avvio, pochi secondi)..."):
+        llm = load_local_model()
     
-    llm = st.session_state.llama_model
     if llm is None:
-        return "⚠️ **Backup locale non disponibile**: impossibile caricare il modello."
+        return "⚠️ **Impossibile caricare il modello locale**. Riprova."
     
     system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -199,27 +196,26 @@ def ask_llama_fallback(context: Dict[str, Any], user_question: str, mode: str = 
         )
         answer = response['choices'][0]['message']['content'].strip()
         if not answer:
-            answer = "Il modello locale non ha generato una risposta valida."
-        return answer + "\n\n---\n*🧠 Risposta generata da AI locale (gratuita, senza limiti).*"
+            answer = "Il modello non ha generato una risposta valida."
+        return answer + "\n\n---\n*🧠 Risposta generata da AI locale (SmolLM2-135M).*"
     except Exception as e:
-        logger.error(f"Errore durante inferenza llama.cpp: {e}")
-        return f"⚠️ **Errore nel backup locale**: {e}"
+        logger.error(f"Errore inferenza locale: {e}")
+        return f"⚠️ **Errore nell'AI locale**: {e}"
 
 # ==========================================================================
-# FUNZIONE PRINCIPALE CON FALLBACK
+# FUNZIONE PRINCIPALE A CASCATA
 # ==========================================================================
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
     """
-    Tenta prima con Google Gemini (se API key configurata).
-    In caso di errore (429, quota, rete, etc.) passa a llama.cpp (backup locale).
+    Tenta prima con Google Gemini. Se fallisce (qualsiasi errore), usa SmolLM2 locale.
+    Se Gemini non è configurato, usa direttamente il modello locale.
     """
     # --------------------------------------------------------------
-    # 1. TENTATIVO CON GEMINI API
+    # 1. TENTATIVO CON GEMINI (se disponibile e configurato)
     # --------------------------------------------------------------
     api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
-    if api_key:
+    if GEMINI_AVAILABLE and api_key:
         try:
-            import google.generativeai as genai
             genai.configure(api_key=api_key)
             system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -237,14 +233,14 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
             error_msg = str(e)
             logger.warning(f"Gemini fallito: {error_msg}")
             if "429" in error_msg or "quota" in error_msg.lower():
-                st.info("⚠️ Quota Gemini esaurita. Passo all'AI locale (gratuita)...")
+                st.info("⚠️ Quota Gemini esaurita. Attivazione AI locale...")
             else:
-                st.info(f"⚠️ Errore Gemini ({error_msg[:100]}). Passo all'AI locale...")
+                st.info(f"⚠️ Errore Gemini ({error_msg[:100]}). Attivazione AI locale...")
     
     # --------------------------------------------------------------
-    # 2. FALLBACK: LLAMA.CPP (BACKUP LOCALE)
+    # 2. FALLBACK: MODELLO LOCALE (SmolLM2)
     # --------------------------------------------------------------
-    return ask_llama_fallback(context, user_question, mode)
+    return ask_local_fallback(context, user_question, mode)
 
 # ==========================================================================
 # CONTESTO PER LA SIDEBAR (VqAi)
