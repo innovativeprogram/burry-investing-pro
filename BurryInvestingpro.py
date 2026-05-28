@@ -309,7 +309,7 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 # ==========================================================================
-# 0.D PORTFOLIO FX & TAX (originali integrate)
+# 0.D PORTFOLIO FX & TAX
 # ==========================================================================
 def enrich_portfolio_with_fx(df_weights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
     if df_weights is None or df_weights.empty:
@@ -434,6 +434,7 @@ def load_user_portfolio() -> None:
     except Exception as e:
         logger.warning(f'Load portfolio skipped: {e}')
         return
+    # Pulisci prima di ricaricare
     st.session_state.portfolio_tickers = []
     st.session_state.holdings = {}
     st.session_state.holdings_quantity = {}
@@ -684,16 +685,10 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
 # 2.A RISOLUZIONE AUTOMATICA TICKER (NUOVA)
 # ==========================================================================
 def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
-    """
-    Converte ticker semplice (es. ENI) in formato completo (ENI.MI)
-    usando mappa predefinita. Restituisce (ticker_risolto, exchange)
-    """
     symbol_clean = symbol.upper().strip()
-    # Se ha già suffisso, lascia invariato
     suffixes = ('.MI', '.DE', '.PA', '.L', '.MC', '.SW', '.TO', '.T', '.HK', '.AX', '.NS')
     if any(symbol_clean.endswith(suf) for suf in suffixes):
         return symbol_clean, None
-    # Mappa per ticker italiani noti
     it_map = {
         'ENI': 'ENI.MI', 'STLAM': 'STLAM.MI', 'STLAP': 'STLAP.MI', 'STM': 'STM.MI',
         'ISP': 'ISP.MI', 'UCG': 'UCG.MI', 'TIT': 'TIT.MI', 'RACE': 'RACE.MI',
@@ -705,18 +700,15 @@ def auto_resolve_ticker(symbol: str) -> Tuple[str, Optional[str]]:
     return symbol_clean, None
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK (POLYGON PRIMARIO)
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON FALLBACK
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
-    # 1. Polygon
+    # Polygon
     poly_data = get_polygon_fundamentals(symbol)
-    if poly_data is not None:
-        if (not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty):
-            return poly_data
-        else:
-            logger.info(f"Polygon insufficiente per {symbol}, provo yfinance")
-    # 2. yfinance
+    if poly_data is not None and ((not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty)):
+        return poly_data
+    # yfinance
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
@@ -725,7 +717,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": symbol}
     except Exception as e:
         logger.info(f"yfinance fallito per {symbol}: {e}")
-    # 3. YahooQuery (codice invariato)
+    # yahooquery
     try:
         yq = YQ_Ticker(symbol)
         summary = yq.summary_detail.get(symbol, {}) if isinstance(yq.summary_detail, dict) else {}
@@ -764,6 +756,14 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Tutte le API hanno fallito per fondamentali di {symbol}: {e}")
         return None
+
+def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
+    if df is None or df.empty or idx not in df.index or df.shape[1] == 0:
+        return default
+    try:
+        return safe_float(df.loc[idx].iloc[0], default)
+    except Exception:
+        return default
 
 def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
     info = raw_data.get('info', {})
@@ -888,11 +888,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         fin = raw_data["financials"]
         bs = raw_data["balance_sheet"]
         cf = raw_data["cashflow"]
-        def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
-            if df is None or df.empty or idx not in df.index: return default
-            if df.shape[1] == 0: return default
-            try: return safe_float(df.loc[idx].iloc[0], default)
-            except Exception: return default
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
         fcf = float(op_cash - cap_ex)
@@ -975,8 +970,8 @@ def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]]
         return ticker, None, str(e)
 
 def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    results: List[Dict[str, Any]] = []
-    errors: List[str] = []
+    results = []
+    errors = []
     if not tickers: return results, errors
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch_metrics_for_ticker, t): t for t in tickers}
@@ -988,11 +983,11 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA CON FALLBACK (POLYGON AGGIUNTO)
+# 4. DATA ENGINE: ANALISI TECNICA
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    # 1. Polygon Aggregates
+    # Polygon
     if POLYGON_API_KEY:
         try:
             throttle_polygon()
@@ -1011,7 +1006,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     if len(df) >= 60: return df
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {symbol}: {e}")
-    # 2. yfinance
+    # yfinance
     try:
         df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
         if df is not None and not df.empty:
@@ -1020,7 +1015,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
             if len(df) >= 60: return df
     except Exception as e:
         logger.info(f"yfinance tecnico fallito per {symbol}: {e}")
-    # 3. YahooQuery
+    # yahooquery
     try:
         t = YQ_Ticker(symbol)
         df_yq = t.history(period="2y", interval="1d")
@@ -1112,45 +1107,38 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. MOTORE QUANTISTICO (con nuove metriche aggiunte)
+# 5. METRICHE QUANTITATIVE AVANZATE
 # ==========================================================================
 def omega_ratio(returns: pd.Series, rf_annual: float = 0.04, threshold: float = 0.0) -> float:
-    if returns.empty or len(returns) < 2:
-        return np.nan
+    if returns.empty or len(returns) < 2: return np.nan
     rf_daily = rf_annual / TRADING_DAYS_YEAR
     excess = returns - rf_daily - threshold
     gains = excess[excess > 0].sum()
     losses = -excess[excess < 0].sum()
-    if losses == 0:
-        return np.inf if gains > 0 else np.nan
+    if losses == 0: return np.inf if gains > 0 else np.nan
     return gains / losses
 
 def jensens_alpha(port_ret: pd.Series, bench_ret: pd.Series, rf_annual: float = 0.04) -> float:
-    if len(port_ret) < 30 or len(bench_ret) < 30:
-        return np.nan
+    if len(port_ret) < 30 or len(bench_ret) < 30: return np.nan
     rf_daily = rf_annual / TRADING_DAYS_YEAR
     port_excess = port_ret - rf_daily
     bench_excess = bench_ret - rf_daily
     cov = np.cov(port_excess, bench_excess)[0, 1]
     var_bench = bench_excess.var()
-    if var_bench == 0:
-        return np.nan
+    if var_bench == 0: return np.nan
     beta = cov / var_bench
     alpha_daily = port_excess.mean() - beta * bench_excess.mean()
     alpha_ann = (1 + alpha_daily) ** TRADING_DAYS_YEAR - 1
     return alpha_ann
 
 def information_ratio(port_ret: pd.Series, bench_ret: pd.Series) -> float:
-    if len(port_ret) < 30 or len(bench_ret) < 30:
-        return np.nan
+    if len(port_ret) < 30 or len(bench_ret) < 30: return np.nan
     active = port_ret - bench_ret
-    if active.std() == 0:
-        return np.nan
+    if active.std() == 0: return np.nan
     return (active.mean() * TRADING_DAYS_YEAR) / (active.std() * np.sqrt(TRADING_DAYS_YEAR))
 
 def ulcer_index(returns: pd.Series) -> float:
-    if returns.empty:
-        return np.nan
+    if returns.empty: return np.nan
     equity = (1 + returns).cumprod()
     running_max = equity.expanding().max()
     drawdown = (equity - running_max) / running_max
@@ -1162,20 +1150,14 @@ def fit_garch(returns: pd.Series) -> Optional[Dict[str, float]]:
         from arch import arch_model
     except ImportError:
         return None
-    if len(returns) < 100:
-        return None
+    if len(returns) < 100: return None
     try:
         returns_clean = returns.dropna() * 100
         model = arch_model(returns_clean, vol='Garch', p=1, q=1, dist='normal')
         res = model.fit(update_freq=0, disp='off')
         forecast = res.forecast(horizon=1)
         cond_vol = np.sqrt(forecast.variance.iloc[-1, 0]) / 100.0
-        return {
-            'garch_vol': cond_vol,
-            'omega': res.params.get('omega', np.nan),
-            'alpha': res.params.get('alpha[1]', np.nan),
-            'beta': res.params.get('beta[1]', np.nan)
-        }
+        return {'garch_vol': cond_vol, 'omega': res.params.get('omega', np.nan), 'alpha': res.params.get('alpha[1]', np.nan), 'beta': res.params.get('beta[1]', np.nan)}
     except Exception as e:
         logger.debug(f"GARCH fitting failed: {e}")
         return None
@@ -1185,8 +1167,7 @@ def get_macro_indicators() -> Dict[str, float]:
     try:
         import pandas_datareader.data as web
         treasury = web.DataReader('DGS10', 'fred', start=pd.Timestamp.now() - pd.DateOffset(days=30))
-        if not treasury.empty:
-            result["treasury_10y"] = safe_float(treasury.iloc[-1, 0], np.nan) / 100.0
+        if not treasury.empty: result["treasury_10y"] = safe_float(treasury.iloc[-1, 0], np.nan) / 100.0
         cpi = web.DataReader('CPIAUCSL', 'fred', start=pd.Timestamp.now() - pd.DateOffset(months=13))
         if len(cpi) >= 13:
             cpi_series = cpi.iloc[:, 0]
@@ -1204,14 +1185,14 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]
     vol = returns.std() * np.sqrt(TRADING_DAYS_YEAR) if not returns.empty else np.nan
     log_returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
     if len(log_returns) >= 2:
-        cum_log_returns = log_returns.cumsum().values.reshape(-1, 1)
-        x = np.arange(len(cum_log_returns)).reshape(-1, 1)
-        model = LinearRegression().fit(x, cum_log_returns)
-        r_sq = model.score(x, cum_log_returns)
+        cum_log = log_returns.cumsum().values.reshape(-1, 1)
+        x = np.arange(len(cum_log)).reshape(-1, 1)
+        model = LinearRegression().fit(x, cum_log)
+        r_sq = model.score(x, cum_log)
         slope = float(model.coef_[0][0])
-    else: r_sq = np.nan; slope = np.nan
-    z_score: Any = "N/A"
-    z_score2: Any = "N/A"
+    else: r_sq, slope = np.nan, np.nan
+    z_score = "N/A"
+    z_score2 = "N/A"
     if fund_data and 'info' in fund_data and not is_non_traditional_asset(fund_data.get('symbol', ''), fund_data.get('info')):
         try:
             bs = fund_data.get("balance_sheet")
@@ -1230,7 +1211,7 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]
                         z_score = float((1.2 * (wc / ta_val)) + (1.4 * (re_val / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val)))
                         bv_equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else 0
                         if bv_equity: z_score2 = float(6.56 * (wc / ta_val) + 3.26 * (re_val / ta_val) + 6.72 * (ebit / ta_val) + 1.05 * (bv_equity / tl))
-        except Exception as e: logger.debug(f"Altman Z-Score non calcolabile: {e}")
+        except Exception as e: logger.debug(f"Altman Z-Score errore: {e}")
     return {"Sharpe Ratio": float(sharpe) if not np.isnan(sharpe) else 0.0, "Annual Volatility": float(vol) if not np.isnan(vol) else np.nan, "R-Squared": float(r_sq) if not np.isnan(r_sq) else np.nan, "Altman Z-Score": z_score, "Altman Z''-Score": z_score2, "Price Percentile": float((df['Close'] < df['Close'].iloc[-1]).mean() * 100), "Trend Slope": slope, "Risk Free Used": float(rf)}
 
 def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
@@ -1238,7 +1219,7 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     returns = prices.pct_change().dropna()
     if returns.empty:
         nan = float('nan')
-        return {"Max Drawdown": nan, "CAGR": nan, "VaR_95": nan, "CVaR_95": nan, "Skew": nan, "Kurt": nan, "Sortino": nan, "Calmar": nan, "Downside Deviation": nan}
+        return {"Max Drawdown": nan, "CAGR": nan, "VaR_95": nan, "CVaR_95": nan, "Skew": nan, "Kurt": nan, "Sortino": nan, "Calmar": nan, "Downside Deviation": nan, "Omega Ratio": nan, "Ulcer Index": nan, "GARCH Vol (next)": nan}
     equity = (1 + returns).cumprod()
     roll_max = equity.cummax()
     drawdown = equity / roll_max - 1.0
@@ -1246,8 +1227,7 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     total_return = equity.iloc[-1] - 1.0
     years = len(returns) / TRADING_DAYS_YEAR
     cagr = (1.0 + total_return) ** (1.0 / years) - 1.0 if years > 0 else np.nan
-    alpha = 0.95
-    var_95 = np.quantile(returns, 1 - alpha)
+    var_95 = np.quantile(returns, 0.05)
     cvar_95 = returns[returns <= var_95].mean() if (returns <= var_95).any() else np.nan
     skew = returns.skew()
     kurt = returns.kurt()
@@ -1255,9 +1235,8 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     downside = returns[returns < rf_daily]
     downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
     ann_excess_ret = (returns.mean() - rf_daily) * TRADING_DAYS_YEAR
-    sortino = ann_excess_ret / downside_dev if downside_dev and not np.isnan(downside_dev) and downside_dev > 0 else np.nan
+    sortino = ann_excess_ret / downside_dev if downside_dev and downside_dev > 0 else np.nan
     calmar = cagr / abs(max_dd) if max_dd and max_dd < 0 and not np.isnan(cagr) else np.nan
-    # Nuove metriche
     omega = omega_ratio(returns, rf_annual=get_active_risk_free_rate())
     ulcer = ulcer_index(returns)
     garch = fit_garch(returns)
@@ -1366,10 +1345,9 @@ def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], r
     smart = float(np.clip(smart, 0, 100))
     return {"SmartScore": smart, "FundamentalScore": f_score, "TechnicalScore": t_score, "QuantRiskScore": q_score}
 
-def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], weights: Optional[Dict[str, float]] = None, thresholds: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-    if weights is None: weights = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
-    if thresholds is None:
-        thresholds = {"roic_min": 0.10, "croic_min": 0.05, "fcf_margin_min": 0.08, "net_margin_min": 0.10, "de_max": 1.0, "interest_cov_min": 3.0, "fscore_min": 4, "mscore_max": -1.78, "altman_safe": ALTMAN_SAFE_THRESHOLD, "peg_max": 1.5, "ev_ebit_max": 15, "pfcf_max": 25, "fcf_yield_min": 0.04, "pb_max": 3.0}
+def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], macro: Dict[str, float]) -> Dict[str, Any]:
+    weights = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
+    thresholds = {"roic_min": 0.10, "croic_min": 0.05, "fcf_margin_min": 0.08, "net_margin_min": 0.10, "de_max": 1.0, "interest_cov_min": 3.0, "fscore_min": 4, "mscore_max": -1.78, "altman_safe": ALTMAN_SAFE_THRESHOLD, "peg_max": 1.5, "ev_ebit_max": 15, "fcf_yield_min": 0.04, "pb_max": 3.0}
     fqs = 0.0
     details = []
     roic = safe_float(row.get("ROIC"), 0.0)
@@ -1402,8 +1380,6 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     if isinstance(z, (int, float)):
         if z >= 3.0: fqs += 5; details.append("✅ Z‑Score > 3")
         elif z >= thresholds["altman_safe"]: fqs += 2; details.append("⚠️ Z‑Score > 1.81")
-    z2 = qm.get("Altman Z''-Score", "N/A")
-    if isinstance(z2, (int, float)): details.append(f"ℹ️ Z''-Score (non‑manifatturiero): {z2:.2f}")
     rev_growth = safe_float(row.get("Revenue Growth"), None)
     if rev_growth is not None and rev_growth > 0.05: fqs += 5; details.append("✅ Crescita ricavi > 5%")
     fqs = np.clip(fqs, 0, 100)
@@ -1438,12 +1414,17 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     elif max_dd < -0.30: qrs -= 10
     qrs = np.clip(qrs, 0, 100)
     details.append(f"📉 Rischio Quant (Sharpe {sharpe:.2f}, MaxDD {max_dd*100:.1f}%)")
+    # Macro
+    treasury = macro.get("treasury_10y", np.nan)
+    if not np.isnan(treasury): details.append(f"🏦 Treasury 10Y: {treasury*100:.2f}%")
+    cpi = macro.get("cpi_yoy", np.nan)
+    if not np.isnan(cpi): details.append(f"📈 CPI YoY: {cpi:.2f}%")
     final_score = weights["F"] * fqs + weights["V"] * vas + weights["T"] * tms + weights["Q"] * qrs
-    if final_score >= 75: verdict = "Strong Buy"; emoji = "🟢"
-    elif final_score >= 60: verdict = "Buy"; emoji = "🟢"
-    elif final_score >= 45: verdict = "Hold"; emoji = "🟡"
-    elif final_score >= 30: verdict = "Reduce"; emoji = "🟠"
-    else: verdict = "Sell"; emoji = "🔴"
+    if final_score >= 75: verdict, emoji = "Strong Buy", "🟢"
+    elif final_score >= 60: verdict, emoji = "Buy", "🟢"
+    elif final_score >= 45: verdict, emoji = "Hold", "🟡"
+    elif final_score >= 30: verdict, emoji = "Reduce", "🟠"
+    else: verdict, emoji = "Sell", "🔴"
     return {"FinalScore": final_score, "Verdict": verdict, "Emoji": emoji, "FQS": fqs, "VAS": vas, "TMS": tms, "QRS": qrs, "Details": details, "Weights": weights}
 
 def calculate_tax_impact(df_weights: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> pd.DataFrame:
@@ -1576,7 +1557,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1677,17 +1658,77 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR (semplificata)
+# 6. UI: SIDEBAR (con tutte le sezioni)
 # ==========================================================================
+def render_apk_download_box() -> None:
+    with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
+        st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
+        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
+        st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute.")
+
+def render_chi_siamo() -> None:
+    with st.sidebar.expander("ℹ️ Chi Siamo", expanded=False):
+        st.markdown("""
+### Benvenuti su V-QUANT PRO
+V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
+La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF, Crypto e singoli titoli azionari ed obbligazionari.
+Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
+### Cosa facciamo:
+- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
+- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
+- Strumenti di supporto decisionale basati su modelli matematici
+### ⚠️ Disclaimer Legale
+V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
+Sviluppato con passione da Innovative Program.
+        """)
+
+def render_privacy() -> None:
+    with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
+        st.markdown("""
+### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
+#### 1. Conservazione dei Dati 
+Tutti i dati sensibili, inclusi i dati di autenticazione (email e password) e le configurazioni del tuo portafoglio, sono **detenuti e gestiti in modo sicuro da Supabase**. 
+Supabase è una piattaforma di database di livello enterprise che garantisce la crittografia dei dati a riposo e in transito.
+Le password sono archiviate tramite hashing sicuro e non sono mai accessibili in chiaro agli amministratori di V-QUANT PRO.
+#### 2. Analisi Finanziaria e Cookie
+Questo sito utilizza Google AdSense per la visualizzazione di annunci pubblicitari e cookie tecnici per il corretto funzionamento della Dashboard.
+Google utilizza i cookie per pubblicare annunci basati sulle tue visite precedenti.
+Puoi gestire le preferenze sugli annunci visitando le impostazioni di Google.
+#### 3. Diritti dell'Utente
+Poiché i dati sono detenuti su infrastruttura Supabase, puoi richiedere in ogni momento la cancellazione totale del tuo account e dei dati associati attraverso le impostazioni del profilo o contattandoci.
+#### 4. Esclusione di Responsabilità
+V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi. L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
+#### 5. Sicurezza
+Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
+        """)
+
+def render_sostieni() -> None:
+    with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
+        st.markdown("""
+### Perché una donazione?
+V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
+Mantenere l'infrastruttura, aggiornare i dati in tempo reale e sviluppare nuove funzionalità ha dei costi vivi.
+Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
+        """)
+        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
+        st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
+
+def render_contatti() -> None:
+    with st.sidebar.expander("📧 Contatti", expanded=False):
+        st.write("Per supporto tecnico, collaborazioni o richieste:")
+        st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
+        st.caption("Risposta normalmente entro 24/48 ore.")
+
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
     
     st.sidebar.header("1. Selezione Asset")
     input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
-    file, manual = None, None
-    if input_mode == "Batch CSV": 
+    file = None
+    manual = ""
+    if input_mode == "Batch CSV":
         file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
-    else: 
+    else:
         manual = st.sidebar.text_input("Ticker", value="").upper().strip()
     
     st.sidebar.header("2. Mercato")
@@ -1727,6 +1768,13 @@ def setup_sidebar() -> Dict[str, Any]:
                     reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
                 st.markdown(reply)
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
+    
+    # Sezioni informative ripristinate
+    render_apk_download_box()
+    render_chi_siamo()
+    render_privacy()
+    render_sostieni()
+    render_contatti()
     
     return {"mode": input_mode, "file": file, "manual": manual, "suffix": suffix, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
 
@@ -1774,7 +1822,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# FUNZIONI DI RENDERING DEI TAB (con footer)
+# 7. FUNZIONI DI RENDERING DEI TAB
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if row is None:
@@ -1822,7 +1870,7 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         st.info("Nessun ticker attivo.")
         st.markdown(FOOTER_HTML, unsafe_allow_html=True)
         return
-    st.info("💡 **Quant:** Sharpe (con rf dinamico), Sortino (rischio downside), Calmar (CAGR/MaxDD), Altman Z-Score e Z''-Score, VaR/CVaR, Monte Carlo bootstrap. Nuove metriche: Omega Ratio, Ulcer Index, GARCH.")
+    st.info("💡 **Quant:** Sharpe, Sortino, Omega, Jensen, Ulcer, GARCH, Monte Carlo, etc.")
     df_tech = get_technical_data(ticker)
     if df_tech is not None:
         rf_eff = get_active_risk_free_rate()
@@ -1889,15 +1937,16 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
         return
     st.info("💡 **Modello Unificato:** qualità, valutazione, timing e rischio in un unico punteggio (0‑100).")
     df_tech = get_technical_data(ticker)
-    qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data) if df_tech is not None else {}
-    risk = calculate_risk_metrics(df_tech) if df_tech is not None else {"Max Drawdown": 0.0, "CAGR": 0.0}
     macro = get_macro_indicators()
+    qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data) if df_tech is not None else {}
+    risk = calculate_risk_metrics(df_tech) if df_tech is not None else {}
     if df_tech is not None:
         df_calc_v = calculate_technical_indicators(df_tech)
         timing_score, timing_reasons = calculate_timing_score(df_calc_v, df_calc_v['Close'].iloc[-1])
     else:
-        timing_score = 0; timing_reasons = []
-    verdict = compute_unified_verdict(row=row, timing_score=timing_score, qm=qm, risk=risk, weights={"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15})
+        timing_score = 0
+        timing_reasons = []
+    verdict = compute_unified_verdict(row=row, timing_score=timing_score, qm=qm, risk=risk, macro=macro)
     st.markdown(f"## {verdict['Emoji']} {verdict['Verdict']}  ({verdict['FinalScore']:.1f}/100)")
     st.progress(int(verdict['FinalScore']))
     col1, col2, col3, col4 = st.columns(4)
@@ -1907,8 +1956,6 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
     with st.expander("🔍 Criteri analizzati"):
         for d in verdict["Details"]: st.write(d)
-    if not np.isnan(macro['treasury_10y']):
-        st.caption(f"🏦 Treasury 10Y: {macro['treasury_10y']*100:.2f}% | CPI YoY: {macro['cpi_yoy']:.2f}%")
     if timing_reasons:
         with st.expander("📈 Dettaglio segnali tecnici"):
             for r in timing_reasons: st.write(r)
@@ -1949,7 +1996,7 @@ def render_portafoglio_tab(ui):
     st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita', PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze, concentrazione, ribilanciamento.")
     base_currency = ui.get("base_currency") or st.session_state.get("base_currency", "EUR")
     st.success(f"Valuta base portafoglio: **{base_currency}** | Conversione FX reale attiva.")
-    all_tickers_batch: List[str] = []
+    all_tickers_batch = []
     if st.session_state.batch_results is not None and not st.session_state.batch_results.empty:
         all_tickers_batch = st.session_state.batch_results["Ticker"].tolist()
     if all_tickers_batch:
@@ -2033,10 +2080,10 @@ def render_portafoglio_tab(ui):
                     rows_pos = []
                     for t in weights_pct.keys():
                         qty = holdings_quantity.get(t, 0.0)
-                        pmc = holdings_pmc.get(t, 0.0)
+                        pmc_val = holdings_pmc.get(t, 0.0)
                         cur = st.session_state.holdings_currency.get(t, "USD")
-                        derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur)
-                        rows_pos.append({"Ticker": t, "Quantità": qty, "PMC": pmc, "Prezzo Attuale": derived['Prezzo Attuale'], "Importo Investito": derived['Importo Investito'], "Valore di Mercato": derived['Valore di Mercato'], "P&L": derived['P&L'], "P&L %": derived['P&L %'], "Peso %": weights_pct[t], "Valuta": cur})
+                        derived = calculate_position_from_quantity(t, qty, pmc_val, user_currency=cur)
+                        rows_pos.append({"Ticker": t, "Quantità": qty, "PMC": pmc_val, "Prezzo Attuale": derived['Prezzo Attuale'], "Importo Investito": derived['Importo Investito'], "Valore di Mercato": derived['Valore di Mercato'], "P&L": derived['P&L'], "P&L %": derived['P&L %'], "Peso %": weights_pct[t], "Valuta": cur})
                     df_weights = pd.DataFrame(rows_pos)
                     st.dataframe(df_weights, width='stretch')
                     csv_bytes = _portfolio_export_csv(df_weights)
@@ -2170,9 +2217,9 @@ def main():
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
     
-    # Avvia analisi se premuto il pulsante
+    # Avvia analisi
     if ui["btn"]:
-        targets: List[str] = [ui["manual"]] if ui["mode"] == "Manuale" else []
+        targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
             try:
                 csv_df = pd.read_csv(ui["file"])
@@ -2185,13 +2232,11 @@ def main():
                 else:
                     targets = csv_df['Ticker'].dropna().astype(str).tolist()[:MAX_CSV_ROWS]
         if targets:
-            normalized_targets: List[str] = []
-            analysis_errors: List[str] = []
+            normalized_targets = []
+            analysis_errors = []
             for t in targets:
                 try:
-                    # Applica risoluzione automatica ticker
                     resolved, _ = auto_resolve_ticker(t)
-                    # Poi normalizza con suffisso selezionato
                     normalized_targets.append(normalize_ticker(resolved, ui["suffix"]))
                 except Exception as e:
                     analysis_errors.append(f'{t}: {e}')
@@ -2200,19 +2245,19 @@ def main():
             analysis_errors.extend(fetch_errors)
             st.session_state.batch_results = pd.DataFrame(results)
             st.session_state.analysis_errors = analysis_errors
-            if results: 
+            if results:
                 st.session_state.selected_ticker = results[0]["Ticker"]
-            else: 
+            else:
                 st.session_state.selected_ticker = None
     
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
     
-    # Analisi rapida senza ricerca
+    # Analisi rapida
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
-        batch_options: List[str] = []
+        batch_options = []
         if st.session_state.batch_results is not None and not st.session_state.batch_results.empty and 'Ticker' in st.session_state.batch_results.columns:
             batch_options = st.session_state.batch_results['Ticker'].dropna().astype(str).tolist()
         portfolio_options = sorted(st.session_state.get('portfolio_tickers', []) or [])
@@ -2222,13 +2267,15 @@ def main():
             if selected_from_batch:
                 st.session_state.selected_ticker = selected_from_batch
                 st.session_state.standalone_ticker_input = ''
-        else: csel1.caption('Nessun batch attivo.')
+        else:
+            csel1.caption('Nessun batch attivo.')
         if portfolio_options:
             portfolio_pick = csel2.selectbox('Ticker dal portafoglio', [''] + portfolio_options, index=0, key='standalone_portfolio_pick')
             if portfolio_pick:
                 st.session_state.selected_ticker = None
                 st.session_state.standalone_ticker_input = portfolio_pick
-        else: csel2.caption('Portafoglio vuoto.')
+        else:
+            csel2.caption('Portafoglio vuoto.')
         manual_quick = csel3.text_input('Ticker libero', value=st.session_state.get('standalone_ticker_input', ''), key='quick_manual_ticker').upper().strip()
         if manual_quick:
             st.session_state.selected_ticker = None
@@ -2238,7 +2285,7 @@ def main():
     if not ticker:
         st.info('Puoi usare le tab anche senza ricerca: seleziona un ticker dal portafoglio oppure inseriscilo nel box "Ticker libero" qui sopra.')
     
-    # Mostra il tab selezionato dal menu a tendina
+    # Mostra tab selezionato
     if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
     elif ui["tab_selection"] == "📉 Tecnico":
