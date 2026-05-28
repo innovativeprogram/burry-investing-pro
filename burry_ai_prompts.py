@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import requests
 from textwrap import dedent
 from typing import Any, Dict, List
 
@@ -15,7 +16,6 @@ except ImportError:
     GEMINI_AVAILABLE = False
 
 try:
-    from huggingface_hub import hf_hub_download
     from llama_cpp import Llama
     LLAMA_AVAILABLE = True
 except ImportError:
@@ -148,17 +148,24 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
     }
 
 # ==========================================================================
-# MODELLO LOCALE (SmolLM2-135M)
+# MODELLO LOCALE (SmolLM2-135M) scaricato con requests
 # ==========================================================================
 @st.cache_resource(show_spinner=False)
 def load_local_model():
-    """Scarica e carica il modello SmolLM2-135M in formato GGUF."""
+    """Scarica e carica il modello SmolLM2-135M usando requests."""
     if not LLAMA_AVAILABLE:
         return None
     try:
         model_filename = "smollm2-135m-instruct-q8_0.gguf"
-        repo_id = "HackNetAyush/smollm2-135M-instruct-gguf-q8"
-        model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
+        model_path = os.path.join("/tmp", model_filename)
+        if not os.path.exists(model_path):
+            url = f"https://huggingface.co/HackNetAyush/smollm2-135M-instruct-gguf-q8/resolve/main/{model_filename}"
+            with st.spinner(f"Download del modello AI locale (∼130 MB)…"):
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
+                with open(model_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
         return Llama(
             model_path=model_path,
             n_ctx=1024,
