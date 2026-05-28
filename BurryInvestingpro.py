@@ -584,7 +584,7 @@ def render_auth_sidebar() -> None:
     st.sidebar.markdown('---')
 
 # ==========================================================================
-# 1. MODELLI DATI (esteso con nuove metriche)
+# 1. MODELLI DATI
 # ==========================================================================
 @dataclass
 class FundamentalMetrics:
@@ -611,16 +611,15 @@ class FundamentalMetrics:
     m_score: Optional[float]
     m_score_reliable: bool = True
     currency: str = "USD"
-    # Nuove metriche fondamentali
     current_ratio: Optional[float] = None
     quick_ratio: Optional[float] = None
     roe: Optional[float] = None
     roce: Optional[float] = None
     graham_number: Optional[float] = None
-    epv: Optional[float] = None  # Earnings Power Value (semplificato)
-    wacc: Optional[float] = None  # Weighted Average Cost of Capital (stimato)
+    epv: Optional[float] = None
+    wacc: Optional[float] = None
     beta_estimated: Optional[float] = None
-    short_interest_ratio: Optional[float] = None  # Days to cover
+    short_interest_ratio: Optional[float] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
 
     def to_ui_dict(self) -> Dict[str, Any]:
@@ -742,7 +741,7 @@ def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> st
     return symbol_clean
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE (ESTESA)
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
@@ -919,21 +918,16 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         return None, False
 
 def estimate_wacc(info: Dict[str, Any], market_cap: float, total_debt: float, tax_rate: float, risk_free_rate: float = DEFAULT_RISK_FREE_RATE) -> Optional[float]:
-    """Stima del WACC: cost of equity (CAPM) + cost of debt after tax"""
     try:
-        # Beta da info (se non disponibile, stimiamo 1)
         beta = safe_float(info.get('beta', 1.0), 1.0)
-        # Equity risk premium (storico ~5-6%)
         equity_risk_premium = 0.055
         cost_equity = risk_free_rate + beta * equity_risk_premium
-        # Costo del debito: interest expense / total debt (se disponibile)
         interest_expense = safe_float(info.get('interestExpense', 0.0), 0.0)
         if total_debt > 0 and interest_expense > 0:
             cost_debt = interest_expense / total_debt
         else:
-            cost_debt = risk_free_rate + 0.02  # spread generico
+            cost_debt = risk_free_rate + 0.02
         cost_debt_after_tax = cost_debt * (1 - tax_rate)
-        # Pesi
         total_capital = market_cap + total_debt
         if total_capital <= 0:
             return None
@@ -945,7 +939,6 @@ def estimate_wacc(info: Dict[str, Any], market_cap: float, total_debt: float, ta
         return None
 
 def estimate_epv(ebit: float, tax_rate: float, wacc: float, growth: float = 0.02) -> Optional[float]:
-    """Earnings Power Value semplificato: EPV = EBIT * (1-tax) / (WACC - growth)"""
     try:
         if wacc is None or wacc <= growth:
             return None
@@ -1029,7 +1022,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         ps = info.get('priceToSalesTrailing12Months')
         fscore = calculate_piotroski_fscore(raw_data)
         mscore, mscore_reliable = calculate_beneish_mscore(raw_data)
-        # NUOVE METRICHE
         current_assets = get_first(bs, 'Current Assets', 0.0)
         current_liabilities = get_first(bs, 'Current Liabilities', 1.0)
         current_ratio = current_assets / current_liabilities if current_liabilities != 0 else None
@@ -1038,31 +1030,24 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         roe = None
         if equity is not None and not np.isnan(equity) and equity != 0 and net_income is not None:
             roe = net_income / equity
-        # ROCE = EBIT / (Total Assets - Current Liabilities)
         total_assets = get_first(bs, 'Total Assets', 0.0)
         capital_employed = total_assets - current_liabilities
         roce = ebit / capital_employed if capital_employed != 0 else None
-        # Graham Number = sqrt(22.5 * EPS * BVPS)
         eps = info.get('trailingEps')
         bvps = info.get('bookValue')
         graham_number = None
         if eps and bvps and eps > 0 and bvps > 0:
             graham_number = np.sqrt(22.5 * eps * bvps)
-        # Beta stimato (se non disponibile, usa 1)
         beta_estimated = safe_float(info.get('beta', 1.0), 1.0)
-        # WACC stimato
         risk_free = get_active_risk_free_rate()
         market_cap = mc if mc else 0.0
         wacc = estimate_wacc(info, market_cap, total_debt, tax_rate, risk_free)
-        # EPV
         epv = None
         if ebit != 0 and wacc is not None:
             epv = estimate_epv(ebit, tax_rate, wacc, growth=0.02)
-        # Short Interest (Days to Cover) - da info se disponibile
-        short_interest_ratio = safe_float(info.get('shortRatio'), None)  # days to cover
+        short_interest_ratio = safe_float(info.get('shortRatio'), None)
         if short_interest_ratio is None:
             short_interest_ratio = safe_float(info.get('shortPercentOfFloat'), None)
-
         return FundamentalMetrics(
             ticker=symbol, company_name=info.get('longName', symbol),
             price=safe_float(info.get('currentPrice') or info.get('regularMarketPrice'), 0.0),
@@ -1110,7 +1095,7 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA (ESTESA CON AROON E OBV)
+# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA)
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
@@ -1160,7 +1145,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     high = pd.to_numeric(data['High'], errors='coerce')
     low = pd.to_numeric(data['Low'], errors='coerce')
     volume = pd.to_numeric(data['Volume'], errors='coerce')
-    # Calcoli base
     data['SMA_50'] = close.rolling(50, min_periods=50).mean()
     data['SMA_200'] = close.rolling(200, min_periods=200).mean()
     delta = close.diff()
@@ -1178,7 +1162,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ema26 = close.ewm(span=26, adjust=False).mean()
     data['MACD'] = ema12 - ema26
     data['MACD_signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    # ADX
     tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     atr = tr.rolling(14).mean()
     plus_dm = high.diff()
@@ -1189,7 +1172,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * (minus_dm.abs().rolling(14).mean() / atr)
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     data['ADX'] = dx.rolling(14).mean()
-    # AROON
     if ta is not None:
         try:
             aroon = ta.aroon(high=high, low=low, length=25)
@@ -1198,7 +1180,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             pass
     else:
-        # Calcolo manuale Aroon (semplificato)
         period = 25
         aroon_up = pd.Series(index=data.index, dtype=float)
         aroon_down = pd.Series(index=data.index, dtype=float)
@@ -1211,7 +1192,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
             aroon_down.iloc[i] = ((period - (i - low_idx)) / period) * 100
         data['Aroon_Up'] = aroon_up
         data['Aroon_Down'] = aroon_down
-    # OBV (On-Balance Volume)
     obv = pd.Series(index=data.index, dtype=float)
     obv.iloc[0] = volume.iloc[0]
     for i in range(1, len(data)):
@@ -1222,7 +1202,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         else:
             obv.iloc[i] = obv.iloc[i-1]
     data['OBV'] = obv
-    # Se pandas_ta è disponibile, sovrascriviamo alcune parti
     if ta is not None:
         try:
             data['SMA_50'] = ta.sma(close, length=50)
@@ -1256,23 +1235,36 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     if pd.notna(sma200) and current_price > sma200:
         score += 30
         reasons.append("✅ Trend Rialzista (Sopra SMA 200)")
-    else: reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
+    else:
+        reasons.append("⚠️ Trend Ribassista (Sotto SMA 200)")
     rsi = last_row.get('RSI')
     if pd.notna(rsi):
-        if rsi < 30: score += 30; reasons.append("✅ Ipervenduto (RSI < 30)")
-        elif rsi > 70: score -= 10; reasons.append("🛑 Ipercomprato (RSI > 70)")
+        if rsi < 30:
+            score += 30
+            reasons.append("✅ Ipervenduto (RSI < 30)")
+        elif rsi > 70:
+            score -= 10
+            reasons.append("🛑 Ipercomprato (RSI > 70)")
     bb_lower = last_row.get('BB_Lower', np.nan)
-    if pd.notna(bb_lower) and current_price <= bb_lower * 1.02: score += 20; reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
+    if pd.notna(bb_lower) and current_price <= bb_lower * 1.02:
+        score += 20
+        reasons.append("✅ Prezzo su Banda Bollinger Inferiore")
     macd = last_row.get('MACD')
     macd_sig = last_row.get('MACD_signal')
     if pd.notna(macd) and pd.notna(macd_sig):
-        if macd > macd_sig: score += 10; reasons.append("✅ MACD sopra signal line")
-        else: reasons.append("⚠️ MACD sotto signal line")
+        if macd > macd_sig:
+            score += 10
+            reasons.append("✅ MACD sopra signal line")
+        else:
+            reasons.append("⚠️ MACD sotto signal line")
     adx = last_row.get('ADX')
     if pd.notna(adx):
-        if adx > 25: score += 10; reasons.append("✅ Trend forte (ADX > 25)")
-        elif adx < 20: score -= 5; reasons.append("⚠️ Trend debole/assente (ADX < 20)")
-    # Nuovi indicatori: Aroon e OBV
+        if adx > 25:
+            score += 10
+            reasons.append("✅ Trend forte (ADX > 25)")
+        elif adx < 20:
+            score -= 5
+            reasons.append("⚠️ Trend debole/assente (ADX < 20)")
     aroon_up = last_row.get('Aroon_Up')
     aroon_down = last_row.get('Aroon_Down')
     if pd.notna(aroon_up) and pd.notna(aroon_down):
@@ -1282,21 +1274,28 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
         elif aroon_down > 70 and aroon_up < 30:
             score -= 10
             reasons.append("⚠️ Aroon segnala forte trend ribassista")
-    # OBV trend (confronto con prezzo)
-    if len(data) >= 20:
-        obv_slope = np.polyfit(range(20), data['OBV'].iloc[-20:].fillna(method='ffill'), 1)[0]
-        price_slope = np.polyfit(range(20), data['Close'].iloc[-20:], 1)[0]
-        if obv_slope > 0 and price_slope > 0:
-            score += 10
-            reasons.append("✅ OBV conferma trend rialzista")
-        elif obv_slope < 0 and price_slope > 0:
-            score -= 10
-            reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende)")
+    if 'OBV' in data.columns and len(data) >= 20:
+        obv_series = data['OBV'].iloc[-20:].copy()
+        obv_series = obv_series.ffill().bfill().fillna(0)
+        price_series = data['Close'].iloc[-20:].copy()
+        price_series = price_series.ffill().bfill().fillna(0)
+        if len(obv_series) >= 5 and len(price_series) >= 5:
+            try:
+                obv_slope = np.polyfit(range(len(obv_series)), obv_series, 1)[0]
+                price_slope = np.polyfit(range(len(price_series)), price_series, 1)[0]
+                if obv_slope > 0 and price_slope > 0:
+                    score += 10
+                    reasons.append("✅ OBV conferma trend rialzista")
+                elif obv_slope < 0 and price_slope > 0:
+                    score -= 10
+                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende)")
+            except Exception:
+                pass
     score = int(np.clip(score, 0, 100))
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE (INVARIATE)
+# 5. METRICHE QUANTITATIVE AVANZATE
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1393,7 +1392,8 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]
         model = LinearRegression().fit(x, cum_log)
         r_sq = model.score(x, cum_log)
         slope = float(model.coef_[0][0])
-    else: r_sq, slope = np.nan, np.nan
+    else:
+        r_sq, slope = np.nan, np.nan
     z_score = "N/A"
     z_score2 = "N/A"
     if fund_data and 'info' in fund_data and not is_non_traditional_asset(fund_data.get('symbol', ''), fund_data.get('info')):
@@ -1414,7 +1414,8 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]
                         z_score = float((1.2 * (wc / ta_val)) + (1.4 * (re_val / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val)))
                         bv_equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else 0
                         if bv_equity: z_score2 = float(6.56 * (wc / ta_val) + 3.26 * (re_val / ta_val) + 6.72 * (ebit / ta_val) + 1.05 * (bv_equity / tl))
-        except Exception as e: logger.debug(f"Altman Z-Score errore: {e}")
+        except Exception as e:
+            logger.debug(f"Altman Z-Score errore: {e}")
     return {"Sharpe Ratio": float(sharpe) if not np.isnan(sharpe) else 0.0, "Annual Volatility": float(vol) if not np.isnan(vol) else np.nan, "R-Squared": float(r_sq) if not np.isnan(r_sq) else np.nan, "Altman Z-Score": z_score, "Altman Z''-Score": z_score2, "Price Percentile": float((df['Close'] < df['Close'].iloc[-1]).mean() * 100), "Trend Slope": slope, "Risk Free Used": float(rf)}
 
 def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
@@ -1553,7 +1554,6 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     thresholds = {"roic_min": 0.10, "croic_min": 0.05, "fcf_margin_min": 0.08, "net_margin_min": 0.10, "de_max": 1.0, "interest_cov_min": 3.0, "fscore_min": 4, "mscore_max": -1.78, "altman_safe": ALTMAN_SAFE_THRESHOLD, "peg_max": 1.5, "ev_ebit_max": 15, "fcf_yield_min": 0.04, "pb_max": 3.0}
     fqs = 0.0
     details = []
-    # Metriche esistenti di qualità
     roic = safe_float(row.get("ROIC"), 0.0)
     if roic >= thresholds["roic_min"]: fqs += 20; details.append("✅ ROIC ≥ 10%")
     elif roic > 0: fqs += 10; details.append("⚠️ ROIC positivo ma basso")
@@ -1586,7 +1586,6 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
         elif z >= thresholds["altman_safe"]: fqs += 2; details.append("⚠️ Z‑Score > 1.81")
     rev_growth = safe_float(row.get("Revenue Growth"), None)
     if rev_growth is not None and rev_growth > 0.05: fqs += 5; details.append("✅ Crescita ricavi > 5%")
-    # NUOVE METRICHE DI QUALITÀ
     current_ratio = row.get("Current Ratio")
     if current_ratio is not None and current_ratio > 0:
         if current_ratio > 1.5: fqs += 8; details.append(f"✅ Current Ratio > 1.5 ({current_ratio:.2f})")
@@ -1605,7 +1604,6 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
         if roce_val > 0.20: fqs += 15; details.append(f"✅ ROCE > 20% ({roce:.1f}%)")
         elif roce_val > 0.10: fqs += 8; details.append(f"⚠️ ROCE > 10% ({roce:.1f}%)")
     fqs = np.clip(fqs, 0, 100)
-    # Valutazione (VAS) con nuove metriche
     vas = 0.0
     peg = safe_float(row.get("PEG Ratio"), None)
     if peg is not None and peg > 0:
@@ -1624,21 +1622,17 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     if pb is not None and pb > 0:
         if pb <= 1.5: vas += 15; details.append("✅ P/B ≤ 1.5")
         elif pb <= thresholds["pb_max"]: vas += 8; details.append("⚠️ P/B ≤ 3")
-    # Graham Number
     price = safe_float(row.get("Price"), None)
     graham = row.get("Graham Number")
     if price is not None and graham is not None and graham > 0:
         if price < graham: vas += 15; details.append(f"✅ Prezzo < Graham Number (${price:.2f} < ${graham:.2f})")
         else: vas -= 5; details.append(f"⚠️ Prezzo > Graham Number")
-    # EPV
     epv = row.get("EPV (est.)")
     if price is not None and epv is not None and epv > 0:
         if price < epv: vas += 10; details.append(f"✅ Prezzo < EPV stimato")
     vas = np.clip(vas, 0, 100)
-    # Timing (TMS) già calcolato
     tms = float(np.clip(timing_score, 0, 100))
     details.append(f"📈 Timing Score: {tms:.0f}/100")
-    # Rischio Quant (QRS) con nuove metriche di rischio (beta, wacc, short interest)
     sharpe = qm.get("Sharpe Ratio", 0.0) or 0.0
     max_dd = risk.get("Max Drawdown", 0.0) or 0.0
     sortino = risk.get("Sortino", 0.0) or 0.0
@@ -1647,22 +1641,18 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     if sortino > 0: qrs += min(15, sortino * 15)
     if max_dd < -0.50: qrs -= 25
     elif max_dd < -0.30: qrs -= 10
-    # Beta: beta alto = più rischioso
     beta = safe_float(row.get("Beta (est.)"), 1.0)
     if beta > 1.5: qrs -= 10; details.append(f"⚠️ Beta alto ({beta:.2f}) - rischio sistematico elevato")
     elif beta < 0.8: qrs += 5; details.append(f"✅ Beta basso ({beta:.2f}) - meno volatile del mercato")
-    # WACC: se wacc è alto, potrebbe indicare costo del capitale elevato (peggiore valutazione)
     wacc = row.get("WACC (est.)")
     if wacc is not None and not np.isnan(wacc):
         if wacc > 0.10: qrs -= 5; details.append(f"⚠️ WACC elevato ({wacc*100:.1f}%)")
-    # Short interest ratio (days to cover): > 10 è molto ribassista
     short_int = row.get("Short Interest (Days to Cover)")
     if short_int is not None and not np.isnan(short_int):
         if short_int > 10: qrs -= 20; details.append(f"🛑 Short interest elevato ({short_int:.1f} giorni) - pressione ribassista")
         elif short_int > 5: qrs -= 5; details.append(f"⚠️ Short interest moderato ({short_int:.1f} giorni)")
     qrs = np.clip(qrs, 0, 100)
     details.append(f"📉 Rischio Quant (Sharpe {sharpe:.2f}, MaxDD {max_dd*100:.1f}%)")
-    # Macro
     treasury = macro.get("treasury_10y", np.nan)
     if not np.isnan(treasury): details.append(f"🏦 Treasury 10Y: {treasury*100:.2f}%")
     cpi = macro.get("cpi_yoy", np.nan)
@@ -1805,7 +1795,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1906,7 +1896,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR (INVARIATA)
+# 6. UI: SIDEBAR
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -2056,17 +2046,15 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB (MODIFICATO IL TAB FONDAMENTALI IN TABELLA)
+# 7. FUNZIONI DI RENDERING DEI TAB
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
         st.info("💡 **Tabella riassuntiva dei fondamentali per tutti i ticker analizzati**")
         df_display = batch_results.drop(columns=['_raw_data'], errors='ignore')
-        # Formattazione per visualizzazione tabellare
         st.dataframe(df_display, width='stretch', use_container_width=True)
     elif row is not None:
         st.info("💡 **Metriche fondamentali (tabella dettagliata)**")
-        # Converti la serie in dataframe e mostra come tabella
         df_single = pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore')
         st.dataframe(df_single, use_container_width=True)
     else:
@@ -2095,7 +2083,6 @@ def render_tecnico_tab(row, ticker):
             fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['ADX'], name="ADX", line=dict(color='orange')), row=3, col=1)
         fig.update_layout(height=700, xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, width='stretch')
-        # Rolling
         returns = df_calc['Close'].pct_change().dropna()
         rolling_vol = returns.rolling(21).std() * np.sqrt(252)
         rolling_sharpe = (returns.rolling(21).mean() / returns.rolling(21).std()) * np.sqrt(252)
