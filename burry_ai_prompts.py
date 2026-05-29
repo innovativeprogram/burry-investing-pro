@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 import streamlit as st
 import pandas as pd
 
-# Tentativi di import per i due motori
+# Tentativi di import per i motori
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
@@ -20,6 +20,12 @@ try:
     LLAMA_AVAILABLE = True
 except ImportError:
     LLAMA_AVAILABLE = False
+
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
 
 logger = logging.getLogger("BurryInvestingPro")
 
@@ -148,11 +154,37 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
     }
 
 # ==========================================================================
-# MODELLO LOCALE (SmolLM2-135M) scaricato con requests
+# 1. GROQ (priorità massima)
+# ==========================================================================
+def call_groq(system_prompt: str, user_prompt: str, model: str = "llama-3.3-70b-versatile", temperature: float = 0.2, max_tokens: int = 4096) -> str:
+    """Chiamata sincrona a Groq. Restituisce il testo della risposta."""
+    if not GROQ_AVAILABLE:
+        raise ImportError("Libreria 'groq' non installata.")
+    
+    api_key = safe_get_secret("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("Chiave API Groq non configurata.")
+    
+    client = Groq(api_key=api_key)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=1,
+        stream=False
+    )
+    return response.choices[0].message.content
+
+# ==========================================================================
+# 2. MODELLO LOCALE (SmolLM2-135M) – invariato
 # ==========================================================================
 @st.cache_resource(show_spinner=False)
 def load_local_model():
-    """Scarica e carica il modello SmolLM2-135M usando requests."""
     if not LLAMA_AVAILABLE:
         return None
     try:
@@ -178,9 +210,9 @@ def load_local_model():
         return None
 
 def ask_local_fallback(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
-    """Usa SmolLM2 locale come fallback quando Gemini fallisce."""
+    """Usa SmolLM2 locale come fallback quando Groq e Gemini falliscono."""
     if not LLAMA_AVAILABLE:
-        return "⚠️ **Backup locale non disponibile**: librerie mancanti."
+        return "⚠️ **Backup locale non disponibile**: libreria 'llama-cpp-python' non installata."
     
     with st.spinner("Caricamento AI locale (primo avvio, pochi secondi)..."):
         llm = load_local_model()
@@ -189,7 +221,6 @@ def ask_local_fallback(context: Dict[str, Any], user_question: str, mode: str = 
         return "⚠️ **Impossibile caricare il modello locale**. Riprova."
     
     system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-    full_prompt = f"{system_prompt}\n\n{user_prompt}"
     
     try:
         response = llm.create_chat_completion(
@@ -210,47 +241,77 @@ def ask_local_fallback(context: Dict[str, Any], user_question: str, mode: str = 
         return f"⚠️ **Errore nell'AI locale**: {e}"
 
 # ==========================================================================
-# FUNZIONE PRINCIPALE A CASCATA
+# 3. GEMINI (secondo livello)
+# ==========================================================================
+def call_gemini(system_prompt: str, user_prompt: str, max_tokens: int = 8192) -> str:
+    """Chiamata a Gemini."""
+    api_key = safe_get_secret("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not GEMINI_AVAILABLE or not api_key:
+        raise ValueError("Gemini non disponibile o chiave mancante.")
+    
+    genai.configure(api_key=api_key)
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    response = model.generate_content(
+        full_prompt,
+        generation_config=genai.types.GenerationConfig(
+            temperature=0.2,
+            max_output_tokens=min(max_tokens, 8192)
+        )
+    )
+    if response.text and response.text.strip():
+        return response.text.strip()
+    else:
+        raise ValueError("Risposta vuota da Gemini.")
+
+# ==========================================================================
+# 4. FUNZIONE PRINCIPALE A CASCATA (GROQ → GEMINI → LOCALE)
 # ==========================================================================
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
     """
-    Tenta prima con Google Gemini. Se fallisce (qualsiasi errore), usa SmolLM2 locale.
-    Se Gemini non è configurato, usa direttamente il modello locale.
+    Tenta in ordine:
+    1) Groq (se chiave e libreria presenti)
+    2) Gemini (se chiave e libreria presenti)
+    3) Modello locale SmolLM2 (se disponibile)
+    Restituisce la risposta del primo che funziona.
     """
-    # --------------------------------------------------------------
-    # 1. TENTATIVO CON GEMINI (se disponibile e configurato)
-    # --------------------------------------------------------------
-    api_key = os.getenv("GEMINI_API_KEY") or safe_get_secret("GEMINI_API_KEY", None)
-    if GEMINI_AVAILABLE and api_key:
-        try:
-            genai.configure(api_key=api_key)
-            system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
-            full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            model = genai.GenerativeModel('gemini-2.0-flash')
-            response = model.generate_content(
-                full_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.2,
-                    max_output_tokens=min(max_tokens, 8192)
-                )
-            )
-            if response.text and response.text.strip():
-                return response.text.strip()
-        except Exception as e:
-            error_msg = str(e)
-            logger.warning(f"Gemini fallito: {error_msg}")
-            if "429" in error_msg or "quota" in error_msg.lower():
-                st.info("⚠️ Quota Gemini esaurita. Attivazione AI locale...")
-            else:
-                st.info(f"⚠️ Errore Gemini ({error_msg[:100]}). Attivazione AI locale...")
+    system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
     
-    # --------------------------------------------------------------
-    # 2. FALLBACK: MODELLO LOCALE (SmolLM2)
-    # --------------------------------------------------------------
+    # ----- TENTATIVO GROQ -----
+    if GROQ_AVAILABLE:
+        try:
+            api_key = safe_get_secret("GROQ_API_KEY")
+            if api_key:
+                logger.info("Tentativo con Groq...")
+                return call_groq(system_prompt, user_prompt, max_tokens=max_tokens)
+            else:
+                logger.warning("Groq disponibile ma chiave API mancante.")
+        except Exception as e:
+            logger.warning(f"Groq fallito: {e}")
+            st.info(f"⚠️ Groq non risponde: {str(e)[:100]}. Passo a Gemini...")
+    else:
+        logger.warning("Libreria 'groq' non installata. Salto Groq.")
+    
+    # ----- TENTATIVO GEMINI -----
+    if GEMINI_AVAILABLE:
+        try:
+            api_key = safe_get_secret("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if api_key:
+                logger.info("Tentativo con Gemini...")
+                return call_gemini(system_prompt, user_prompt, max_tokens)
+            else:
+                logger.warning("Gemini disponibile ma chiave API mancante.")
+        except Exception as e:
+            logger.warning(f"Gemini fallito: {e}")
+            st.info(f"⚠️ Gemini non risponde: {str(e)[:100]}. Attivo fallback locale...")
+    else:
+        logger.warning("Libreria 'google-generativeai' non installata. Salto Gemini.")
+    
+    # ----- FALLBACK LOCALE -----
     return ask_local_fallback(context, user_question, mode)
 
 # ==========================================================================
-# CONTESTO PER LA SIDEBAR (VqAi)
+# CONTESTO PER LA SIDEBAR (VqAi) – invariato
 # ==========================================================================
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
     symbol_clean = (symbol or "").upper().strip()
