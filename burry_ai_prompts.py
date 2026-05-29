@@ -2,11 +2,15 @@ import json
 import logging
 import os
 import requests
+import warnings
 from textwrap import dedent
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
+
+# Sopprime il FutureWarning di google.generativeai (deprecato ma ancora funzionante)
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 
 # Tentativi di import per i motori
 try:
@@ -135,7 +139,6 @@ def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "
 # 1. GROQ (priorità massima)
 # ==========================================================================
 def call_groq(system_prompt: str, user_prompt: str, model: str = "llama-3.3-70b-versatile", temperature: float = 0.2, max_tokens: int = 4096) -> str:
-    """Chiamata sincrona a Groq. Restituisce il testo della risposta."""
     if not GROQ_AVAILABLE:
         raise ImportError("Libreria 'groq' non installata.")
     
@@ -188,7 +191,6 @@ def load_local_model():
         return None
 
 def ask_local_fallback(context: Dict[str, Any], user_question: str, mode: str = "Entrambi") -> str:
-    """Usa SmolLM2 locale come fallback quando Groq e Gemini falliscono."""
     if not LLAMA_AVAILABLE:
         return "⚠️ **Backup locale non disponibile**: libreria 'llama-cpp-python' non installata."
     
@@ -219,10 +221,9 @@ def ask_local_fallback(context: Dict[str, Any], user_question: str, mode: str = 
         return f"⚠️ **Errore nell'AI locale**: {e}"
 
 # ==========================================================================
-# 3. GEMINI (secondo livello)
+# 3. GEMINI (secondo livello) - con gestione warning silenziato
 # ==========================================================================
 def call_gemini(system_prompt: str, user_prompt: str, max_tokens: int = 8192) -> str:
-    """Chiamata a Gemini."""
     api_key = safe_get_secret("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not GEMINI_AVAILABLE or not api_key:
         raise ValueError("Gemini non disponibile o chiave mancante.")
@@ -246,13 +247,6 @@ def call_gemini(system_prompt: str, user_prompt: str, max_tokens: int = 8192) ->
 # 4. FUNZIONE PRINCIPALE A CASCATA (GROQ → GEMINI → LOCALE)
 # ==========================================================================
 def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: str = "Entrambi", max_tokens: int = 8192) -> str:
-    """
-    Tenta in ordine:
-    1) Groq (se chiave e libreria presenti)
-    2) Gemini (se chiave e libreria presenti)
-    3) Modello locale SmolLM2 (se disponibile)
-    Restituisce la risposta del primo che funziona.
-    """
     system_prompt, user_prompt = build_ai_messages(context, user_question, mode)
     
     # ----- TENTATIVO GROQ -----
@@ -313,7 +307,6 @@ def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any],
         'quant': qm or {},
         'risk': risk or {},
     }
-    # Se disponibile, aggiungi il verdetto unificato con tutti i dettagli
     if verdict:
         context['unified_verdict'] = {
             'final_score': verdict.get('FinalScore'),
