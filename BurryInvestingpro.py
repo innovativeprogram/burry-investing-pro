@@ -67,6 +67,15 @@ DEFAULT_SMART_WEIGHTS = {"F": 0.40, "T": 0.30, "Q": 0.30}
 TAX_LOSS_COMPENSATION_YEARS = 4
 BENEISH_THRESHOLD = -1.78
 
+# Mappa manuale per ticker che non vengono risolti automaticamente
+MANUAL_TICKER_MAP = {
+    "ENI": "ENI.MI",
+    "STLAM": "STLAM.MI",
+    "XDWU": "XDWU.DE",
+    "BMW": "BMW.DE",
+    "AIR": "AIR.PA",
+}
+
 POLYGON_RATE_LIMIT_SEC = 12.0
 _last_polygon_call = 0.0
 _polygon_lock = threading.Lock()
@@ -688,7 +697,7 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 2.A RISOLUZIONE ADATTIVA DEL TICKER
+# 2.A RISOLUZIONE ADATTIVA DEL TICKER (con mappa manuale)
 # ==========================================================================
 def _test_ticker_on_yfinance(symbol: str) -> bool:
     try:
@@ -717,11 +726,19 @@ def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> st
     symbol_clean = symbol.upper().strip()
     if not symbol_clean:
         return symbol_clean
+    
+    # Controllo mappa manuale
+    if symbol_clean in MANUAL_TICKER_MAP:
+        resolved = MANUAL_TICKER_MAP[symbol_clean]
+        logger.info(f"Mappa manuale: {symbol_clean} -> {resolved}")
+        return resolved
+    
     if 'ticker_resolution_cache' not in st.session_state:
         st.session_state.ticker_resolution_cache = {}
     cache = st.session_state.ticker_resolution_cache
     if not force_refresh and symbol_clean in cache:
         return cache[symbol_clean]
+    
     suffixes = ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS',
                 '.SW', '.MC', '.BR', '.MX', '.SA', '.BO', '.KS', '.SS', '.SZ',
                 '-USD', '-EUR']
@@ -743,6 +760,20 @@ def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> st
 # ==========================================================================
 # 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE
 # ==========================================================================
+def request_with_backoff(func, *args, **kwargs):
+    """Esegue una funzione con backoff esponenziale in caso di rate limiting"""
+    for attempt in range(5):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if "Rate limited" in str(e) and attempt < 4:
+                wait = 2 ** attempt
+                logger.warning(f"Rate limit, attendo {wait}s prima di riprovare...")
+                time.sleep(wait)
+            else:
+                raise e
+    return None
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     resolved = auto_resolve_ticker_adaptive(symbol)
@@ -755,11 +786,16 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         else:
             logger.info(f"Polygon insufficiente per {resolved}, provo yfinance")
     try:
-        stock = yf.Ticker(resolved)
-        info = stock.info
-        if info and ('symbol' in info or 'shortName' in info):
-            if 'symbol' not in info: info['symbol'] = resolved
-            return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": resolved}
+        def _fetch_yf():
+            stock = yf.Ticker(resolved)
+            info = stock.info
+            if info and ('symbol' in info or 'shortName' in info):
+                if 'symbol' not in info: info['symbol'] = resolved
+                return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": resolved}
+            return None
+        result = request_with_backoff(_fetch_yf)
+        if result:
+            return result
     except Exception as e:
         logger.info(f"yfinance fallito per {resolved}: {e}")
     try:
@@ -1118,7 +1154,9 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {symbol}: {e}")
     try:
-        df = yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
+        def _download_yf():
+            return yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
+        df = request_with_backoff(_download_yf)
         if df is not None and not df.empty:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             df = df.loc[:, ~df.columns.duplicated(keep='first')]
@@ -1795,7 +1833,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2006,8 +2044,7 @@ def setup_sidebar() -> Dict[str, Any]:
                 reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
             # Aggiungi la risposta alla cronologia
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
-            # Rerun per mostrare subito la risposta
-            st.rerun()
+            # ❌ NESSUN st.rerun() - lascia che Streamlit ridisegni naturalmente
     # ---- fine blocco VqAi ----
     render_apk_download_box()
     render_chi_siamo()
@@ -2070,7 +2107,7 @@ def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     elif row is not None:
         st.info("💡 **Metriche fondamentali (tabella dettagliata)**")
         df_single = pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore')
-        st.dataframe(df_single, use_container_width=True)
+        st.dataframe(df_single, width='stretch', use_container_width=True)
     else:
         st.info("Nessun dato fondamentale disponibile. Esegui una ricerca.")
     st.markdown("---")
@@ -2214,18 +2251,17 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
         st.session_state.ai_ticker_chat_history = []
         st.session_state.ai_ticker_chat_last_symbol = ticker
-    # PULSANTE "Spiega con VqAi" - MODIFICATO: non mostra più la risposta immediata
+    # PULSANTE "Spiega con VqAi" - MODIFICATO: non forza st.rerun()
     if st.button('🧠 Spiega con VqAi', key=f'ai_explain_{ticker}'):
         with st.spinner('Analisi AI in corso...'):
             ai_answer = ask_gemini_ticker_chat(ai_context, 'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.', mode='Unificato')
         st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
-        # Forza il rerun per mostrare subito la risposta (ora verrà visualizzata solo nel ciclo sottostante)
-        st.rerun()
-    # Mostra tutta la cronologia (utente + assistente) - qui NON c'è duplicazione
+        # ❌ NESSUN st.rerun()
+    # Mostra tutta la cronologia (utente + assistente)
     for msg in st.session_state.get('ai_ticker_chat_history', []):
         with st.chat_message(msg.get('role', 'assistant')):
             st.markdown(msg.get('content', ''))
-    # Chat interattiva (input dell'utente) - invariata
+    # Chat interattiva
     ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
     if ai_user_prompt:
         st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
@@ -2240,7 +2276,7 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
                 ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode='Unificato')
             st.markdown(ai_reply)
         st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
-        st.rerun()
+        # ❌ NESSUN st.rerun()
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
