@@ -1288,7 +1288,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
                     reasons.append("✅ OBV conferma trend rialzista")
                 elif obv_slope < 0 and price_slope > 0:
                     score -= 10
-                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende")
+                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende)")
             except Exception:
                 pass
     score = int(np.clip(score, 0, 100))
@@ -1795,7 +1795,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1976,25 +1976,39 @@ def setup_sidebar() -> Dict[str, Any]:
         ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
         key="nav_select"
     )
+    # ---- VqAi sidebar - CORRETTA (nessuna duplicazione) ----
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
         st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
+        
+        # Mostra la cronologia completa (sia utente che assistente)
         for msg in st.session_state.get('burry_ai_history', []):
-            with st.chat_message(msg.get('role', 'assistant')): st.markdown(msg.get('content', ''))
+            with st.chat_message(msg.get('role', 'assistant')):
+                st.markdown(msg.get('content', ''))
+        
         burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
         if burry_ai_prompt:
-            ctx = build_burry_ai_context(st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''), st.session_state.get('burry_ai_asset_type', 'Azione'), mode='Unificato')
+            # Aggiungi subito il messaggio utente alla cronologia
             st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
+            ctx = build_burry_ai_context(
+                st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
+                st.session_state.get('burry_ai_asset_type', 'Azione'),
+                mode='Unificato'
+            )
+            # Costruisci la cronologia per il contesto (escludendo l'ultimo messaggio, che è quello utente appena aggiunto)
             conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
-            for m in st.session_state.burry_ai_history[:-1]: conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
+            for m in st.session_state.burry_ai_history[:-1]:
+                conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
             enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
-            with st.chat_message('user'): st.markdown(burry_ai_prompt)
-            with st.chat_message('assistant'):
-                with st.spinner('VqAi sta rispondendo...'):
-                    reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
-                st.markdown(reply)
+            
+            with st.spinner('VqAi sta rispondendo...'):
+                reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
+            # Aggiungi la risposta alla cronologia
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
+            # Rerun per mostrare subito la risposta
+            st.rerun()
+    # ---- fine blocco VqAi ----
     render_apk_download_box()
     render_chi_siamo()
     render_privacy()
@@ -2195,22 +2209,23 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
             for r in timing_reasons: st.write(r)
     st.markdown('---')
     st.subheader('Spiegazione VqAi')
-    # Passa il verdetto all'AI (cambiamento chiave)
     ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, timing_score, timing_reasons, mode='Unificato', verdict=verdict)
     st.session_state.burry_ai_live_context[ticker] = ai_context
     if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
         st.session_state.ai_ticker_chat_history = []
         st.session_state.ai_ticker_chat_last_symbol = ticker
+    # PULSANTE "Spiega con VqAi" - MODIFICATO: non mostra più la risposta immediata
     if st.button('🧠 Spiega con VqAi', key=f'ai_explain_{ticker}'):
         with st.spinner('Analisi AI in corso...'):
             ai_answer = ask_gemini_ticker_chat(ai_context, 'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.', mode='Unificato')
         st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
-    if st.session_state.get('ai_ticker_chat_history'):
-        last_ai_msg = st.session_state.ai_ticker_chat_history[-1]
-        if last_ai_msg.get('role') == 'assistant': st.markdown(last_ai_msg.get('content', ''))
-    st.subheader('Chat VqAi sul ticker')
+        # Forza il rerun per mostrare subito la risposta (ora verrà visualizzata solo nel ciclo sottostante)
+        st.rerun()
+    # Mostra tutta la cronologia (utente + assistente) - qui NON c'è duplicazione
     for msg in st.session_state.get('ai_ticker_chat_history', []):
-        with st.chat_message(msg.get('role', 'assistant')): st.markdown(msg.get('content', ''))
+        with st.chat_message(msg.get('role', 'assistant')):
+            st.markdown(msg.get('content', ''))
+    # Chat interattiva (input dell'utente) - invariata
     ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
     if ai_user_prompt:
         st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
@@ -2218,12 +2233,14 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
         for m in st.session_state.ai_ticker_chat_history[:-1]:
             conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
         enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {ai_user_prompt}"
-        with st.chat_message('user'): st.markdown(ai_user_prompt)
+        with st.chat_message('user'):
+            st.markdown(ai_user_prompt)
         with st.chat_message('assistant'):
             with st.spinner("L'AI sta rispondendo..."):
                 ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode='Unificato')
             st.markdown(ai_reply)
         st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
+        st.rerun()
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
