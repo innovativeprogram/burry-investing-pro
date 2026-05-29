@@ -3,7 +3,7 @@ import logging
 import os
 import requests
 from textwrap import dedent
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
@@ -131,28 +131,6 @@ def build_ai_messages(context: Dict[str, Any], user_question: str, mode: str = "
         user_prompt = f"Modalità modello: {mode}\n\n" + user_prompt
     return system_prompt, user_prompt
 
-def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any],
-                                score: float, reasons: List[str], mode: str) -> Dict[str, Any]:
-    row_dict = row.to_dict() if row is not None and hasattr(row, 'to_dict') else dict(row or {})
-    return {
-        'ticker': ticker,
-        'mode': mode,
-        'timing_score': float(score or 0.0),
-        'timing_reasons': reasons or [],
-        'fundamentals': {
-            'company_name': row_dict.get('Company Name'),
-            'price': row_dict.get('Price'),
-            'roic': row_dict.get('ROIC'),
-            'peg_ratio': row_dict.get('PEG Ratio'),
-            'debt_to_equity': row_dict.get('Debt/Equity'),
-            'fcf_margin': row_dict.get('FCF Margin'),
-            'net_margin': row_dict.get('Net Margin'),
-            'revenue_growth': row_dict.get('Revenue Growth'),
-        },
-        'quant': qm or {},
-        'risk': risk or {},
-    }
-
 # ==========================================================================
 # 1. GROQ (priorità massima)
 # ==========================================================================
@@ -181,7 +159,7 @@ def call_groq(system_prompt: str, user_prompt: str, model: str = "llama-3.3-70b-
     return response.choices[0].message.content
 
 # ==========================================================================
-# 2. MODELLO LOCALE (SmolLM2-135M) – invariato
+# 2. MODELLO LOCALE (SmolLM2-135M)
 # ==========================================================================
 @st.cache_resource(show_spinner=False)
 def load_local_model():
@@ -311,7 +289,47 @@ def ask_gemini_ticker_chat(context: Dict[str, Any], user_question: str, mode: st
     return ask_local_fallback(context, user_question, mode)
 
 # ==========================================================================
-# CONTESTO PER LA SIDEBAR (VqAi) – invariato
+# 5. CONTESTO PER IL TICKER (con verdetto opzionale)
+# ==========================================================================
+def build_ai_context_for_ticker(ticker: str, row: pd.Series, qm: Dict[str, Any], risk: Dict[str, Any],
+                                score: float, reasons: List[str], mode: str,
+                                verdict: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    row_dict = row.to_dict() if row is not None and hasattr(row, 'to_dict') else dict(row or {})
+    context = {
+        'ticker': ticker,
+        'mode': mode,
+        'timing_score': float(score or 0.0),
+        'timing_reasons': reasons or [],
+        'fundamentals': {
+            'company_name': row_dict.get('Company Name'),
+            'price': row_dict.get('Price'),
+            'roic': row_dict.get('ROIC'),
+            'peg_ratio': row_dict.get('PEG Ratio'),
+            'debt_to_equity': row_dict.get('Debt/Equity'),
+            'fcf_margin': row_dict.get('FCF Margin'),
+            'net_margin': row_dict.get('Net Margin'),
+            'revenue_growth': row_dict.get('Revenue Growth'),
+        },
+        'quant': qm or {},
+        'risk': risk or {},
+    }
+    # Se disponibile, aggiungi il verdetto unificato con tutti i dettagli
+    if verdict:
+        context['unified_verdict'] = {
+            'final_score': verdict.get('FinalScore'),
+            'verdict': verdict.get('Verdict'),
+            'emoji': verdict.get('Emoji'),
+            'quality_score': verdict.get('FQS'),
+            'valuation_score': verdict.get('VAS'),
+            'timing_score': verdict.get('TMS'),
+            'risk_score': verdict.get('QRS'),
+            'details': verdict.get('Details', []),
+            'weights': verdict.get('Weights', {})
+        }
+    return context
+
+# ==========================================================================
+# 6. CONTESTO PER LA SIDEBAR (VqAi)
 # ==========================================================================
 def build_burry_ai_context(symbol: str, asset_type: str, mode: str = "Entrambi") -> Dict[str, Any]:
     symbol_clean = (symbol or "").upper().strip()
