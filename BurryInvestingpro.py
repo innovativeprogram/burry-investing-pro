@@ -3,8 +3,7 @@
 # Tutti i diritti riservati.
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
-# Versione refactored e corretta (basata su BurryInvestingpro (3).py)
-# Modifiche: correzione Piotroski, YahooQuery hardening, safe_div, Supabase ottimizzato, password speciale, type hints, logging.
+# Versione refactored e corretta con riordino sidebar.
 """
 
 import streamlit as st
@@ -729,7 +728,7 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
 # ==========================================================================
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE (corretto)
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE
 # ==========================================================================
 def request_with_backoff(func, *args, **kwargs):
     for attempt in range(5):
@@ -748,7 +747,6 @@ def request_with_backoff(func, *args, **kwargs):
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     cache = get_cache_manager()
     
-    # 1. Controllo cache (anche per fallimenti)
     cached = cache.get_fundamental(symbol)
     if cached is not None:
         if isinstance(cached, dict) and cached.get("_failed"):
@@ -760,7 +758,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     resolved = auto_resolve_ticker_adaptive(symbol)
     result = None
     
-    # 2. Polygon
+    # Polygon
     if '.' not in resolved:
         try:
             poly_data = get_polygon_fundamentals(resolved)
@@ -770,7 +768,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Polygon fallito per {resolved}: {e}")
     
-    # 3. FMP
+    # FMP
     if result is None:
         try:
             fmp = FMPSource()
@@ -781,7 +779,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"FMP fallito per {resolved}: {e}")
     
-    # 4. Alpha Vantage
+    # Alpha Vantage
     if result is None:
         try:
             av = AlphaVantageSource()
@@ -792,7 +790,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
     
-    # 5. MarketWatch scraper
+    # MarketWatch
     if result is None:
         try:
             mw = MarketWatchScraper()
@@ -803,7 +801,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"MarketWatch fallito per {resolved}: {e}")
     
-    # 6. yfinance
+    # yfinance
     if result is None:
         try:
             def _fetch_yf():
@@ -820,7 +818,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.info(f"yfinance fallito per {resolved}: {e}")
     
-    # 7. YahooQuery (ultimo tentativo) - con hardening
+    # YahooQuery (con hardening)
     if result is None:
         try:
             yq = YQ_Ticker(resolved)
@@ -850,7 +848,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             inc_stmt = format_yq_df(yq.income_statement())
             bal_sheet = format_yq_df(yq.balance_sheet())
             cash_flow = format_yq_df(yq.cash_flow())
-            # NON consideriamo YahooQuery un successo se almeno uno dei tre dataset è vuoto
+            # Non considerare YahooQuery un successo se uno dei tre è vuoto
             if inc_stmt.empty or bal_sheet.empty or cash_flow.empty:
                 logger.warning(f"YahooQuery dati incompleti per {resolved} (vuoti).")
                 raise ValueError("Dati YahooQuery incompleti")
@@ -865,7 +863,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.error(f"YahooQuery fallito per fondamentali di {resolved}: {e}")
     
-    # Salva in cache (se risultato valido) o un marker di fallimento
     if result:
         cache.set_fundamental(symbol, result)
     else:
@@ -1192,7 +1189,7 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA CON CACHE E CASCATA) - CORRETTA
+# 4. DATA ENGINE: ANALISI TECNICA
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
@@ -1205,7 +1202,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     resolved = auto_resolve_ticker_adaptive(symbol)
     df = None
     
-    # 1. Polygon
+    # Polygon
     if POLYGON_API_KEY and '.' not in resolved:
         try:
             throttle_polygon()
@@ -1228,7 +1225,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
     
-    # 2. Alpha Vantage
+    # Alpha Vantage
     if df is None or len(df) < 60:
         try:
             av = AlphaVantageSource()
@@ -1241,7 +1238,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.debug(f"Alpha Vantage tecnico fallito: {e}")
     
-    # 3. yfinance
+    # yfinance
     if df is None or len(df) < 60:
         try:
             def _download_yf():
@@ -1258,7 +1255,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
     
-    # 4. YahooQuery
+    # YahooQuery
     if df is None or len(df) < 60:
         try:
             yq = YQ_Ticker(resolved)
@@ -1277,7 +1274,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
     
-    # Salva in cache solo se valido e con almeno 60 righe
     if df is not None and not df.empty and len(df) >= 60:
         cache.set_technical(symbol, df)
     else:
@@ -1441,7 +1437,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE (invariate ma con safe_div)
+# 5. METRICHE QUANTITATIVE AVANZATE
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1696,7 +1692,6 @@ def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], r
     return {"SmartScore": smart, "FundamentalScore": f_score, "TechnicalScore": t_score, "QuantRiskScore": q_score}
 
 def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], macro: Dict[str, float]) -> Dict[str, Any]:
-    # Usa i pesi unificati
     weights = UNIFIED_WEIGHTS
     thresholds = {"roic_min": 0.10, "croic_min": 0.05, "fcf_margin_min": 0.08, "net_margin_min": 0.10, "de_max": 1.0, "interest_cov_min": 3.0, "fscore_min": 4, "mscore_max": -1.78, "altman_safe": ALTMAN_SAFE_THRESHOLD, "peg_max": 1.5, "ev_ebit_max": 15, "fcf_yield_min": 0.04, "pb_max": 3.0}
     fqs = 0.0
@@ -2046,7 +2041,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR (invariato)
+# 6. UI: SIDEBAR - MODIFICATO ORDINE
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -2108,25 +2103,18 @@ def render_contatti() -> None:
         st.caption("Risposta normalmente entro 24/48 ore.")
 
 def setup_sidebar() -> Dict[str, Any]:
-    render_auth_sidebar()
-    st.sidebar.header("1. Selezione Asset")
-    input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
-    file = None
-    manual = ""
-    if input_mode == "Batch CSV":
-        file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
-    else:
-        manual = st.sidebar.text_input("Ticker", value="").upper().strip()
-    st.sidebar.caption("🔍 Il ticker verrà automaticamente risolto (es. 'ENI' → 'ENI.MI', 'BMW' → 'BMW.DE' ecc.)")
-    analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
-    st.sidebar.markdown("---")
+    render_auth_sidebar()                     # 1. Account
+
+    # 2. NAVIGAZIONE
     st.sidebar.markdown("## 📑 Navigazione")
     tab_selection = st.sidebar.selectbox(
         "Vai a:",
         ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
         key="nav_select"
     )
-    # ---- VqAi sidebar ----
+    st.sidebar.markdown("---")
+
+    # 3. TUTTE LE ALTRE SEZIONI (VqAi, APK, info, contatti)
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
@@ -2152,11 +2140,27 @@ def setup_sidebar() -> Dict[str, Any]:
             with st.spinner('VqAi sta rispondendo...'):
                 reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
+
     render_apk_download_box()
     render_chi_siamo()
     render_privacy()
     render_sostieni()
     render_contatti()
+
+    st.sidebar.markdown("---")
+
+    # 4. SELEZIONE ASSET (in fondo)
+    st.sidebar.header("1. Selezione Asset")
+    input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
+    file = None
+    manual = ""
+    if input_mode == "Batch CSV":
+        file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
+    else:
+        manual = st.sidebar.text_input("Ticker", value="").upper().strip()
+    st.sidebar.caption("🔍 Il ticker verrà automaticamente risolto (es. 'ENI' → 'ENI.MI', 'BMW' → 'BMW.DE' ecc.)")
+    analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
+
     return {"mode": input_mode, "file": file, "manual": manual, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
 
 def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
@@ -2203,7 +2207,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB (con rimozione salvataggi automatici Supabase)
+# 7. FUNZIONI DI RENDERING DEI TAB (invariate)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
