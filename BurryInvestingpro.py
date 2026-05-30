@@ -1016,6 +1016,15 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         fin = raw_data["financials"]
         bs = raw_data["balance_sheet"]
         cf = raw_data["cashflow"]
+        
+        # Protezione contro tipi errati (da API che restituiscono stringhe o None)
+        if not isinstance(fin, pd.DataFrame):
+            fin = pd.DataFrame()
+        if not isinstance(bs, pd.DataFrame):
+            bs = pd.DataFrame()
+        if not isinstance(cf, pd.DataFrame):
+            cf = pd.DataFrame()
+        
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
         fcf = float(op_cash - cap_ex)
