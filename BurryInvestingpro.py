@@ -36,7 +36,7 @@ from cache_manager import get_cache_manager
 from rate_limiter import get_rate_limiter
 from ticker_resolver import auto_resolve_ticker_adaptive
 
-# Nuove fonti API e scraper (import diretto per evitare problemi)
+# Nuove fonti API e scraper (import diretto per evitare problemi con __init__.py)
 from api_sources.fmp import FMPSource
 from api_sources.alpha_vantage import AlphaVantageSource
 from scrapers.marketwatch import MarketWatchScraper
@@ -698,7 +698,8 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
         qt = str(raw_info.get('quoteType', '')).upper()
         if qt in {"CRYPTOCURRENCY", "CURRENCY", "FUTURE", "INDEX", "ETF", "MUTUALFUND"}: return True
     return False
-    # ==========================================================================
+
+# ==========================================================================
 # 2.A RISOLUZIONE ADATTIVA DEL TICKER (DELEGATA AL MODULO ticker_resolver)
 # ==========================================================================
 # La vecchia funzione è stata sostituita dall'import di auto_resolve_ticker_adaptive
@@ -723,9 +724,14 @@ def request_with_backoff(func, *args, **kwargs):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Recupera i dati fondamentali usando una cascata di fonti con merge dei campi mancanti.
-    Priorità: yfinance (completo) -> Polygon -> FMP -> Alpha Vantage -> MarketWatch -> YahooQuery.
-    Se un dato non è presente in una fonte, viene cercato nella successiva.
+    Recupera i dati fondamentali usando una cascata di fonti:
+    1. Cache SQLite
+    2. Polygon (se disponibile)
+    3. FMP (se API key presente)
+    4. Alpha Vantage (se API key presente)
+    5. MarketWatch scraper (fallback)
+    6. yfinance (fallback finale)
+    7. YahooQuery (ultimo fallback)
     """
     cache = get_cache_manager()
     
@@ -736,206 +742,113 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         return cached
     
     resolved = auto_resolve_ticker_adaptive(symbol)
-    results = []  # raccoglie i risultati parziali
+    result = None
     
-    # 2. yfinance (fonte più completa)
-    try:
-        def _fetch_yf():
-            stock = yf.Ticker(resolved)
-            info = stock.info
-            if info and ('symbol' in info or 'shortName' in info):
-                if 'symbol' not in info:
-                    info['symbol'] = resolved
-                return {
-                    "info": info,
-                    "financials": stock.financials,
-                    "balance_sheet": stock.balance_sheet,
-                    "cashflow": stock.cashflow,
-                    "symbol": resolved,
-                    "source": "yfinance"
-                }
-            return None
-        yf_result = request_with_backoff(_fetch_yf)
-        if yf_result:
-            results.append(yf_result)
-            logger.info(f"yfinance success per {resolved}")
-    except Exception as e:
-        logger.debug(f"yfinance fallito per {resolved}: {e}")
-    
-    # 3. Polygon (fallback)
+    # 2. Polygon (solo simboli senza punto)
     if '.' not in resolved:
         try:
             poly_data = get_polygon_fundamentals(resolved)
             if poly_data and (not poly_data["financials"].empty or not poly_data["balance_sheet"].empty):
-                poly_data["source"] = "Polygon"
-                results.append(poly_data)
+                result = poly_data
                 logger.info(f"Polygon success per {resolved}")
         except Exception as e:
             logger.debug(f"Polygon fallito per {resolved}: {e}")
     
-    # 4. FMP (fallback)
-    try:
-        fmp = FMPSource()
-        fmp_data = fmp.get_fundamentals(resolved)
-        if fmp_data and fmp_data.get('info') and fmp_data['info'].get('marketCap'):
-            fmp_data["source"] = "FMP"
-            results.append(fmp_data)
-            logger.info(f"FMP success per {resolved}")
-    except Exception as e:
-        logger.debug(f"FMP fallito per {resolved}: {e}")
+    # 3. FMP
+    if result is None:
+        try:
+            fmp = FMPSource()
+            fmp_data = fmp.get_fundamentals(resolved)
+            if fmp_data and fmp_data.get('info') and fmp_data['info'].get('marketCap'):
+                result = fmp_data
+                logger.info(f"FMP success per {resolved}")
+        except Exception as e:
+            logger.debug(f"FMP fallito per {resolved}: {e}")
     
-    # 5. Alpha Vantage (fallback)
-    try:
-        av = AlphaVantageSource()
-        av_data = av.get_fundamentals(resolved)
-        if av_data and av_data.get('info') and av_data['info'].get('marketCap'):
-            av_data["source"] = "AlphaVantage"
-            results.append(av_data)
-            logger.info(f"Alpha Vantage success per {resolved}")
-    except Exception as e:
-        logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
+    # 4. Alpha Vantage
+    if result is None:
+        try:
+            av = AlphaVantageSource()
+            av_data = av.get_fundamentals(resolved)
+            if av_data and av_data.get('info') and av_data['info'].get('marketCap'):
+                result = av_data
+                logger.info(f"Alpha Vantage success per {resolved}")
+        except Exception as e:
+            logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
     
-    # 6. MarketWatch scraper (fallback)
-    try:
-        mw = MarketWatchScraper()
-        mw_data = mw.get_fundamentals(resolved)
-        if mw_data and mw_data.get('info') and mw_data['info'].get('regularMarketPrice'):
-            mw_data["source"] = "MarketWatch"
-            results.append(mw_data)
-            logger.info(f"MarketWatch success per {resolved}")
-    except Exception as e:
-        logger.debug(f"MarketWatch fallito per {resolved}: {e}")
+    # 5. MarketWatch scraper
+    if result is None:
+        try:
+            mw = MarketWatchScraper()
+            mw_data = mw.get_fundamentals(resolved)
+            if mw_data and mw_data.get('info') and mw_data['info'].get('regularMarketPrice'):
+                result = mw_data
+                logger.info(f"MarketWatch success per {resolved}")
+        except Exception as e:
+            logger.debug(f"MarketWatch fallito per {resolved}: {e}")
     
-    # 7. YahooQuery (ultimo fallback)
-    try:
-        yq = YQ_Ticker(resolved)
-        summary = yq.summary_detail.get(resolved, {}) if isinstance(yq.summary_detail, dict) else {}
-        price = yq.price.get(resolved, {}) if isinstance(yq.price, dict) else {}
-        financial_data = yq.financial_data.get(resolved, {}) if isinstance(yq.financial_data, dict) else {}
-        if isinstance(summary, str): summary = {}
-        if isinstance(price, str): price = {}
-        if isinstance(financial_data, str): financial_data = {}
-        combined_info = {**summary, **price, **financial_data}
-        combined_info['symbol'] = resolved
-        if 'regularMarketPrice' in combined_info:
-            combined_info['currentPrice'] = combined_info['regularMarketPrice']
-        def format_yq_df(df_yq):
-            if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
-                df_yq = df_yq.copy()
-                if isinstance(df_yq.index, pd.MultiIndex):
+    # 6. yfinance (con backoff)
+    if result is None:
+        try:
+            def _fetch_yf():
+                stock = yf.Ticker(resolved)
+                info = stock.info
+                if info and ('symbol' in info or 'shortName' in info):
+                    if 'symbol' not in info: info['symbol'] = resolved
+                    return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": resolved}
+                return None
+            yf_result = request_with_backoff(_fetch_yf)
+            if yf_result:
+                result = yf_result
+                logger.info(f"yfinance success per {resolved}")
+        except Exception as e:
+            logger.info(f"yfinance fallito per {resolved}: {e}")
+    
+    # 7. YahooQuery (ultimo tentativo)
+    if result is None:
+        try:
+            yq = YQ_Ticker(resolved)
+            summary = yq.summary_detail.get(resolved, {}) if isinstance(yq.summary_detail, dict) else {}
+            price = yq.price.get(resolved, {}) if isinstance(yq.price, dict) else {}
+            financial_data = yq.financial_data.get(resolved, {}) if isinstance(yq.financial_data, dict) else {}
+            if isinstance(summary, str): summary = {}
+            if isinstance(price, str): price = {}
+            if isinstance(financial_data, str): financial_data = {}
+            combined_info = {**summary, **price, **financial_data}
+            combined_info['symbol'] = resolved
+            if 'regularMarketPrice' in combined_info: combined_info['currentPrice'] = combined_info['regularMarketPrice']
+            def format_yq_df(df_yq):
+                if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
+                    df_yq = df_yq.copy()
+                    if isinstance(df_yq.index, pd.MultiIndex):
+                        try: df_yq = df_yq.xs(resolved, level=0)
+                        except KeyError: return pd.DataFrame()
+                    if 'asOfDate' in df_yq.columns: df_yq.set_index('asOfDate', inplace=True)
+                    df_t = df_yq.transpose()
                     try:
-                        df_yq = df_yq.xs(resolved, level=0)
-                    except KeyError:
-                        return pd.DataFrame()
-                if 'asOfDate' in df_yq.columns:
-                    df_yq.set_index('asOfDate', inplace=True)
-                df_t = df_yq.transpose()
-                try:
-                    date_cols = pd.to_datetime(df_t.columns, errors='coerce')
-                    df_t = df_t.iloc[:, date_cols.argsort()[::-1]]
-                except Exception:
-                    pass
-                return df_t
-            return pd.DataFrame()
-        inc_stmt = format_yq_df(yq.income_statement())
-        bal_sheet = format_yq_df(yq.balance_sheet())
-        cash_flow = format_yq_df(yq.cash_flow())
-        if not inc_stmt.empty:
-            inc_stmt.rename(index={'TotalRevenue': 'Total Revenue','PretaxIncome': 'Pretax Income','TaxProvision': 'Tax Provision','InterestExpense': 'Interest Expense'}, inplace=True)
-        if not bal_sheet.empty:
-            bal_sheet.rename(index={'TotalDebt': 'Total Debt','StockholdersEquity': 'Stockholders Equity','TotalAssets': 'Total Assets','CurrentAssets': 'Current Assets','CurrentLiabilities': 'Current Liabilities','RetainedEarnings': 'Retained Earnings'}, inplace=True)
-        if not cash_flow.empty:
-            cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpediture': 'Capital Expenditure'}, inplace=True)
-        yq_result = {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": resolved, "source": "YahooQuery"}
-        results.append(yq_result)
-        logger.info(f"YahooQuery success per {resolved}")
-    except Exception as e:
-        logger.error(f"Tutte le API hanno fallito per fondamentali di {resolved}: {e}")
+                        date_cols = pd.to_datetime(df_t.columns, errors='coerce')
+                        df_t = df_t.iloc[:, date_cols.argsort()[::-1]]
+                    except Exception: pass
+                    return df_t
+                return pd.DataFrame()
+            inc_stmt = format_yq_df(yq.income_statement())
+            bal_sheet = format_yq_df(yq.balance_sheet())
+            cash_flow = format_yq_df(yq.cash_flow())
+            if not inc_stmt.empty:
+                inc_stmt.rename(index={'TotalRevenue': 'Total Revenue','PretaxIncome': 'Pretax Income','TaxProvision': 'Tax Provision','InterestExpense': 'Interest Expense'}, inplace=True)
+            if not bal_sheet.empty:
+                bal_sheet.rename(index={'TotalDebt': 'Total Debt','StockholdersEquity': 'Stockholders Equity','TotalAssets': 'Total Assets','CurrentAssets': 'Current Assets','CurrentLiabilities': 'Current Liabilities','RetainedEarnings': 'Retained Earnings'}, inplace=True)
+            if not cash_flow.empty:
+                cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpediture': 'Capital Expenditure'}, inplace=True)
+            result = {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": resolved}
+            logger.info(f"YahooQuery success per {resolved}")
+        except Exception as e:
+            logger.error(f"Tutte le API hanno fallito per fondamentali di {resolved}: {e}")
     
-    if not results:
-        return None
-    
-    # MERGE: combina i campi mancanti dalle varie fonti
-    merged_info = {}
-    merged_financials = pd.DataFrame()
-    merged_balance = pd.DataFrame()
-    merged_cashflow = pd.DataFrame()
-    
-    for r in results:
-        # Merge info dict (i campi non ancora presenti vengono aggiunti)
-        for k, v in r.get("info", {}).items():
-            if k not in merged_info or merged_info.get(k) in (None, "", 0, "N/A"):
-                if v not in (None, "", 0, "N/A"):
-                    merged_info[k] = v
-        
-        # Merge financials (prendi il primo non vuoto o combina)
-        if not r.get("financials", pd.DataFrame()).empty:
-            if merged_financials.empty:
-                merged_financials = r["financials"].copy()
-            else:
-                # Aggiungi righe mancanti
-                for idx in r["financials"].index:
-                    if idx not in merged_financials.index:
-                        merged_financials.loc[idx] = r["financials"].loc[idx]
-        
-        # Merge balance sheet
-        if not r.get("balance_sheet", pd.DataFrame()).empty:
-            if merged_balance.empty:
-                merged_balance = r["balance_sheet"].copy()
-            else:
-                for idx in r["balance_sheet"].index:
-                    if idx not in merged_balance.index:
-                        merged_balance.loc[idx] = r["balance_sheet"].loc[idx]
-        
-        # Merge cashflow
-        if not r.get("cashflow", pd.DataFrame()).empty:
-            if merged_cashflow.empty:
-                merged_cashflow = r["cashflow"].copy()
-            else:
-                for idx in r["cashflow"].index:
-                    if idx not in merged_cashflow.index:
-                        merged_cashflow.loc[idx] = r["cashflow"].loc[idx]
-    
-    # Rimuovi colonne duplicate (stesso anno) nei DataFrame
-    if not merged_financials.empty:
-        merged_financials = merged_financials.loc[:, ~merged_financials.columns.duplicated()]
-    if not merged_balance.empty:
-        merged_balance = merged_balance.loc[:, ~merged_balance.columns.duplicated()]
-    if not merged_cashflow.empty:
-        merged_cashflow = merged_cashflow.loc[:, ~merged_cashflow.columns.duplicated()]
-    
-    # Assicura che i DataFrame abbiano le colonne in ordine cronologico
-    if not merged_financials.empty:
-        try:
-            cols = sorted(merged_financials.columns, key=lambda x: int(x) if str(x).isdigit() else 0, reverse=True)
-            merged_financials = merged_financials[cols]
-        except:
-            pass
-    if not merged_balance.empty:
-        try:
-            cols = sorted(merged_balance.columns, key=lambda x: int(x) if str(x).isdigit() else 0, reverse=True)
-            merged_balance = merged_balance[cols]
-        except:
-            pass
-    if not merged_cashflow.empty:
-        try:
-            cols = sorted(merged_cashflow.columns, key=lambda x: int(x) if str(x).isdigit() else 0, reverse=True)
-            merged_cashflow = merged_cashflow[cols]
-        except:
-            pass
-    
-    final_result = {
-        "info": merged_info,
-        "financials": merged_financials,
-        "balance_sheet": merged_balance,
-        "cashflow": merged_cashflow,
-        "symbol": resolved,
-        "source": "merged"
-    }
-    
-    # Salva in cache
-    cache.set_fundamental(symbol, final_result)
-    return final_result
+    # Salva in cache (anche se None, per evitare richieste ripetute a fonti fallite? Meglio salvare solo se non None)
+    if result:
+        cache.set_fundamental(symbol, result)
+    return result
 
 def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
     if df is None or df.empty or idx not in df.index or df.shape[1] == 0:
@@ -950,15 +863,7 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
     bs = raw_data.get('balance_sheet')
     fin = raw_data.get('financials')
     cf = raw_data.get('cashflow')
-    # Protezione
-    if not isinstance(bs, pd.DataFrame):
-        bs = pd.DataFrame()
-    if not isinstance(fin, pd.DataFrame):
-        fin = pd.DataFrame()
-    if not isinstance(cf, pd.DataFrame):
-        cf = pd.DataFrame()
-    if bs.empty or fin.empty or cf.empty:
-        return 0
+    if bs is None or fin is None or cf is None: return 0
     fscore = 0
     try:
         net_income = safe_float(info.get('netIncomeToCommon'), 0.0)
@@ -1013,18 +918,9 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
     bs = raw_data.get('balance_sheet')
     fin = raw_data.get('financials')
     cf = raw_data.get('cashflow')
-    # Protezione
-    if not isinstance(bs, pd.DataFrame):
-        bs = pd.DataFrame()
-    if not isinstance(fin, pd.DataFrame):
-        fin = pd.DataFrame()
-    if not isinstance(cf, pd.DataFrame):
-        cf = pd.DataFrame()
-    if bs.empty or fin.empty or cf.empty:
-        return None, False
+    if bs is None or fin is None or cf is None: return None, False
     try:
-        if bs.shape[1] < 2 or fin.shape[1] < 2 or cf.shape[1] < 2:
-            return None, False
+        if bs.shape[1] < 2 or fin.shape[1] < 2 or cf.shape[1] < 2: return None, False
         total_assets = get_first(bs, 'Total Assets', 0.0)
         cur_assets = get_first(bs, 'Current Assets', 0.0)
         cur_liab = get_first(bs, 'Current Liabilities', 0.0)
@@ -1103,8 +999,8 @@ def estimate_epv(ebit: float, tax_rate: float, wacc: float, growth: float = 0.02
 
 def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[FundamentalMetrics]:
     try:
-        info = raw_data.get("info", {})
-        symbol = raw_data.get("symbol", "")
+        info = raw_data["info"]
+        symbol = raw_data["symbol"]
         if is_non_traditional_asset(symbol, info):
             return FundamentalMetrics(
                 ticker=symbol, company_name=info.get('shortName', symbol),
@@ -1117,26 +1013,17 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
                 f_score=None, m_score=None, m_score_reliable=False,
                 currency=info.get('currency', 'USD'), raw_data=raw_data
             )
+        fin = raw_data["financials"]
+        bs = raw_data["balance_sheet"]
+        cf = raw_data["cashflow"]
         
-        fin = raw_data.get("financials", pd.DataFrame())
-        bs = raw_data.get("balance_sheet", pd.DataFrame())
-        cf = raw_data.get("cashflow", pd.DataFrame())
-        
-        # Protezione contro tipi errati
+        # Protezione contro tipi errati (da API che restituiscono stringhe o None)
         if not isinstance(fin, pd.DataFrame):
             fin = pd.DataFrame()
         if not isinstance(bs, pd.DataFrame):
             bs = pd.DataFrame()
         if not isinstance(cf, pd.DataFrame):
             cf = pd.DataFrame()
-        
-        # Rimuovi colonne duplicate anche qui (per sicurezza)
-        if not fin.empty:
-            fin = fin.loc[:, ~fin.columns.duplicated()]
-        if not bs.empty:
-            bs = bs.loc[:, ~bs.columns.duplicated()]
-        if not cf.empty:
-            cf = cf.loc[:, ~cf.columns.duplicated()]
         
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
@@ -1151,8 +1038,7 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index and not fin.empty:
             pretax_inc = get_first(fin, 'Pretax Income', 0.0)
             tax_provision = get_first(fin, 'Tax Provision', 0.0)
-            if pretax_inc > 0:
-                tax_rate = float(np.clip(tax_provision / pretax_inc, 0.0, 1.0))
+            if pretax_inc > 0: tax_rate = float(np.clip(tax_provision / pretax_inc, 0.0, 1.0))
         roic = 0.0
         croic = 0.0
         if invested_cap > 0:
@@ -1163,8 +1049,7 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         growth = info.get('earningsGrowth')
         peg = info.get('pegRatio')
         peg_src = "N/A"
-        if peg is not None:
-            peg_src = "Official"
+        if peg is not None: peg_src = "Official"
         elif pe and pe > 0 and growth and growth > 0:
             peg = float(pe / (growth * 100))
             peg_src = "Estimated"
@@ -1177,26 +1062,20 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         net_income = info.get('netIncomeToCommon')
         revenue_growth = info.get('revenueGrowth')
         debt_to_equity = None
-        if equity is not None and not np.isnan(equity) and equity != 0:
-            debt_to_equity = float(total_debt / equity)
+        if equity is not None and not np.isnan(equity) and equity != 0: debt_to_equity = float(total_debt / equity)
         net_margin = None
-        if total_revenue not in (None, 0) and net_income is not None:
-            net_margin = safe_float(net_income, 0.0) / float(total_revenue)
+        if total_revenue not in (None, 0) and net_income is not None: net_margin = safe_float(net_income, 0.0) / float(total_revenue)
         fcf_margin = None
-        if total_revenue not in (None, 0):
-            fcf_margin = fcf / float(total_revenue)
+        if total_revenue not in (None, 0): fcf_margin = fcf / float(total_revenue)
         mc = info.get('marketCap')
         fcf_yield = None
-        if mc and mc > 0 and fcf != 0:
-            fcf_yield = fcf / float(mc)
+        if mc and mc > 0 and fcf != 0: fcf_yield = fcf / float(mc)
         ev = info.get('enterpriseValue')
         ebitda = info.get('ebitda')
         ev_to_ebit = None
-        if ev and ebit and ebit != 0:
-            ev_to_ebit = ev / ebit
+        if ev and ebit and ebit != 0: ev_to_ebit = ev / ebit
         ev_to_ebitda = None
-        if ev and ebitda and ebitda != 0:
-            ev_to_ebitda = ev / ebitda
+        if ev and ebitda and ebitda != 0: ev_to_ebitda = ev / ebitda
         pb = info.get('priceToBook')
         ps = info.get('priceToSalesTrailing12Months')
         fscore = calculate_piotroski_fscore(raw_data)
@@ -1253,11 +1132,9 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
 def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
     try:
         raw = get_fundamental_data(ticker)
-        if not raw:
-            return ticker, None, "nessun dato fondamentale disponibile"
+        if not raw: return ticker, None, "nessun dato fondamentale disponibile"
         met = calculate_fundamental_metrics(raw)
-        if not met:
-            return ticker, None, "impossibile calcolare le metriche"
+        if not met: return ticker, None, "impossibile calcolare le metriche"
         return ticker, met.to_ui_dict(), None
     except Exception as e:
         return ticker, None, str(e)
@@ -1265,16 +1142,13 @@ def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]]
 def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
     results = []
     errors = []
-    if not tickers:
-        return results, errors
+    if not tickers: return results, errors
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch_metrics_for_ticker, t): t for t in tickers}
         for f in as_completed(futures):
             t, ui_dict, err = f.result()
-            if err:
-                errors.append(f"{t}: {err}")
-            elif ui_dict is not None:
-                results.append(ui_dict)
+            if err: errors.append(f"{t}: {err}")
+            elif ui_dict is not None: results.append(ui_dict)
             time.sleep(BATCH_RATE_LIMIT_SEC)
     return results, errors
 
@@ -1284,8 +1158,12 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     """
-    Recupera i dati tecnici (OHLCV giornalieri) usando cascata con merge.
-    Fonti: Polygon, Alpha Vantage, yfinance, YahooQuery.
+    Recupera i dati tecnici (OHLCV giornalieri) usando:
+    1. Cache SQLite
+    2. Polygon (se API key presente)
+    3. Alpha Vantage (se API key)
+    4. yfinance
+    5. YahooQuery (fallback)
     """
     cache = get_cache_manager()
     cached = cache.get_technical(symbol)
@@ -1294,7 +1172,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         return cached
     
     resolved = auto_resolve_ticker_adaptive(symbol)
-    results = []
     df = None
     
     # 1. Polygon
@@ -1314,59 +1191,53 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df.set_index('Date', inplace=True)
                     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
                     if len(df) >= 60:
-                        results.append(df)
                         logger.info(f"Polygon success per tecnici {resolved}")
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
     
     # 2. Alpha Vantage
-    try:
-        av = AlphaVantageSource()
-        av_df = av.get_technical(resolved)
-        if av_df is not None and isinstance(av_df, pd.DataFrame) and len(av_df) >= 60:
-            results.append(av_df)
-            logger.info(f"Alpha Vantage success per tecnici {resolved}")
-    except Exception as e:
-        logger.debug(f"Alpha Vantage tecnico fallito: {e}")
+    if df is None or len(df) < 60:
+        try:
+            av = AlphaVantageSource()
+            av_df = av.get_technical(resolved)
+            if av_df is not None and isinstance(av_df, pd.DataFrame) and len(av_df) >= 60:
+                df = av_df
+                logger.info(f"Alpha Vantage success per tecnici {resolved}")
+        except Exception as e:
+            logger.debug(f"Alpha Vantage tecnico fallito: {e}")
     
     # 3. yfinance
-    try:
-        def _download_yf():
-            return yf.download(resolved, period="2y", interval="1d", progress=False, auto_adjust=True)
-        yf_df = request_with_backoff(_download_yf)
-        if yf_df is not None and not yf_df.empty:
-            if isinstance(yf_df.columns, pd.MultiIndex):
-                yf_df.columns = yf_df.columns.get_level_values(0)
-            yf_df = yf_df.loc[:, ~yf_df.columns.duplicated(keep='first')]
-            if len(yf_df) >= 60:
-                results.append(yf_df)
-                logger.info(f"yfinance success per tecnici {resolved}")
-    except Exception as e:
-        logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
+    if df is None or len(df) < 60:
+        try:
+            def _download_yf():
+                return yf.download(resolved, period="2y", interval="1d", progress=False, auto_adjust=True)
+            yf_df = request_with_backoff(_download_yf)
+            if yf_df is not None and not yf_df.empty:
+                if isinstance(yf_df.columns, pd.MultiIndex): yf_df.columns = yf_df.columns.get_level_values(0)
+                yf_df = yf_df.loc[:, ~yf_df.columns.duplicated(keep='first')]
+                if len(yf_df) >= 60:
+                    df = yf_df
+                    logger.info(f"yfinance success per tecnici {resolved}")
+        except Exception as e:
+            logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
     
     # 4. YahooQuery
-    try:
-        yq = YQ_Ticker(resolved)
-        yq_df = yq.history(period="2y", interval="1d")
-        if isinstance(yq_df, pd.DataFrame) and not yq_df.empty:
-            if isinstance(yq_df.index, pd.MultiIndex):
-                try:
-                    yq_df = yq_df.xs(resolved, level=0)
-                except KeyError:
-                    pass
-            yq_df.columns = [str(c).capitalize() for c in yq_df.columns]
-            yq_df = yq_df.loc[:, ~yq_df.columns.duplicated(keep='first')]
-            if len(yq_df) >= 60:
-                results.append(yq_df)
-                logger.info(f"YahooQuery success per tecnici {resolved}")
-    except Exception as e:
-        logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
+    if df is None or len(df) < 60:
+        try:
+            yq = YQ_Ticker(resolved)
+            yq_df = yq.history(period="2y", interval="1d")
+            if isinstance(yq_df, pd.DataFrame) and not yq_df.empty:
+                if isinstance(yq_df.index, pd.MultiIndex):
+                    try: yq_df = yq_df.xs(resolved, level=0)
+                    except KeyError: pass
+                yq_df.columns = [str(c).capitalize() for c in yq_df.columns]
+                yq_df = yq_df.loc[:, ~yq_df.columns.duplicated(keep='first')]
+                if len(yq_df) >= 60:
+                    df = yq_df
+                    logger.info(f"YahooQuery success per tecnici {resolved}")
+        except Exception as e:
+            logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
     
-    if not results:
-        return None
-    
-    # Merge: prendi il DataFrame con più righe (più completo)
-    df = max(results, key=lambda x: len(x))
     # Salva in cache
     if df is not None and not df.empty:
         cache.set_technical(symbol, df)
@@ -1444,23 +1315,19 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
             if bb is not None:
                 low_bb = bb.filter(like='BBL_')
                 up_bb = bb.filter(like='BBU_')
-                if not low_bb.empty:
-                    data['BB_Lower'] = low_bb.iloc[:, 0]
-                if not up_bb.empty:
-                    data['BB_Upper'] = up_bb.iloc[:, 0]
+                if not low_bb.empty: data['BB_Lower'] = low_bb.iloc[:, 0]
+                if not up_bb.empty: data['BB_Upper'] = up_bb.iloc[:, 0]
             macd = ta.macd(close)
             if macd is not None and not macd.empty:
                 m_col = macd.filter(like='MACD_').filter(regex=r'_\d+_\d+_\d+$')
                 s_col = macd.filter(like='MACDs_')
                 if not m_col.empty:
                     data['MACD'] = m_col.iloc[:, 0]
-                if not s_col.empty:
-                    data['MACD_signal'] = s_col.iloc[:, 0]
+                if not s_col.empty: data['MACD_signal'] = s_col.iloc[:, 0]
             adx_df = ta.adx(high=high, low=low, close=close, length=14)
             if adx_df is not None:
                 adx_col = adx_df.filter(like='ADX_')
-                if not adx_col.empty:
-                    data['ADX'] = adx_col.iloc[:, 0]
+                if not adx_col.empty: data['ADX'] = adx_col.iloc[:, 0]
         except Exception:
             pass
     return data
@@ -1532,7 +1399,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE
+# 5. METRICHE QUANTITATIVE AVANZATE (invariate)
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1558,31 +1425,26 @@ def omega_ratio(returns: pd.Series, rf_annual: float = 0.04, threshold: float = 
     return gain_integral / loss_integral
 
 def jensens_alpha(port_ret: pd.Series, bench_ret: pd.Series, rf_annual: float = 0.04) -> float:
-    if len(port_ret) < 30 or len(bench_ret) < 30:
-        return np.nan
+    if len(port_ret) < 30 or len(bench_ret) < 30: return np.nan
     rf_daily = rf_annual / TRADING_DAYS_YEAR
     port_excess = port_ret - rf_daily
     bench_excess = bench_ret - rf_daily
     cov = np.cov(port_excess, bench_excess)[0, 1]
     var_bench = bench_excess.var()
-    if var_bench == 0:
-        return np.nan
+    if var_bench == 0: return np.nan
     beta = cov / var_bench
     alpha_daily = port_excess.mean() - beta * bench_excess.mean()
     alpha_ann = (1 + alpha_daily) ** TRADING_DAYS_YEAR - 1
     return alpha_ann
 
 def information_ratio(port_ret: pd.Series, bench_ret: pd.Series) -> float:
-    if len(port_ret) < 30 or len(bench_ret) < 30:
-        return np.nan
+    if len(port_ret) < 30 or len(bench_ret) < 30: return np.nan
     active = port_ret - bench_ret
-    if active.std() == 0:
-        return np.nan
+    if active.std() == 0: return np.nan
     return (active.mean() * TRADING_DAYS_YEAR) / (active.std() * np.sqrt(TRADING_DAYS_YEAR))
 
 def ulcer_index(returns: pd.Series) -> float:
-    if returns.empty:
-        return np.nan
+    if returns.empty: return np.nan
     equity = (1 + returns).cumprod()
     running_max = equity.expanding().max()
     drawdown = (equity - running_max) / running_max
@@ -1594,8 +1456,7 @@ def fit_garch(returns: pd.Series) -> Optional[Dict[str, float]]:
         from arch import arch_model
     except ImportError:
         return None
-    if len(returns) < 100:
-        return None
+    if len(returns) < 100: return None
     try:
         returns_clean = returns.dropna() * 100
         model = arch_model(returns_clean, vol='Garch', p=1, q=1, dist='t')
@@ -1612,8 +1473,7 @@ def get_macro_indicators() -> Dict[str, float]:
     try:
         import pandas_datareader.data as web
         treasury = web.DataReader('DGS10', 'fred', start=pd.Timestamp.now() - pd.DateOffset(days=30))
-        if not treasury.empty:
-            result["treasury_10y"] = safe_float(treasury.iloc[-1, 0], np.nan) / 100.0
+        if not treasury.empty: result["treasury_10y"] = safe_float(treasury.iloc[-1, 0], np.nan) / 100.0
         cpi = web.DataReader('CPIAUCSL', 'fred', start=pd.Timestamp.now() - pd.DateOffset(months=13))
         if len(cpi) >= 13:
             cpi_series = cpi.iloc[:, 0]
@@ -1657,8 +1517,7 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]
                         rev = info.get('totalRevenue', 0) or 0
                         z_score = float((1.2 * (wc / ta_val)) + (1.4 * (re_val / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val)))
                         bv_equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else 0
-                        if bv_equity:
-                            z_score2 = float(6.56 * (wc / ta_val) + 3.26 * (re_val / ta_val) + 6.72 * (ebit / ta_val) + 1.05 * (bv_equity / tl))
+                        if bv_equity: z_score2 = float(6.56 * (wc / ta_val) + 3.26 * (re_val / ta_val) + 6.72 * (ebit / ta_val) + 1.05 * (bv_equity / tl))
         except Exception as e:
             logger.debug(f"Altman Z-Score errore: {e}")
     return {"Sharpe Ratio": float(sharpe) if not np.isnan(sharpe) else 0.0, "Annual Volatility": float(vol) if not np.isnan(vol) else np.nan, "R-Squared": float(r_sq) if not np.isnan(r_sq) else np.nan, "Altman Z-Score": z_score, "Altman Z''-Score": z_score2, "Price Percentile": float((df['Close'] < df['Close'].iloc[-1]).mean() * 100), "Trend Slope": slope, "Risk Free Used": float(rf)}
@@ -1694,8 +1553,7 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
 def monte_carlo_equity(df: pd.DataFrame, n_paths: int = 1000, horizon_days: int = 252, seed: Optional[int] = 42) -> Dict[str, Any]:
     prices = df['Close'].dropna()
     returns = prices.pct_change().dropna().values
-    if returns.size == 0:
-        return {"paths": None, "final_distribution": None, "q05": None, "q50": None, "q95": None}
+    if returns.size == 0: return {"paths": None, "final_distribution": None, "q05": None, "q50": None, "q95": None}
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(returns), size=(n_paths, horizon_days))
     sampled = returns[idx]
@@ -1709,8 +1567,7 @@ def monte_carlo_equity(df: pd.DataFrame, n_paths: int = 1000, horizon_days: int 
 def monte_carlo_block_bootstrap(df: pd.DataFrame, n_paths: int = 1000, horizon_days: int = 252, block_size: int = 5, seed: Optional[int] = 42) -> Dict[str, Any]:
     prices = df['Close'].dropna()
     returns = prices.pct_change().dropna().values
-    if returns.size < block_size:
-        return monte_carlo_equity(df, n_paths, horizon_days, seed)
+    if returns.size < block_size: return monte_carlo_equity(df, n_paths, horizon_days, seed)
     rng = np.random.default_rng(seed)
     n_blocks_per_path = (horizon_days // block_size) + 1
     paths = np.empty((n_paths, n_blocks_per_path * block_size))
@@ -1730,77 +1587,50 @@ def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], r
     f_score += float(np.clip((roic - 0.10) / (0.25 - 0.10), 0, 1)) * 30.0
     peg = row.get("PEG Ratio", None)
     if peg is not None and peg > 0:
-        if peg <= 1:
-            f_score += 25.0
-        elif peg <= 2:
-            f_score += 12.0
+        if peg <= 1: f_score += 25.0
+        elif peg <= 2: f_score += 12.0
     debt_to_equity = row.get("Debt/Equity", None)
     if debt_to_equity is not None:
-        if debt_to_equity <= 0.5:
-            f_score += 12.0
-        elif debt_to_equity <= 1.0:
-            f_score += 7.0
-        elif debt_to_equity <= 2.0:
-            f_score += 3.0
+        if debt_to_equity <= 0.5: f_score += 12.0
+        elif debt_to_equity <= 1.0: f_score += 7.0
+        elif debt_to_equity <= 2.0: f_score += 3.0
     revenue_growth = row.get("Revenue Growth", None)
     if revenue_growth is not None:
-        if revenue_growth >= 0.15:
-            f_score += 6.0
-        elif revenue_growth >= 0.05:
-            f_score += 3.0
-        elif revenue_growth > 0:
-            f_score += 1.5
+        if revenue_growth >= 0.15: f_score += 6.0
+        elif revenue_growth >= 0.05: f_score += 3.0
+        elif revenue_growth > 0: f_score += 1.5
     net_margin = row.get("Net Margin", None)
     if net_margin is not None:
-        if net_margin >= 0.20:
-            f_score += 8.0
-        elif net_margin >= 0.10:
-            f_score += 4.0
-        elif net_margin > 0:
-            f_score += 2.0
+        if net_margin >= 0.20: f_score += 8.0
+        elif net_margin >= 0.10: f_score += 4.0
+        elif net_margin > 0: f_score += 2.0
     fcf_margin = row.get("FCF Margin", None)
     if fcf_margin is not None:
-        if fcf_margin >= 0.15:
-            f_score += 12.0
-        elif fcf_margin >= 0.08:
-            f_score += 7.0
-        elif fcf_margin > 0:
-            f_score += 3.0
+        if fcf_margin >= 0.15: f_score += 12.0
+        elif fcf_margin >= 0.08: f_score += 7.0
+        elif fcf_margin > 0: f_score += 3.0
     fscore_val = row.get("F-Score", 0) or 0
-    if fscore_val >= 7:
-        f_score += 12.0
-    elif fscore_val >= 4:
-        f_score += 6.0
-    elif fscore_val >= 2:
-        f_score += 3.0
+    if fscore_val >= 7: f_score += 12.0
+    elif fscore_val >= 4: f_score += 6.0
+    elif fscore_val >= 2: f_score += 3.0
     ev_ebit = row.get("EV/EBIT", None)
     if ev_ebit is not None and ev_ebit > 0:
-        if ev_ebit <= 10:
-            f_score += 10.0
-        elif ev_ebit <= 15:
-            f_score += 5.0
+        if ev_ebit <= 10: f_score += 10.0
+        elif ev_ebit <= 15: f_score += 5.0
     fcf_yield = row.get("FCF Yield", None)
     if fcf_yield is not None:
-        if fcf_yield >= 0.10:
-            f_score += 8.0
-        elif fcf_yield >= 0.05:
-            f_score += 4.0
+        if fcf_yield >= 0.10: f_score += 8.0
+        elif fcf_yield >= 0.05: f_score += 4.0
     mscore = row.get("Beneish M-Score", None)
     if mscore is not None:
-        if mscore > -1.78:
-            f_score -= 15.0
-        elif mscore > -2.22:
-            f_score -= 8.0
-    if roic >= 0.15:
-        f_score += 6.0
-    elif roic >= 0.12:
-        f_score += 3.0
+        if mscore > -1.78: f_score -= 15.0
+        elif mscore > -2.22: f_score -= 8.0
+    if roic >= 0.15: f_score += 6.0
+    elif roic >= 0.12: f_score += 3.0
     z = qm.get("Altman Z-Score", "N/A")
     if isinstance(z, (int, float, np.floating)) and not isinstance(z, bool):
-        if z >= 3.0:
-            f_score += 7.0
-        elif z >= ALTMAN_SAFE_THRESHOLD:
-            f_score += 3.5
+        if z >= 3.0: f_score += 7.0
+        elif z >= ALTMAN_SAFE_THRESHOLD: f_score += 3.5
     f_score = float(np.clip(f_score, 0, 100))
     t_score = float(np.clip(timing_score, 0, 100))
     q_score = 0.0
@@ -1808,25 +1638,16 @@ def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], r
     max_dd = risk.get("Max Drawdown", 0.0) or 0.0
     sortino = risk.get("Sortino", 0.0) or 0.0
     omega = risk.get("Omega Ratio", 0.0) or 0.0
-    if sharpe <= 0:
-        q_score += 0.0
-    elif sharpe <= 1:
-        q_score += 30.0 * sharpe
-    elif sharpe <= 2:
-        q_score += 30.0 + 30.0 * (sharpe - 1.0)
-    else:
-        q_score += 80.0
-    if sortino > 0:
-        q_score += min(10.0, sortino * 10)
-    if omega > 1.5:
-        q_score += 10.0
-    elif omega > 1.0:
-        q_score += 5.0
+    if sharpe <= 0: q_score += 0.0
+    elif sharpe <= 1: q_score += 30.0 * sharpe
+    elif sharpe <= 2: q_score += 30.0 + 30.0 * (sharpe - 1.0)
+    else: q_score += 80.0
+    if sortino > 0: q_score += min(10.0, sortino * 10)
+    if omega > 1.5: q_score += 10.0
+    elif omega > 1.0: q_score += 5.0
     if isinstance(max_dd, (float, np.floating)):
-        if max_dd < -0.5:
-            q_score -= 20.0
-        elif max_dd < -0.3:
-            q_score -= 10.0
+        if max_dd < -0.5: q_score -= 20.0
+        elif max_dd < -0.3: q_score -= 10.0
     q_score = float(np.clip(q_score, 0, 100))
     smart = w["F"] * f_score + w["T"] * t_score + w["Q"] * q_score
     smart = float(np.clip(smart, 0, 100))
@@ -1838,153 +1659,81 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     fqs = 0.0
     details = []
     roic = safe_float(row.get("ROIC"), 0.0)
-    if roic >= thresholds["roic_min"]:
-        fqs += 20
-        details.append("✅ ROIC ≥ 10%")
-    elif roic > 0:
-        fqs += 10
-        details.append("⚠️ ROIC positivo ma basso")
+    if roic >= thresholds["roic_min"]: fqs += 20; details.append("✅ ROIC ≥ 10%")
+    elif roic > 0: fqs += 10; details.append("⚠️ ROIC positivo ma basso")
     croic = safe_float(row.get("CROIC"), 0.0)
-    if croic >= thresholds["croic_min"]:
-        fqs += 10
-        details.append("✅ CROIC ≥ 5%")
+    if croic >= thresholds["croic_min"]: fqs += 10; details.append("✅ CROIC ≥ 5%")
     fcf_margin = safe_float(row.get("FCF Margin"), None)
-    if fcf_margin is not None and fcf_margin >= thresholds["fcf_margin_min"]:
-        fqs += 10
-        details.append("✅ FCF Margin ≥ 8%")
+    if fcf_margin is not None and fcf_margin >= thresholds["fcf_margin_min"]: fqs += 10; details.append("✅ FCF Margin ≥ 8%")
     net_margin = safe_float(row.get("Net Margin"), None)
-    if net_margin is not None and net_margin >= thresholds["net_margin_min"]:
-        fqs += 10
-        details.append("✅ Net Margin ≥ 10%")
+    if net_margin is not None and net_margin >= thresholds["net_margin_min"]: fqs += 10; details.append("✅ Net Margin ≥ 10%")
     de = safe_float(row.get("Debt/Equity"), None)
     if de is not None:
-        if de <= 0.5:
-            fqs += 10
-            details.append("✅ D/E ≤ 0.5")
-        elif de <= thresholds["de_max"]:
-            fqs += 5
-            details.append("⚠️ D/E ≤ 1.0")
+        if de <= 0.5: fqs += 10; details.append("✅ D/E ≤ 0.5")
+        elif de <= thresholds["de_max"]: fqs += 5; details.append("⚠️ D/E ≤ 1.0")
     int_cov = safe_float(row.get("Interest Coverage"), SAFE_INTEREST_COVERAGE)
-    if int_cov >= 5:
-        fqs += 10
-        details.append("✅ Int.Cover. > 5x")
-    elif int_cov >= thresholds["interest_cov_min"]:
-        fqs += 5
-        details.append("⚠️ Int.Cover. > 3x")
+    if int_cov >= 5: fqs += 10; details.append("✅ Int.Cover. > 5x")
+    elif int_cov >= thresholds["interest_cov_min"]: fqs += 5; details.append("⚠️ Int.Cover. > 3x")
     fscore = safe_float(row.get("F-Score"), 0.0)
-    if fscore >= 7:
-        fqs += 15
-        details.append("✅ F‑Score ≥ 7 (eccellente)")
-    elif fscore >= thresholds["fscore_min"]:
-        fqs += 8
-        details.append("⚠️ F‑Score ≥ 4 (discreto)")
+    if fscore >= 7: fqs += 15; details.append("✅ F‑Score ≥ 7 (eccellente)")
+    elif fscore >= thresholds["fscore_min"]: fqs += 8; details.append("⚠️ F‑Score ≥ 4 (discreto)")
     mscore = safe_float(row.get("Beneish M-Score"), None)
     mscore_reliable = row.get("M-Score reliable", True)
     if mscore is not None:
-        if mscore <= -2.22:
-            fqs += 10
-            details.append("✅ M‑Score ≤ -2.22")
-        elif mscore <= thresholds["mscore_max"]:
-            fqs += 5
-            details.append("⚠️ M‑Score accettabile")
-        else:
-            fqs -= 20
-            details.append("🛑 M‑Score > -1.78 (sospetto)")
-        if not mscore_reliable:
-            details.append("⚠️ M‑Score approssimativo (dati incompleti)")
+        if mscore <= -2.22: fqs += 10; details.append("✅ M‑Score ≤ -2.22")
+        elif mscore <= thresholds["mscore_max"]: fqs += 5; details.append("⚠️ M‑Score accettabile")
+        else: fqs -= 20; details.append("🛑 M‑Score > -1.78 (sospetto)")
+        if not mscore_reliable: details.append("⚠️ M‑Score approssimativo (dati incompleti)")
     z = qm.get("Altman Z-Score", "N/A")
     if isinstance(z, (int, float)):
-        if z >= 3.0:
-            fqs += 5
-            details.append("✅ Z‑Score > 3")
-        elif z >= thresholds["altman_safe"]:
-            fqs += 2
-            details.append("⚠️ Z‑Score > 1.81")
+        if z >= 3.0: fqs += 5; details.append("✅ Z‑Score > 3")
+        elif z >= thresholds["altman_safe"]: fqs += 2; details.append("⚠️ Z‑Score > 1.81")
     rev_growth = safe_float(row.get("Revenue Growth"), None)
-    if rev_growth is not None and rev_growth > 0.05:
-        fqs += 5
-        details.append("✅ Crescita ricavi > 5%")
+    if rev_growth is not None and rev_growth > 0.05: fqs += 5; details.append("✅ Crescita ricavi > 5%")
     current_ratio = row.get("Current Ratio")
     if current_ratio is not None and current_ratio > 0:
-        if current_ratio > 1.5:
-            fqs += 8
-            details.append(f"✅ Current Ratio > 1.5 ({current_ratio:.2f})")
-        elif current_ratio < 1.0:
-            fqs -= 5
-            details.append(f"⚠️ Current Ratio < 1.0 ({current_ratio:.2f})")
+        if current_ratio > 1.5: fqs += 8; details.append(f"✅ Current Ratio > 1.5 ({current_ratio:.2f})")
+        elif current_ratio < 1.0: fqs -= 5; details.append(f"⚠️ Current Ratio < 1.0 ({current_ratio:.2f})")
     quick_ratio = row.get("Quick Ratio")
     if quick_ratio is not None and quick_ratio > 0:
-        if quick_ratio > 1.0:
-            fqs += 5
-            details.append(f"✅ Quick Ratio > 1.0 ({quick_ratio:.2f})")
+        if quick_ratio > 1.0: fqs += 5; details.append(f"✅ Quick Ratio > 1.0 ({quick_ratio:.2f})")
     roe = row.get("ROE %")
     if roe is not None and not np.isnan(roe):
         roe_val = roe / 100.0
-        if roe_val > 0.15:
-            fqs += 12
-            details.append(f"✅ ROE > 15% ({roe:.1f}%)")
-        elif roe_val > 0.10:
-            fqs += 6
-            details.append(f"⚠️ ROE > 10% ({roe:.1f}%)")
+        if roe_val > 0.15: fqs += 12; details.append(f"✅ ROE > 15% ({roe:.1f}%)")
+        elif roe_val > 0.10: fqs += 6; details.append(f"⚠️ ROE > 10% ({roe:.1f}%)")
     roce = row.get("ROCE %")
     if roce is not None and not np.isnan(roce):
         roce_val = roce / 100.0
-        if roce_val > 0.20:
-            fqs += 15
-            details.append(f"✅ ROCE > 20% ({roce:.1f}%)")
-        elif roce_val > 0.10:
-            fqs += 8
-            details.append(f"⚠️ ROCE > 10% ({roce:.1f}%)")
+        if roce_val > 0.20: fqs += 15; details.append(f"✅ ROCE > 20% ({roce:.1f}%)")
+        elif roce_val > 0.10: fqs += 8; details.append(f"⚠️ ROCE > 10% ({roce:.1f}%)")
     fqs = np.clip(fqs, 0, 100)
     vas = 0.0
     peg = safe_float(row.get("PEG Ratio"), None)
     if peg is not None and peg > 0:
-        if peg <= 1.0:
-            vas += 30
-            details.append("✅ PEG ≤ 1")
-        elif peg <= thresholds["peg_max"]:
-            vas += 20
-            details.append("✅ PEG ≤ 1.5")
-        else:
-            vas += 5
+        if peg <= 1.0: vas += 30; details.append("✅ PEG ≤ 1")
+        elif peg <= thresholds["peg_max"]: vas += 20; details.append("✅ PEG ≤ 1.5")
+        else: vas += 5
     ev_ebit = safe_float(row.get("EV/EBIT"), None)
     if ev_ebit is not None and ev_ebit > 0:
-        if ev_ebit <= 10:
-            vas += 25
-            details.append("✅ EV/EBIT ≤ 10")
-        elif ev_ebit <= thresholds["ev_ebit_max"]:
-            vas += 15
-            details.append("⚠️ EV/EBIT ≤ 15")
+        if ev_ebit <= 10: vas += 25; details.append("✅ EV/EBIT ≤ 10")
+        elif ev_ebit <= thresholds["ev_ebit_max"]: vas += 15; details.append("⚠️ EV/EBIT ≤ 15")
     fcf_yield = safe_float(row.get("FCF Yield"), None)
     if fcf_yield is not None:
-        if fcf_yield >= 0.08:
-            vas += 20
-            details.append("✅ FCF Yield ≥ 8%")
-        elif fcf_yield >= thresholds["fcf_yield_min"]:
-            vas += 10
-            details.append("⚠️ FCF Yield ≥ 4%")
+        if fcf_yield >= 0.08: vas += 20; details.append("✅ FCF Yield ≥ 8%")
+        elif fcf_yield >= thresholds["fcf_yield_min"]: vas += 10; details.append("⚠️ FCF Yield ≥ 4%")
     pb = safe_float(row.get("Price/Book"), None)
     if pb is not None and pb > 0:
-        if pb <= 1.5:
-            vas += 15
-            details.append("✅ P/B ≤ 1.5")
-        elif pb <= thresholds["pb_max"]:
-            vas += 8
-            details.append("⚠️ P/B ≤ 3")
+        if pb <= 1.5: vas += 15; details.append("✅ P/B ≤ 1.5")
+        elif pb <= thresholds["pb_max"]: vas += 8; details.append("⚠️ P/B ≤ 3")
     price = safe_float(row.get("Price"), None)
     graham = row.get("Graham Number")
     if price is not None and graham is not None and graham > 0:
-        if price < graham:
-            vas += 15
-            details.append(f"✅ Prezzo < Graham Number (${price:.2f} < ${graham:.2f})")
-        else:
-            vas -= 5
-            details.append(f"⚠️ Prezzo > Graham Number")
+        if price < graham: vas += 15; details.append(f"✅ Prezzo < Graham Number (${price:.2f} < ${graham:.2f})")
+        else: vas -= 5; details.append(f"⚠️ Prezzo > Graham Number")
     epv = row.get("EPV (est.)")
     if price is not None and epv is not None and epv > 0:
-        if price < epv:
-            vas += 10
-            details.append(f"✅ Prezzo < EPV stimato")
+        if price < epv: vas += 10; details.append(f"✅ Prezzo < EPV stimato")
     vas = np.clip(vas, 0, 100)
     tms = float(np.clip(timing_score, 0, 100))
     details.append(f"📈 Timing Score: {tms:.0f}/100")
@@ -1992,58 +1741,36 @@ def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any
     max_dd = risk.get("Max Drawdown", 0.0) or 0.0
     sortino = risk.get("Sortino", 0.0) or 0.0
     qrs = 50
-    if sharpe > 0:
-        qrs += min(20, sharpe * 20)
-    if sortino > 0:
-        qrs += min(15, sortino * 15)
-    if max_dd < -0.50:
-        qrs -= 25
-    elif max_dd < -0.30:
-        qrs -= 10
+    if sharpe > 0: qrs += min(20, sharpe * 20)
+    if sortino > 0: qrs += min(15, sortino * 15)
+    if max_dd < -0.50: qrs -= 25
+    elif max_dd < -0.30: qrs -= 10
     beta = safe_float(row.get("Beta (est.)"), 1.0)
-    if beta > 1.5:
-        qrs -= 10
-        details.append(f"⚠️ Beta alto ({beta:.2f}) - rischio sistematico elevato")
-    elif beta < 0.8:
-        qrs += 5
-        details.append(f"✅ Beta basso ({beta:.2f}) - meno volatile del mercato")
+    if beta > 1.5: qrs -= 10; details.append(f"⚠️ Beta alto ({beta:.2f}) - rischio sistematico elevato")
+    elif beta < 0.8: qrs += 5; details.append(f"✅ Beta basso ({beta:.2f}) - meno volatile del mercato")
     wacc = row.get("WACC (est.)")
     if wacc is not None and not np.isnan(wacc):
-        if wacc > 0.10:
-            qrs -= 5
-            details.append(f"⚠️ WACC elevato ({wacc*100:.1f}%)")
+        if wacc > 0.10: qrs -= 5; details.append(f"⚠️ WACC elevato ({wacc*100:.1f}%)")
     short_int = row.get("Short Interest (Days to Cover)")
     if short_int is not None and not np.isnan(short_int):
-        if short_int > 10:
-            qrs -= 20
-            details.append(f"🛑 Short interest elevato ({short_int:.1f} giorni) - pressione ribassista")
-        elif short_int > 5:
-            qrs -= 5
-            details.append(f"⚠️ Short interest moderato ({short_int:.1f} giorni)")
+        if short_int > 10: qrs -= 20; details.append(f"🛑 Short interest elevato ({short_int:.1f} giorni) - pressione ribassista")
+        elif short_int > 5: qrs -= 5; details.append(f"⚠️ Short interest moderato ({short_int:.1f} giorni)")
     qrs = np.clip(qrs, 0, 100)
     details.append(f"📉 Rischio Quant (Sharpe {sharpe:.2f}, MaxDD {max_dd*100:.1f}%)")
     treasury = macro.get("treasury_10y", np.nan)
-    if not np.isnan(treasury):
-        details.append(f"🏦 Treasury 10Y: {treasury*100:.2f}%")
+    if not np.isnan(treasury): details.append(f"🏦 Treasury 10Y: {treasury*100:.2f}%")
     cpi = macro.get("cpi_yoy", np.nan)
-    if not np.isnan(cpi):
-        details.append(f"📈 CPI YoY: {cpi:.2f}%")
+    if not np.isnan(cpi): details.append(f"📈 CPI YoY: {cpi:.2f}%")
     final_score = weights["F"] * fqs + weights["V"] * vas + weights["T"] * tms + weights["Q"] * qrs
-    if final_score >= 75:
-        verdict, emoji = "Strong Buy", "🟢"
-    elif final_score >= 60:
-        verdict, emoji = "Buy", "🟢"
-    elif final_score >= 45:
-        verdict, emoji = "Hold", "🟡"
-    elif final_score >= 30:
-        verdict, emoji = "Reduce", "🟠"
-    else:
-        verdict, emoji = "Sell", "🔴"
+    if final_score >= 75: verdict, emoji = "Strong Buy", "🟢"
+    elif final_score >= 60: verdict, emoji = "Buy", "🟢"
+    elif final_score >= 45: verdict, emoji = "Hold", "🟡"
+    elif final_score >= 30: verdict, emoji = "Reduce", "🟠"
+    else: verdict, emoji = "Sell", "🔴"
     return {"FinalScore": final_score, "Verdict": verdict, "Emoji": emoji, "FQS": fqs, "VAS": vas, "TMS": tms, "QRS": qrs, "Details": details, "Weights": weights}
 
 def calculate_tax_impact(df_weights: pd.DataFrame, tax_rate: float = DEFAULT_TAX_RATE) -> pd.DataFrame:
-    if df_weights is None or df_weights.empty:
-        return pd.DataFrame()
+    if df_weights is None or df_weights.empty: return pd.DataFrame()
     df_tax = df_weights.copy()
     df_tax["Aliquota Fiscale %"] = tax_rate * 100.0
     df_tax["Plus/Minus Lorda"] = df_tax["P&L"].astype(float)
@@ -2056,11 +1783,9 @@ def calculate_tax_impact(df_weights: pd.DataFrame, tax_rate: float = DEFAULT_TAX
 
 def get_daily_returns_for_ticker(symbol: str) -> Optional[pd.Series]:
     df = get_technical_data(symbol)
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
     returns = df["Close"].pct_change().dropna()
-    if returns.empty:
-        return None
+    if returns.empty: return None
     returns.name = symbol
     return returns
 
@@ -2068,26 +1793,21 @@ def build_portfolio_returns(tickers: List[str], weights_pct: Dict[str, float]) -
     series_list = []
     for t in tickers:
         r = get_daily_returns_for_ticker(t)
-        if r is not None:
-            series_list.append(r)
-    if not series_list:
-        return None
+        if r is not None: series_list.append(r)
+    if not series_list: return None
     df_rets = pd.concat(series_list, axis=1, join="outer").sort_index()
     df_rets = df_rets.dropna(how="all").dropna()
-    if df_rets.empty:
-        return None
+    if df_rets.empty: return None
     cols = df_rets.columns.tolist()
     w = np.array([weights_pct.get(t, 0.0) for t in cols], dtype=float) / 100.0
-    if w.sum() <= 0:
-        return None
+    if w.sum() <= 0: return None
     w = w / w.sum()
     port_ret = (df_rets * w).sum(axis=1)
     port_ret.name = "Portfolio"
     return df_rets, port_ret
 
 def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
-    if port_ret is None or port_ret.empty:
-        return {"AnnRet": np.nan, "AnnVol": np.nan, "Sharpe": np.nan, "MaxDD": np.nan, "Sortino": np.nan, "Calmar": np.nan}
+    if port_ret is None or port_ret.empty: return {"AnnRet": np.nan, "AnnVol": np.nan, "Sharpe": np.nan, "MaxDD": np.nan, "Sortino": np.nan, "Calmar": np.nan}
     rf = get_active_risk_free_rate()
     mu = port_ret.mean() * TRADING_DAYS_YEAR
     sigma = port_ret.std() * np.sqrt(TRADING_DAYS_YEAR)
@@ -2108,8 +1828,7 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
 
 def calculate_concentration_metrics(weights_pct: Dict[str, float]) -> Dict[str, float]:
     w = np.array(list(weights_pct.values()), dtype=float) / 100.0
-    if w.sum() <= 0:
-        return {"HHI": np.nan, "ENS": np.nan, "Top1 %": np.nan, "Top3 %": np.nan}
+    if w.sum() <= 0: return {"HHI": np.nan, "ENS": np.nan, "Top1 %": np.nan, "Top3 %": np.nan}
     w = w / w.sum()
     hhi = float((w ** 2).sum())
     ens = 1.0 / hhi if hhi > 0 else np.nan
@@ -2121,12 +1840,10 @@ def calculate_concentration_metrics(weights_pct: Dict[str, float]) -> Dict[str, 
 def calculate_portfolio_beta(port_ret: pd.Series, benchmark_symbol: str = DEFAULT_BENCHMARK) -> Dict[str, float]:
     try:
         bench_df = get_technical_data(benchmark_symbol)
-        if bench_df is None or bench_df.empty:
-            return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
+        if bench_df is None or bench_df.empty: return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
         bench_ret = bench_df['Close'].pct_change().dropna()
         joined = pd.concat([port_ret, bench_ret], axis=1, join='inner').dropna()
-        if joined.empty or len(joined) < 30:
-            return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
+        if joined.empty or len(joined) < 30: return {"Beta": np.nan, "Alpha (ann.)": np.nan, "Corr": np.nan}
         joined.columns = ['port', 'bench']
         cov = joined['port'].cov(joined['bench'])
         var_b = joined['bench'].var()
@@ -2149,16 +1866,14 @@ def get_latest_price(symbol: str) -> Optional[float]:
     if raw and raw.get('info'):
         info = raw['info']
         price = info.get('currentPrice') or info.get('regularMarketPrice')
-        if price is not None:
-            return safe_float(price, None)
+        if price is not None: return safe_float(price, None)
     return None
 
 def get_ticker_native_currency(symbol: str) -> Optional[str]:
     raw = get_fundamental_data(symbol)
     if raw and raw.get('info'):
         cur = raw['info'].get('currency')
-        if cur:
-            return str(cur).upper().strip()
+        if cur: return str(cur).upper().strip()
     return None
 
 def calculate_position_from_quantity(ticker: str, quantity: float, pmc: float, user_currency: Optional[str] = None, base_currency: Optional[str] = None) -> Dict[str, float]:
@@ -2184,7 +1899,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2208,17 +1923,12 @@ def infer_asset_class(ticker: str, company_name: str = "", raw_info: Optional[Di
         qt = str(raw_info.get('quoteType', '')).upper()
         if qt == 'ETF':
             name_lower = company_name.lower()
-            if any(k in name_lower for k in ["bond", "treasury", "government", "corporate"]):
-                return "ETF Obbligazionario"
-            if any(k in name_lower for k in ["gold", "silver", "precious"]):
-                return "ETF/ETC Oro"
+            if any(k in name_lower for k in ["bond", "treasury", "government", "corporate"]): return "ETF Obbligazionario"
+            if any(k in name_lower for k in ["gold", "silver", "precious"]): return "ETF/ETC Oro"
             return "ETF Azionario"
-        if qt == 'MUTUALFUND':
-            return "Fondo Comune"
-        if qt == 'CURRENCY':
-            return "Valuta"
-        if qt == 'CRYPTOCURRENCY':
-            return "Crypto"
+        if qt == 'MUTUALFUND': return "Fondo Comune"
+        if qt == 'CURRENCY': return "Valuta"
+        if qt == 'CRYPTOCURRENCY': return "Crypto"
     t = str(ticker).upper()
     name = str(company_name).lower()
     etf_keywords = ["etf", "ucits", "ishares", "xtrackers", "vanguard", "lyxor", "amundi", "invesco", "wisdomtree", "spdr"]
@@ -2226,17 +1936,12 @@ def infer_asset_class(ticker: str, company_name: str = "", raw_info: Optional[Di
     gold_keywords = ["gold", "physical gold", "precious", "silver", "metals"]
     crypto_keywords = ["btc-", "eth-", "-usd", "-eur"]
     if any(k in name for k in etf_keywords):
-        if any(k in name for k in bond_keywords):
-            return "ETF Obbligazionario"
-        if any(k in name for k in gold_keywords):
-            return "ETF/ETC Oro"
+        if any(k in name for k in bond_keywords): return "ETF Obbligazionario"
+        if any(k in name for k in gold_keywords): return "ETF/ETC Oro"
         return "ETF Azionario"
-    if any(k in t for k in crypto_keywords):
-        return "Crypto"
-    if any(k in name for k in bond_keywords):
-        return "Obbligazione/Fondo Bond"
-    if any(k in name for k in gold_keywords):
-        return "Oro/Metalli"
+    if any(k in t for k in crypto_keywords): return "Crypto"
+    if any(k in name for k in bond_keywords): return "Obbligazione/Fondo Bond"
+    if any(k in name for k in gold_keywords): return "Oro/Metalli"
     return "Azione"
 
 def infer_geography(ticker: str, company_name: str = "") -> str:
@@ -2244,28 +1949,20 @@ def infer_geography(ticker: str, company_name: str = "") -> str:
     name = str(company_name).lower()
     suffix_map = {".MI": "Italia", ".DE": "Germania", ".PA": "Francia", ".L": "Regno Unito", ".AS": "Olanda", ".BR": "Belgio", ".LS": "Portogallo", ".MC": "Spagna", ".SW": "Svizzera", ".ST": "Svezia", ".CO": "Danimarca", ".HE": "Finlandia", ".OL": "Norvegia", ".VI": "Austria", ".IR": "Irlanda", ".TO": "Canada", ".V": "Canada", ".AX": "Australia", ".NZ": "Nuova Zelanda", ".T": "Giappone", ".HK": "Hong Kong", ".SS": "Cina (Shanghai)", ".SZ": "Cina (Shenzhen)", ".KS": "Corea del Sud", ".NS": "India", ".BO": "India", ".BR": "Brasile", ".MX": "Messico", ".SA": "Brasile"}
     for suf, geo in suffix_map.items():
-        if t.endswith(suf):
-            return geo
-    if "-USD" in t:
-        return "Crypto/USD"
+        if t.endswith(suf): return geo
+    if "-USD" in t: return "Crypto/USD"
     us_keywords = ["s&p", "nasdaq", "russell", "usa", "united states", "msci usa"]
     eu_keywords = ["europe", "stoxx", "euro stoxx", "msci europe"]
     em_keywords = ["emerging", "msci em"]
     world_keywords = ["world", "all-world", "acwi", "ftse all-world", "global"]
     japan_keywords = ["japan", "topix", "nikkei"]
     china_keywords = ["china", "csi", "hang seng"]
-    if any(k in name for k in world_keywords):
-        return "Globale"
-    if any(k in name for k in us_keywords):
-        return "USA"
-    if any(k in name for k in eu_keywords):
-        return "Europa"
-    if any(k in name for k in em_keywords):
-        return "Emergenti"
-    if any(k in name for k in japan_keywords):
-        return "Giappone"
-    if any(k in name for k in china_keywords):
-        return "Cina"
+    if any(k in name for k in world_keywords): return "Globale"
+    if any(k in name for k in us_keywords): return "USA"
+    if any(k in name for k in eu_keywords): return "Europa"
+    if any(k in name for k in em_keywords): return "Emergenti"
+    if any(k in name for k in japan_keywords): return "Giappone"
+    if any(k in name for k in china_keywords): return "Cina"
     return "Da classificare"
 
 def build_portfolio_allocation_df(positive_holdings: Dict[str, float], holdings_currency: Dict[str, str]) -> pd.DataFrame:
@@ -2277,26 +1974,22 @@ def build_portfolio_allocation_df(positive_holdings: Dict[str, float], holdings_
         detected_currency = holdings_currency.get(ticker, info.get("currency", "USD"))
         rows.append({"Ticker": ticker, "Company Name": company_name, "Importo": float(amount), "Valuta": detected_currency, "Asset Class": infer_asset_class(ticker, company_name, info), "Geografia": infer_geography(ticker, company_name)})
     df_alloc = pd.DataFrame(rows)
-    if df_alloc.empty:
-        return df_alloc
+    if df_alloc.empty: return df_alloc
     total = df_alloc["Importo"].sum()
     df_alloc["Peso %"] = np.where(total > 0, df_alloc["Importo"] / total * 100.0, 0.0)
     return df_alloc.sort_values("Peso %", ascending=False).reset_index(drop=True)
 
 def summarize_group_weights(df_alloc: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    if df_alloc.empty or group_col not in df_alloc.columns:
-        return pd.DataFrame()
+    if df_alloc.empty or group_col not in df_alloc.columns: return pd.DataFrame()
     out = df_alloc.groupby(group_col, dropna=False)["Importo"].sum().reset_index().sort_values("Importo", ascending=False)
     total = out["Importo"].sum()
     out["Peso %"] = np.where(total > 0, out["Importo"] / total * 100.0, 0.0)
     return out.reset_index(drop=True)
 
 def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str, float], group_col: str = "Ticker", tolerance_pct: float = 1.0) -> pd.DataFrame:
-    if df_alloc.empty:
-        return pd.DataFrame()
+    if df_alloc.empty: return pd.DataFrame()
     current = summarize_group_weights(df_alloc, group_col)
-    if current.empty:
-        return pd.DataFrame()
+    if current.empty: return pd.DataFrame()
     target_df = pd.DataFrame({group_col: list(target_weights.keys()), "Target %": list(target_weights.values())})
     merged = current.merge(target_df, on=group_col, how="outer").fillna(0.0)
     total_value = df_alloc["Importo"].sum()
@@ -2440,18 +2133,12 @@ def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series]
     except ValueError:
         portfolio_pick = ''
     fallback_ticker = manual or portfolio_pick or (portfolio_tickers[0] if portfolio_tickers else None)
-    if not fallback_ticker:
-        return None, None, None, 'none'
+    if not fallback_ticker: return None, None, None, 'none'
     try:
         raw_data = get_fundamental_data(fallback_ticker)
         if raw_data:
             met = calculate_fundamental_metrics(raw_data)
-            if met:
-                try:
-                    row = pd.Series(met.to_ui_dict())
-                except Exception as e:
-                    logger.warning(f"Errore creazione Series per {fallback_ticker}: {e}")
-                    row = None
+            if met: row = pd.Series(met.to_ui_dict())
         return fallback_ticker, row, raw_data, 'standalone'
     except Exception as e:
         logger.warning(f'Standalone analysis unavailable for {fallback_ticker}: {e}')
@@ -2465,14 +2152,13 @@ def _init_session_state() -> None:
         'smart_weights': DEFAULT_SMART_WEIGHTS, 'ai_ticker_chat_history': [], 'ai_ticker_chat_last_symbol': None, 'burry_ai_history': [], 'burry_ai_symbol': '', 'burry_ai_asset_type': 'Azione', 'burry_ai_live_context': {}
     }
     for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+        if k not in st.session_state: st.session_state[k] = v
 
 def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB
+# 7. FUNZIONI DI RENDERING DEI TAB (invariate)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2500,8 +2186,7 @@ def render_tecnico_tab(row, ticker):
         score, reasons = calculate_timing_score(df_calc, df_calc['Close'].iloc[-1])
         st.metric("Timing Score", f"{score}/100")
         with st.expander("Dettaglio segnali"):
-            for r in reasons:
-                st.write(r)
+            for r in reasons: st.write(r)
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.5, 0.25, 0.25])
         fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name="Prezzo"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['SMA_200'], name="SMA 200", line=dict(color='blue')), row=1, col=1)
@@ -2571,10 +2256,8 @@ def render_quant_tab(row, ticker, standalone_raw_data):
             horizon_days = col_mc1.slider("Orizzonte (giorni)", 60, 756, 252, step=21)
             n_paths = col_mc2.slider("Numero traiettorie", 100, 3000, 1000, step=100)
             method = col_mc3.selectbox("Metodo", ["IID Bootstrap", "Block Bootstrap"])
-            if method == "Block Bootstrap":
-                mc = monte_carlo_block_bootstrap(df_tech, n_paths, horizon_days)
-            else:
-                mc = monte_carlo_equity(df_tech, n_paths, horizon_days)
+            if method == "Block Bootstrap": mc = monte_carlo_block_bootstrap(df_tech, n_paths, horizon_days)
+            else: mc = monte_carlo_equity(df_tech, n_paths, horizon_days)
             if mc["paths"] is not None:
                 final_vals = mc["final_distribution"]
                 p05 = np.quantile(final_vals, 0.05)
@@ -2618,12 +2301,10 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
     col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
     with st.expander("🔍 Criteri analizzati (con nuove metriche)"):
-        for d in verdict["Details"]:
-            st.write(d)
+        for d in verdict["Details"]: st.write(d)
     if timing_reasons:
         with st.expander("📈 Dettaglio segnali tecnici"):
-            for r in timing_reasons:
-                st.write(r)
+            for r in timing_reasons: st.write(r)
     st.markdown('---')
     st.subheader('Spiegazione VqAi')
     ai_context = build_ai_context_for_ticker(ticker, row, qm, risk, timing_score, timing_reasons, mode='Unificato', verdict=verdict)
@@ -2703,29 +2384,25 @@ def render_portafoglio_tab(ui):
             pmc = col.number_input(f"{t} - PMC", min_value=0.0, value=default_pmc, step=0.01, format="%.4f", key=f"holding_pmc_{t}")
             cur_default = st.session_state.holdings_currency.get(t, "USD")
             cur_options = ["USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD"]
-            if cur_default not in cur_options:
-                cur_options = [cur_default] + cur_options
+            if cur_default not in cur_options: cur_options = [cur_default] + cur_options
             cur = col.selectbox(f"{t} - Valuta posizione", cur_options, index=cur_options.index(cur_default) if cur_default in cur_options else 0, key=f"currency_{t}")
             st.session_state.holdings_currency[t] = cur
             derived = calculate_position_from_quantity(t, qty, pmc, user_currency=cur) if qty > 0 and pmc > 0 else {'Importo Investito': 0.0, 'Prezzo Attuale': np.nan, 'Valore di Mercato': 0.0, 'P&L': 0.0, 'P&L %': 0.0, 'Valuta Nativa': cur, 'FX Native->User': 1.0}
             holdings_quantity[t] = qty
             holdings_pmc[t] = pmc
             holdings[t] = float(derived['Importo Investito'])
-            if is_authenticated():
-                save_user_portfolio_position(t, qty, pmc, cur)
+            if is_authenticated(): save_user_portfolio_position(t, qty, pmc, cur)
             price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
             native_cur = derived.get('Valuta Nativa', cur)
             fx_used = derived.get('FX Native->User', 1.0)
             col.caption(f"Prezzo (in {cur}): {price_text} | Investito: {derived['Importo Investito']:.2f} | Valore: {derived['Valore di Mercato']:.2f} | P&L: {derived['P&L']:.2f} ({derived['P&L %']:.2f}%)")
-            if native_cur and native_cur != cur:
-                col.caption(f"⚠️ Valuta nativa: {native_cur}, FX applicato: {fx_used:.4f}")
+            if native_cur and native_cur != cur: col.caption(f"⚠️ Valuta nativa: {native_cur}, FX applicato: {fx_used:.4f}")
             if col.button("🗑 Rimuovi", key=f"remove_{t}"):
                 if t in st.session_state.portfolio_tickers:
                     st.session_state.portfolio_tickers = [x for x in st.session_state.portfolio_tickers if x != t]
                 for d in [st.session_state.holdings, st.session_state.holdings_currency, st.session_state.holdings_quantity, st.session_state.holdings_pmc]:
                     d.pop(t, None)
-                if is_authenticated():
-                    delete_user_portfolio_position(t)
+                if is_authenticated(): delete_user_portfolio_position(t)
                 st.rerun()
         st.session_state.holdings = holdings
         st.session_state.holdings_quantity = holdings_quantity
@@ -2933,8 +2610,7 @@ def main():
                 st.session_state.selected_ticker = None
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
-            for err in st.session_state.analysis_errors:
-                st.write(f'- {err}')
+            for err in st.session_state.analysis_errors: st.write(f'- {err}')
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
         batch_options = []
