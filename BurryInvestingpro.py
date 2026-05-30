@@ -30,6 +30,17 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
+
+# NUOVI MODULI PER CACHE, RATE LIMITING E RESOLVER
+from cache_manager import get_cache_manager
+from rate_limiter import get_rate_limiter
+from ticker_resolver import auto_resolve_ticker_adaptive
+
+# Nuove fonti API e scraper
+from api_sources import FMPSource, AlphaVantageSource
+from scrapers import MarketWatchScraper
+
+# Import delle funzioni AI
 from burry_ai_prompts import (
     build_ai_context_for_ticker,
     ask_gemini_ticker_chat,
@@ -66,15 +77,6 @@ DEFAULT_BENCHMARK = "^GSPC"
 DEFAULT_SMART_WEIGHTS = {"F": 0.40, "T": 0.30, "Q": 0.30}
 TAX_LOSS_COMPENSATION_YEARS = 4
 BENEISH_THRESHOLD = -1.78
-
-# Mappa manuale per ticker che non vengono risolti automaticamente
-MANUAL_TICKER_MAP = {
-    "ENI": "ENI.MI",
-    "STLAM": "STLAM.MI",
-    "XDWU": "XDWU.DE",
-    "BMW": "BMW.DE",
-    "AIR": "AIR.PA",
-}
 
 POLYGON_RATE_LIMIT_SEC = 12.0
 _last_polygon_call = 0.0
@@ -198,7 +200,7 @@ def get_active_risk_free_rate() -> float:
     return get_short_term_risk_free_rate()
 
 # ==========================================================================
-# 0.C POLYGON FUNDAMENTAL DATA PROVIDER
+# 0.C POLYGON FUNDAMENTAL DATA PROVIDER (mantenuto come fallback)
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
@@ -697,68 +699,12 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 2.A RISOLUZIONE ADATTIVA DEL TICKER (con mappa manuale)
+# 2.A RISOLUZIONE ADATTIVA DEL TICKER (DELEGATA AL MODULO ticker_resolver)
 # ==========================================================================
-def _test_ticker_on_yfinance(symbol: str) -> bool:
-    try:
-        t = yf.Ticker(symbol)
-        info = t.info
-        if info and ('symbol' in info or 'regularMarketPrice' in info):
-            return True
-        return False
-    except Exception:
-        return False
-
-def _test_ticker_on_polygon(symbol: str) -> bool:
-    if '.' in symbol:
-        return False
-    if not POLYGON_API_KEY:
-        return False
-    try:
-        throttle_polygon()
-        url = f"{POLYGON_BASE_URL}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}"
-        resp = requests.get(url, timeout=5)
-        return resp.status_code == 200 and resp.json().get('status') == 'OK'
-    except Exception:
-        return False
-
-def auto_resolve_ticker_adaptive(symbol: str, force_refresh: bool = False) -> str:
-    symbol_clean = symbol.upper().strip()
-    if not symbol_clean:
-        return symbol_clean
-    
-    # Controllo mappa manuale
-    if symbol_clean in MANUAL_TICKER_MAP:
-        resolved = MANUAL_TICKER_MAP[symbol_clean]
-        logger.info(f"Mappa manuale: {symbol_clean} -> {resolved}")
-        return resolved
-    
-    if 'ticker_resolution_cache' not in st.session_state:
-        st.session_state.ticker_resolution_cache = {}
-    cache = st.session_state.ticker_resolution_cache
-    if not force_refresh and symbol_clean in cache:
-        return cache[symbol_clean]
-    
-    suffixes = ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS',
-                '.SW', '.MC', '.BR', '.MX', '.SA', '.BO', '.KS', '.SS', '.SZ',
-                '-USD', '-EUR']
-    for suffix in suffixes:
-        candidate = symbol_clean + suffix
-        if _test_ticker_on_yfinance(candidate):
-            logger.info(f"Risolto {symbol_clean} -> {candidate} via yfinance")
-            cache[symbol_clean] = candidate
-            return candidate
-        if suffix in ['', '.MI', '.DE', '.PA', '.L', '.TO', '.T', '.HK', '.AX', '.NS']:
-            if _test_ticker_on_polygon(candidate):
-                logger.info(f"Risolto {symbol_clean} -> {candidate} via Polygon")
-                cache[symbol_clean] = candidate
-                return candidate
-    logger.warning(f"Nessuna risoluzione per {symbol_clean}, uso originale")
-    cache[symbol_clean] = symbol_clean
-    return symbol_clean
+# La vecchia funzione è stata sostituita dall'import di auto_resolve_ticker_adaptive
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE
 # ==========================================================================
 def request_with_backoff(func, *args, **kwargs):
     """Esegue una funzione con backoff esponenziale in caso di rate limiting"""
@@ -776,66 +722,132 @@ def request_with_backoff(func, *args, **kwargs):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Recupera i dati fondamentali usando una cascata di fonti:
+    1. Cache SQLite
+    2. Polygon (se disponibile)
+    3. FMP (se API key presente)
+    4. Alpha Vantage (se API key presente)
+    5. MarketWatch scraper (fallback)
+    6. yfinance (fallback finale)
+    7. YahooQuery (ultimo fallback)
+    """
+    cache = get_cache_manager()
+    
+    # 1. Controllo cache
+    cached = cache.get_fundamental(symbol)
+    if cached:
+        logger.info(f"Cache hit per fondamentali {symbol}")
+        return cached
+    
     resolved = auto_resolve_ticker_adaptive(symbol)
-    poly_data = None
+    result = None
+    
+    # 2. Polygon (solo simboli senza punto)
     if '.' not in resolved:
-        poly_data = get_polygon_fundamentals(resolved)
-    if poly_data is not None:
-        if (not poly_data["financials"].empty) or (not poly_data["balance_sheet"].empty):
-            return poly_data
-        else:
-            logger.info(f"Polygon insufficiente per {resolved}, provo yfinance")
-    try:
-        def _fetch_yf():
-            stock = yf.Ticker(resolved)
-            info = stock.info
-            if info and ('symbol' in info or 'shortName' in info):
-                if 'symbol' not in info: info['symbol'] = resolved
-                return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": resolved}
-            return None
-        result = request_with_backoff(_fetch_yf)
-        if result:
-            return result
-    except Exception as e:
-        logger.info(f"yfinance fallito per {resolved}: {e}")
-    try:
-        yq = YQ_Ticker(resolved)
-        summary = yq.summary_detail.get(resolved, {}) if isinstance(yq.summary_detail, dict) else {}
-        price = yq.price.get(resolved, {}) if isinstance(yq.price, dict) else {}
-        financial_data = yq.financial_data.get(resolved, {}) if isinstance(yq.financial_data, dict) else {}
-        if isinstance(summary, str): summary = {}
-        if isinstance(price, str): price = {}
-        if isinstance(financial_data, str): financial_data = {}
-        combined_info = {**summary, **price, **financial_data}
-        combined_info['symbol'] = resolved
-        if 'regularMarketPrice' in combined_info: combined_info['currentPrice'] = combined_info['regularMarketPrice']
-        def format_yq_df(df_yq):
-            if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
-                df_yq = df_yq.copy()
-                if isinstance(df_yq.index, pd.MultiIndex):
-                    try: df_yq = df_yq.xs(resolved, level=0)
-                    except KeyError: return pd.DataFrame()
-                if 'asOfDate' in df_yq.columns: df_yq.set_index('asOfDate', inplace=True)
-                df_t = df_yq.transpose()
-                try:
-                    date_cols = pd.to_datetime(df_t.columns, errors='coerce')
-                    df_t = df_t.iloc[:, date_cols.argsort()[::-1]]
-                except Exception: pass
-                return df_t
-            return pd.DataFrame()
-        inc_stmt = format_yq_df(yq.income_statement())
-        bal_sheet = format_yq_df(yq.balance_sheet())
-        cash_flow = format_yq_df(yq.cash_flow())
-        if not inc_stmt.empty:
-            inc_stmt.rename(index={'TotalRevenue': 'Total Revenue','PretaxIncome': 'Pretax Income','TaxProvision': 'Tax Provision','InterestExpense': 'Interest Expense'}, inplace=True)
-        if not bal_sheet.empty:
-            bal_sheet.rename(index={'TotalDebt': 'Total Debt','StockholdersEquity': 'Stockholders Equity','TotalAssets': 'Total Assets','CurrentAssets': 'Current Assets','CurrentLiabilities': 'Current Liabilities','RetainedEarnings': 'Retained Earnings'}, inplace=True)
-        if not cash_flow.empty:
-            cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpediture': 'Capital Expenditure'}, inplace=True)
-        return {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": resolved}
-    except Exception as e:
-        logger.error(f"Tutte le API hanno fallito per fondamentali di {resolved}: {e}")
-        return None
+        try:
+            poly_data = get_polygon_fundamentals(resolved)
+            if poly_data and (not poly_data["financials"].empty or not poly_data["balance_sheet"].empty):
+                result = poly_data
+                logger.info(f"Polygon success per {resolved}")
+        except Exception as e:
+            logger.debug(f"Polygon fallito per {resolved}: {e}")
+    
+    # 3. FMP
+    if result is None:
+        try:
+            fmp = FMPSource()
+            fmp_data = fmp.get_fundamentals(resolved)
+            if fmp_data and fmp_data.get('info') and fmp_data['info'].get('marketCap'):
+                result = fmp_data
+                logger.info(f"FMP success per {resolved}")
+        except Exception as e:
+            logger.debug(f"FMP fallito per {resolved}: {e}")
+    
+    # 4. Alpha Vantage
+    if result is None:
+        try:
+            av = AlphaVantageSource()
+            av_data = av.get_fundamentals(resolved)
+            if av_data and av_data.get('info') and av_data['info'].get('marketCap'):
+                result = av_data
+                logger.info(f"Alpha Vantage success per {resolved}")
+        except Exception as e:
+            logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
+    
+    # 5. MarketWatch scraper
+    if result is None:
+        try:
+            mw = MarketWatchScraper()
+            mw_data = mw.get_fundamentals(resolved)
+            if mw_data and mw_data.get('info') and mw_data['info'].get('regularMarketPrice'):
+                result = mw_data
+                logger.info(f"MarketWatch success per {resolved}")
+        except Exception as e:
+            logger.debug(f"MarketWatch fallito per {resolved}: {e}")
+    
+    # 6. yfinance (con backoff)
+    if result is None:
+        try:
+            def _fetch_yf():
+                stock = yf.Ticker(resolved)
+                info = stock.info
+                if info and ('symbol' in info or 'shortName' in info):
+                    if 'symbol' not in info: info['symbol'] = resolved
+                    return {"info": info, "financials": stock.financials, "balance_sheet": stock.balance_sheet, "cashflow": stock.cashflow, "symbol": resolved}
+                return None
+            yf_result = request_with_backoff(_fetch_yf)
+            if yf_result:
+                result = yf_result
+                logger.info(f"yfinance success per {resolved}")
+        except Exception as e:
+            logger.info(f"yfinance fallito per {resolved}: {e}")
+    
+    # 7. YahooQuery (ultimo tentativo)
+    if result is None:
+        try:
+            yq = YQ_Ticker(resolved)
+            summary = yq.summary_detail.get(resolved, {}) if isinstance(yq.summary_detail, dict) else {}
+            price = yq.price.get(resolved, {}) if isinstance(yq.price, dict) else {}
+            financial_data = yq.financial_data.get(resolved, {}) if isinstance(yq.financial_data, dict) else {}
+            if isinstance(summary, str): summary = {}
+            if isinstance(price, str): price = {}
+            if isinstance(financial_data, str): financial_data = {}
+            combined_info = {**summary, **price, **financial_data}
+            combined_info['symbol'] = resolved
+            if 'regularMarketPrice' in combined_info: combined_info['currentPrice'] = combined_info['regularMarketPrice']
+            def format_yq_df(df_yq):
+                if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
+                    df_yq = df_yq.copy()
+                    if isinstance(df_yq.index, pd.MultiIndex):
+                        try: df_yq = df_yq.xs(resolved, level=0)
+                        except KeyError: return pd.DataFrame()
+                    if 'asOfDate' in df_yq.columns: df_yq.set_index('asOfDate', inplace=True)
+                    df_t = df_yq.transpose()
+                    try:
+                        date_cols = pd.to_datetime(df_t.columns, errors='coerce')
+                        df_t = df_t.iloc[:, date_cols.argsort()[::-1]]
+                    except Exception: pass
+                    return df_t
+                return pd.DataFrame()
+            inc_stmt = format_yq_df(yq.income_statement())
+            bal_sheet = format_yq_df(yq.balance_sheet())
+            cash_flow = format_yq_df(yq.cash_flow())
+            if not inc_stmt.empty:
+                inc_stmt.rename(index={'TotalRevenue': 'Total Revenue','PretaxIncome': 'Pretax Income','TaxProvision': 'Tax Provision','InterestExpense': 'Interest Expense'}, inplace=True)
+            if not bal_sheet.empty:
+                bal_sheet.rename(index={'TotalDebt': 'Total Debt','StockholdersEquity': 'Stockholders Equity','TotalAssets': 'Total Assets','CurrentAssets': 'Current Assets','CurrentLiabilities': 'Current Liabilities','RetainedEarnings': 'Retained Earnings'}, inplace=True)
+            if not cash_flow.empty:
+                cash_flow.rename(index={'OperatingCashFlow': 'Operating Cash Flow','CapitalExpediture': 'Capital Expenditure'}, inplace=True)
+            result = {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": resolved}
+            logger.info(f"YahooQuery success per {resolved}")
+        except Exception as e:
+            logger.error(f"Tutte le API hanno fallito per fondamentali di {resolved}: {e}")
+    
+    # Salva in cache (anche se None, per evitare richieste ripetute a fonti fallite? Meglio salvare solo se non None)
+    if result:
+        cache.set_fundamental(symbol, result)
+    return result
 
 def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
     if df is None or df.empty or idx not in df.index or df.shape[1] == 0:
@@ -1131,16 +1143,34 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA)
+# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA CON CACHE E CASCATA)
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    if POLYGON_API_KEY and '.' not in symbol:
+    """
+    Recupera i dati tecnici (OHLCV giornalieri) usando:
+    1. Cache SQLite
+    2. Polygon (se API key presente)
+    3. Alpha Vantage (se API key)
+    4. yfinance
+    5. YahooQuery (fallback)
+    """
+    cache = get_cache_manager()
+    cached = cache.get_technical(symbol)
+    if cached is not None and isinstance(cached, pd.DataFrame) and not cached.empty:
+        logger.info(f"Cache hit per tecnici {symbol}")
+        return cached
+    
+    resolved = auto_resolve_ticker_adaptive(symbol)
+    df = None
+    
+    # 1. Polygon
+    if POLYGON_API_KEY and '.' not in resolved:
         try:
             throttle_polygon()
             today = pd.Timestamp.now(tz='UTC')
             two_years_ago = today - pd.DateOffset(years=2)
-            url = f"{POLYGON_BASE_URL}/v2/aggs/ticker/{symbol}/range/1/day/{two_years_ago.strftime('%Y-%m-%d')}/{today.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&limit=5000&apiKey={POLYGON_API_KEY}"
+            url = f"{POLYGON_BASE_URL}/v2/aggs/ticker/{resolved}/range/1/day/{two_years_ago.strftime('%Y-%m-%d')}/{today.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&limit=5000&apiKey={POLYGON_API_KEY}"
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
@@ -1150,32 +1180,58 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df = df.rename(columns={'o': 'Open', 'h': 'High', 'l': 'Low', 'c': 'Close', 'v': 'Volume', 't': 'Date'})
                     df.set_index('Date', inplace=True)
                     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-                    if len(df) >= 60: return df
+                    if len(df) >= 60:
+                        logger.info(f"Polygon success per tecnici {resolved}")
         except Exception as e:
-            logger.info(f"Polygon tecnico fallito per {symbol}: {e}")
-    try:
-        def _download_yf():
-            return yf.download(symbol, period="2y", interval="1d", progress=False, auto_adjust=True)
-        df = request_with_backoff(_download_yf)
-        if df is not None and not df.empty:
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            df = df.loc[:, ~df.columns.duplicated(keep='first')]
-            if len(df) >= 60: return df
-    except Exception as e:
-        logger.info(f"yfinance tecnico fallito per {symbol}: {e}")
-    try:
-        t = YQ_Ticker(symbol)
-        df_yq = t.history(period="2y", interval="1d")
-        if isinstance(df_yq, pd.DataFrame) and not df_yq.empty:
-            if isinstance(df_yq.index, pd.MultiIndex):
-                try: df_yq = df_yq.xs(symbol, level=0)
-                except KeyError: return None
-            df_yq.columns = [str(c).capitalize() for c in df_yq.columns]
-            df_yq = df_yq.loc[:, ~df_yq.columns.duplicated(keep='first')]
-            if len(df_yq) >= 60: return df_yq
-    except Exception as e:
-        logger.error(f"Tutte le API hanno fallito per analisi tecnica di {symbol}: {e}")
-    return None
+            logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
+    
+    # 2. Alpha Vantage
+    if df is None or len(df) < 60:
+        try:
+            av = AlphaVantageSource()
+            av_df = av.get_technical(resolved)
+            if av_df is not None and isinstance(av_df, pd.DataFrame) and len(av_df) >= 60:
+                df = av_df
+                logger.info(f"Alpha Vantage success per tecnici {resolved}")
+        except Exception as e:
+            logger.debug(f"Alpha Vantage tecnico fallito: {e}")
+    
+    # 3. yfinance
+    if df is None or len(df) < 60:
+        try:
+            def _download_yf():
+                return yf.download(resolved, period="2y", interval="1d", progress=False, auto_adjust=True)
+            yf_df = request_with_backoff(_download_yf)
+            if yf_df is not None and not yf_df.empty:
+                if isinstance(yf_df.columns, pd.MultiIndex): yf_df.columns = yf_df.columns.get_level_values(0)
+                yf_df = yf_df.loc[:, ~yf_df.columns.duplicated(keep='first')]
+                if len(yf_df) >= 60:
+                    df = yf_df
+                    logger.info(f"yfinance success per tecnici {resolved}")
+        except Exception as e:
+            logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
+    
+    # 4. YahooQuery
+    if df is None or len(df) < 60:
+        try:
+            yq = YQ_Ticker(resolved)
+            yq_df = yq.history(period="2y", interval="1d")
+            if isinstance(yq_df, pd.DataFrame) and not yq_df.empty:
+                if isinstance(yq_df.index, pd.MultiIndex):
+                    try: yq_df = yq_df.xs(resolved, level=0)
+                    except KeyError: pass
+                yq_df.columns = [str(c).capitalize() for c in yq_df.columns]
+                yq_df = yq_df.loc[:, ~yq_df.columns.duplicated(keep='first')]
+                if len(yq_df) >= 60:
+                    df = yq_df
+                    logger.info(f"YahooQuery success per tecnici {resolved}")
+        except Exception as e:
+            logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
+    
+    # Salva in cache
+    if df is not None and not df.empty:
+        cache.set_technical(symbol, df)
+    return df
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
@@ -1333,7 +1389,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE
+# 5. METRICHE QUANTITATIVE AVANZATE (invariate)
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1833,7 +1889,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2014,27 +2070,25 @@ def setup_sidebar() -> Dict[str, Any]:
         ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
         key="nav_select"
     )
-    # ---- VqAi sidebar - CORRETTA (nessuna duplicazione) ----
+    # ---- VqAi sidebar ----
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
         st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
         
-        # Mostra la cronologia completa (sia utente che assistente)
+        # Mostra la cronologia completa
         for msg in st.session_state.get('burry_ai_history', []):
             with st.chat_message(msg.get('role', 'assistant')):
                 st.markdown(msg.get('content', ''))
         
         burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
         if burry_ai_prompt:
-            # Aggiungi subito il messaggio utente alla cronologia
             st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
             ctx = build_burry_ai_context(
                 st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
                 st.session_state.get('burry_ai_asset_type', 'Azione'),
                 mode='Unificato'
             )
-            # Costruisci la cronologia per il contesto (escludendo l'ultimo messaggio, che è quello utente appena aggiunto)
             conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
             for m in st.session_state.burry_ai_history[:-1]:
                 conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
@@ -2042,10 +2096,7 @@ def setup_sidebar() -> Dict[str, Any]:
             
             with st.spinner('VqAi sta rispondendo...'):
                 reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
-            # Aggiungi la risposta alla cronologia
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
-            # ❌ NESSUN st.rerun() - lascia che Streamlit ridisegni naturalmente
-    # ---- fine blocco VqAi ----
     render_apk_download_box()
     render_chi_siamo()
     render_privacy()
@@ -2097,7 +2148,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB
+# 7. FUNZIONI DI RENDERING DEI TAB (invariate)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2251,17 +2302,13 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     if st.session_state.get('ai_ticker_chat_last_symbol') != ticker:
         st.session_state.ai_ticker_chat_history = []
         st.session_state.ai_ticker_chat_last_symbol = ticker
-    # PULSANTE "Spiega con VqAi" - MODIFICATO: non forza st.rerun()
     if st.button('🧠 Spiega con VqAi', key=f'ai_explain_{ticker}'):
         with st.spinner('Analisi AI in corso...'):
             ai_answer = ask_gemini_ticker_chat(ai_context, 'Spiegami questo titolo come un analista buy-side prudente, coerente con il verdetto mostrato.', mode='Unificato')
         st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_answer})
-        # ❌ NESSUN st.rerun()
-    # Mostra tutta la cronologia (utente + assistente)
     for msg in st.session_state.get('ai_ticker_chat_history', []):
         with st.chat_message(msg.get('role', 'assistant')):
             st.markdown(msg.get('content', ''))
-    # Chat interattiva
     ai_user_prompt = st.chat_input('Fai una domanda su questo ticker', key=f'ai_chat_input_{ticker}')
     if ai_user_prompt:
         st.session_state.ai_ticker_chat_history.append({'role': 'user', 'content': ai_user_prompt})
@@ -2276,7 +2323,6 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
                 ai_reply = ask_gemini_ticker_chat(ai_context, enriched_prompt, mode='Unificato')
             st.markdown(ai_reply)
         st.session_state.ai_ticker_chat_history.append({'role': 'assistant', 'content': ai_reply})
-        # ❌ NESSUN st.rerun()
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
@@ -2502,6 +2548,11 @@ def main():
     st.title("💲 V-Quant Pro")
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
+    
+    # Pulisci cache scaduta all'avvio
+    cache = get_cache_manager()
+    cache.clear_expired()
+    
     ui = setup_sidebar()
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
