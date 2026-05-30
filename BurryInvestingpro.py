@@ -3,7 +3,7 @@
 # Tutti i diritti riservati.
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
-# Versione refactored e corretta con riordino sidebar.
+# Versione con integrazioni: Markowitz, Backtest, ML Trend, Sentiment Analysis.
 """
 
 import streamlit as st
@@ -44,6 +44,12 @@ from burry_ai_prompts import (
     build_burry_ai_context,
 )
 
+# NUOVI MODULI INTEGRATI
+from portfolio_optimizer import get_portfolio_weights_markowitz, plot_efficient_frontier
+from backtest_engine import run_backtest
+from ml_predictor import predict_trend, load_or_train_model
+from sentiment_analyzer import get_overall_sentiment
+
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================================================
@@ -73,7 +79,7 @@ ALTMAN_SAFE_THRESHOLD = 1.81
 
 DEFAULT_BENCHMARK = "^GSPC"
 DEFAULT_SMART_WEIGHTS = {"F": 0.40, "T": 0.30, "Q": 0.30}
-UNIFIED_WEIGHTS = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}   # unificati
+UNIFIED_WEIGHTS = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
 TAX_LOSS_COMPENSATION_YEARS = 4
 BENEISH_THRESHOLD = -1.78
 
@@ -493,7 +499,6 @@ def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     return user, session
 
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-# Password: almeno 8 caratteri, una maiuscola, una minuscola, un numero, un carattere speciale
 PASSWORD_REGEX = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>/?]).{8,}$')
 
 def validate_email(email: str) -> bool:
@@ -702,7 +707,6 @@ def safe_float(value: Any, default: float = np.nan) -> float:
     except (TypeError, ValueError): return default
 
 def safe_div(a: float, b: float, default: float = 0.0) -> float:
-    """Divisione sicura che evita ZeroDivisionError e NaN."""
     try:
         if b is None or b == 0:
             return default
@@ -758,7 +762,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     resolved = auto_resolve_ticker_adaptive(symbol)
     result = None
     
-    # Polygon
     if '.' not in resolved:
         try:
             poly_data = get_polygon_fundamentals(resolved)
@@ -768,7 +771,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Polygon fallito per {resolved}: {e}")
     
-    # FMP
     if result is None:
         try:
             fmp = FMPSource()
@@ -779,7 +781,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"FMP fallito per {resolved}: {e}")
     
-    # Alpha Vantage
     if result is None:
         try:
             av = AlphaVantageSource()
@@ -790,7 +791,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
     
-    # MarketWatch
     if result is None:
         try:
             mw = MarketWatchScraper()
@@ -801,7 +801,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"MarketWatch fallito per {resolved}: {e}")
     
-    # yfinance
     if result is None:
         try:
             def _fetch_yf():
@@ -818,7 +817,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.info(f"yfinance fallito per {resolved}: {e}")
     
-    # YahooQuery (con hardening)
     if result is None:
         try:
             yq = YQ_Ticker(resolved)
@@ -848,7 +846,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             inc_stmt = format_yq_df(yq.income_statement())
             bal_sheet = format_yq_df(yq.balance_sheet())
             cash_flow = format_yq_df(yq.cash_flow())
-            # Non considerare YahooQuery un successo se uno dei tre è vuoto
             if inc_stmt.empty or bal_sheet.empty or cash_flow.empty:
                 logger.warning(f"YahooQuery dati incompleti per {resolved} (vuoti).")
                 raise ValueError("Dati YahooQuery incompleti")
@@ -866,7 +863,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     if result:
         cache.set_fundamental(symbol, result)
     else:
-        # FIX: rimossa la ttl=3600 (non supportata dal metodo set_fundamental nel cache_manager attuale)
         cache.set_fundamental(symbol, {"_failed": True, "timestamp": time.time()})
     return result
 
@@ -904,7 +900,6 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
             debt0 = safe_float(bs.loc['Total Debt'].iloc[0], 0.0)
             debt1 = safe_float(bs.loc['Total Debt'].iloc[1], 0.0)
             if debt0 < debt1: fscore += 1
-        # CORREZIONE: Current Ratio ora confronta correttamente primo e secondo anno
         if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index and bs.shape[1] >= 2:
             ca0 = safe_float(bs.loc['Current Assets'].iloc[0], 0.0)
             cl0 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
@@ -913,7 +908,6 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
             cr0 = safe_div(ca0, cl0)
             cr1 = safe_div(ca1, cl1)
             if cr0 > cr1: fscore += 1
-        # RIMOSSO L'INCREMENTO INCONDIZIONATO (era fscore += 1 qui)
         if 'Total Revenue' in fin.index and fin.shape[1] >= 2:
             rev0 = safe_float(fin.loc['Total Revenue'].iloc[0], 0.0)
             rev1 = safe_float(fin.loc['Total Revenue'].iloc[1], 0.0)
@@ -983,7 +977,6 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         sgi = revenue / revenue_prev if revenue_prev != 0 else 1.0
         depi = safe_ratio(depreciation_prev, (depreciation_prev + total_assets_prev)) / safe_ratio(depreciation, (depreciation + total_assets), 1e-9)
         
-        # FIX: calcolo reale di sgai (Selling, General & Administrative Expense Index)
         sga = get_first(fin, 'Selling General And Administrative Expense', 0.0)
         sga_prev = 0.0
         if 'Selling General And Administrative Expense' in fin.index and fin.shape[1] >= 2:
@@ -1067,7 +1060,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         cash_equiv = safe_float(info.get('totalCash'), 0.0)
         net_debt = max(0.0, total_debt - cash_equiv)
         equity = get_first(bs, 'Stockholders Equity', np.nan)
-        # FIX: gestione equity NaN
         if np.isnan(equity):
             equity = 0.0
         invested_cap = net_debt + equity
@@ -1216,7 +1208,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     resolved = auto_resolve_ticker_adaptive(symbol)
     df = None
     
-    # Polygon
     if POLYGON_API_KEY and '.' not in resolved:
         try:
             throttle_polygon()
@@ -1239,7 +1230,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
     
-    # Alpha Vantage
     if df is None or len(df) < 60:
         try:
             av = AlphaVantageSource()
@@ -1252,7 +1242,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.debug(f"Alpha Vantage tecnico fallito: {e}")
     
-    # yfinance
     if df is None or len(df) < 60:
         try:
             def _download_yf():
@@ -1269,7 +1258,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
     
-    # YahooQuery
     if df is None or len(df) < 60:
         try:
             yq = YQ_Ticker(resolved)
@@ -1954,7 +1942,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2123,7 +2111,7 @@ def setup_sidebar() -> Dict[str, Any]:
     st.sidebar.markdown("## 📑 Navigazione")
     tab_selection = st.sidebar.selectbox(
         "Vai a:",
-        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio"],
+        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio", "⏪ Backtest"],
         key="nav_select"
     )
     st.sidebar.markdown("---")
@@ -2221,7 +2209,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB (invariate)
+# 7. FUNZIONI DI RENDERING DEI TAB
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2307,6 +2295,23 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         smart = compute_smart_quant_score(row, score_q, qm, risk, weights=smart_w)
         st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
         st.caption(f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}")
+        
+        # Machine Learning Prediction
+        with st.expander("🤖 Previsione Trend ML (5 giorni)"):
+            if st.button("🔮 Prevedi trend", key=f"ml_pred_{ticker}"):
+                with st.spinner("Caricamento modello e predizione..."):
+                    # Addestra il modello con i dati del ticker corrente (alla prima esecuzione)
+                    model = load_or_train_model(df_tech)
+                    if model is None:
+                        st.error("Impossibile addestrare il modello (dati insufficienti)")
+                    else:
+                        pred = predict_trend(ticker, df_tech)
+                        if pred:
+                            st.metric("Probabilità di rialzo", f"{pred['probability_up']*100:.1f}%")
+                            st.success(f"Segnale: {pred['signal']}")
+                        else:
+                            st.warning("Predizione non disponibile")
+        
         with st.expander("📉 Distribuzione rendimenti & rischio"):
             st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
             returns = df_tech['Close'].pct_change().dropna()
@@ -2363,6 +2368,16 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     col2.metric("Valutazione", f"{verdict['VAS']:.0f}/100")
     col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
     col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
+    
+    # Sentiment Analysis
+    with st.spinner("Analisi del sentiment in corso..."):
+        sentiment = get_overall_sentiment(ticker)
+    st.markdown(f"### 📢 Sentiment di mercato: {sentiment['label']}  (punteggio: {sentiment['score']:.2f})")
+    with st.expander("Dettaglio sentiment"):
+        st.write(f"**News (FinBERT):** {sentiment['news_score']:.2f}")
+        st.write(f"**Social Reddit (VADER):** {sentiment['reddit_score']:.2f}")
+        st.caption("Le notizie hanno peso maggiore. Punteggio > 0.2 positivo, < -0.2 negativo.")
+    
     with st.expander("🔍 Criteri analizzati (con nuove metriche)"):
         for d in verdict["Details"]: st.write(d)
     if timing_reasons:
@@ -2399,8 +2414,45 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
+def render_backtest_tab(row, ticker):
+    if row is None or ticker is None:
+        st.info("Nessun ticker attivo. Seleziona un asset.")
+        st.markdown(FOOTER_HTML, unsafe_allow_html=True)
+        return
+    st.info("💡 **Backtest di strategie di trading su dati storici**")
+    df_tech = get_technical_data(ticker)
+    if df_tech is None:
+        st.warning(f"Dati tecnici non disponibili per {ticker}")
+        return
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        strategy = st.selectbox("Strategia", ["sma_crossover", "rsi_mean_reversion"], index=0)
+    with col2:
+        cash = st.number_input("Capitale iniziale ($)", value=10000.0, step=1000.0)
+    
+    if st.button("▶️ Esegui Backtest", key=f"backtest_{ticker}"):
+        with st.spinner("Simulazione in corso..."):
+            result = run_backtest(df_tech, strategy, cash=cash)
+        if "error" in result:
+            st.error(result["error"])
+        else:
+            st.success("Backtest completato")
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("Rendimento totale", f"{result['metrics']['Return [%]']:.2f}%")
+            col_m2.metric("Sharpe Ratio", f"{result['metrics']['Sharpe Ratio']:.2f}")
+            col_m3.metric("Max Drawdown", f"{result['metrics']['Max Drawdown [%]']:.2f}%")
+            col_m4, col_m5, col_m6 = st.columns(3)
+            col_m4.metric("Win Rate", f"{result['metrics']['Win Rate [%]']:.1f}%")
+            col_m5.metric("Numero trade", f"{result['metrics']['Total Trades']}")
+            col_m6.metric("Equity finale", f"${result['metrics']['Equity Final [$]']:,.2f}")
+            
+            with st.expander("📈 Grafico del backtest"):
+                st.plotly_chart(result["plot"], use_container_width=True)
+    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
+
 def render_portafoglio_tab(ui):
-    st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita', PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze, concentrazione, ribilanciamento.")
+    st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita', PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze, concentrazione, ribilanciamento, ottimizzazione Markowitz.")
     base_currency = ui.get("base_currency") or st.session_state.get("base_currency", "EUR")
     st.success(f"Valuta base portafoglio: **{base_currency}** | Conversione FX reale attiva.")
     all_tickers_batch = []
@@ -2423,7 +2475,6 @@ def render_portafoglio_tab(ui):
                     st.session_state.holdings_quantity.setdefault(t_clean, 0.0)
                     st.session_state.holdings_pmc.setdefault(t_clean, 0.0)
                     st.session_state.holdings_currency.setdefault(t_clean, 'USD')
-                    # SALVATAGGIO RIMOSSO QUI: ora solo tramite pulsante
                     st.success(f"Aggiunto {t_clean} al portafoglio. Ricordati di salvare.")
             except ValueError as e:
                 st.error(f"Ticker non valido: {e}")
@@ -2453,7 +2504,6 @@ def render_portafoglio_tab(ui):
             holdings_quantity[t] = qty
             holdings_pmc[t] = pmc
             holdings[t] = float(derived['Importo Investito'])
-            # SALVATAGGIO AUTOMATICO RIMOSSO
             price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
             native_cur = derived.get('Valuta Nativa', cur)
             fx_used = derived.get('FX Native->User', 1.0)
@@ -2568,6 +2618,58 @@ def render_portafoglio_tab(ui):
                             fig_reb.add_trace(go.Bar(x=rebalance_df[label_col], y=rebalance_df["Target %"], name="Target %"))
                             fig_reb.update_layout(barmode="group", template="plotly_dark", height=420, xaxis_title=label_col, yaxis_title="Peso %")
                             st.plotly_chart(fig_reb, width='stretch')
+                    
+                    # Ottimizzazione Markowitz
+                    st.markdown("#### Ottimizzazione Portafoglio (Markowitz)")
+                    if 'df_rets' in locals() and not df_rets.empty:
+                        col_opt1, col_opt2 = st.columns(2)
+                        with col_opt1:
+                            if st.button("🎯 Calcola portafoglio ottimo (Max Sharpe)", key="opt_max_sharpe"):
+                                try:
+                                    weights_opt = get_portfolio_weights_markowitz(
+                                        tickers=list(positive_holdings.keys()),
+                                        returns_df=df_rets,
+                                        method="max_sharpe",
+                                        risk_free_rate=get_active_risk_free_rate()
+                                    )
+                                    st.session_state['markowitz_weights'] = weights_opt
+                                    st.success("Pesi calcolati! Visualizzati sotto.")
+                                except Exception as e:
+                                    st.error(f"Errore nell'ottimizzazione: {e}")
+                        with col_opt2:
+                            if st.button("📉 Calcola portafoglio min varianza", key="opt_min_vol"):
+                                try:
+                                    weights_opt = get_portfolio_weights_markowitz(
+                                        tickers=list(positive_holdings.keys()),
+                                        returns_df=df_rets,
+                                        method="min_volatility",
+                                        risk_free_rate=get_active_risk_free_rate()
+                                    )
+                                    st.session_state['markowitz_weights'] = weights_opt
+                                    st.success("Pesi calcolati! Visualizzati sotto.")
+                                except Exception as e:
+                                    st.error(f"Errore nell'ottimizzazione: {e}")
+
+                        if 'markowitz_weights' in st.session_state and st.session_state['markowitz_weights']:
+                            opt_weights = st.session_state['markowitz_weights']
+                            st.markdown("##### Pesi ottimali suggeriti")
+                            opt_df = pd.DataFrame({
+                                "Ticker": list(opt_weights.keys()),
+                                "Peso % (ottimale)": list(opt_weights.values()),
+                                "Peso % (attuale)": [weights_pct.get(t, 0.0) for t in opt_weights.keys()]
+                            })
+                            st.dataframe(opt_df, width='stretch')
+                            fig_ef = plot_efficient_frontier(
+                                tickers=list(positive_holdings.keys()),
+                                returns_df=df_rets,
+                                current_weights=weights_pct,
+                                optimal_weights_max_sharpe=opt_weights
+                            )
+                            st.plotly_chart(fig_ef, use_container_width=True)
+                    else:
+                        st.info("Dati insufficienti per l'ottimizzazione (servono almeno 2 titoli con storico sufficiente).")
+                    
+                    # Performance portfolio
                     if not df_weights_base.empty:
                         total_invested_base = float(df_weights_base["Importo Investito Base"].sum())
                         total_value_base = float(df_weights_base["Valore di Mercato Base"].sum())
@@ -2713,6 +2815,8 @@ def main():
         render_verdetto_tab(row, ticker, standalone_raw_data)
     elif ui["tab_selection"] == "📁 Portafoglio":
         render_portafoglio_tab(ui)
+    elif ui["tab_selection"] == "⏪ Backtest":
+        render_backtest_tab(row, ticker)
 
 if __name__ == "__main__":
     main()
