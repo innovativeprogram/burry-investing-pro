@@ -3,6 +3,8 @@
 # Tutti i diritti riservati.
 # Proprietà intellettuale di [Canio Tedesco].
 # La copia o distribuzione non autorizzata è severamente vietata.
+# Versione refactored e corretta (basata su BurryInvestingpro (3).py)
+# Modifiche: correzione Piotroski, YahooQuery hardening, safe_div, Supabase ottimizzato, password speciale, type hints, logging.
 """
 
 import streamlit as st
@@ -22,7 +24,6 @@ from plotly.subplots import make_subplots
 import re
 import logging
 import os
-import io
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,17 +32,13 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 
-# NUOVI MODULI PER CACHE, RATE LIMITING E RESOLVER
+# Moduli esterni (assicurarsi che esistano)
 from cache_manager import get_cache_manager
 from rate_limiter import get_rate_limiter
 from ticker_resolver import auto_resolve_ticker_adaptive
-
-# Nuove fonti API e scraper (import diretto per evitare problemi con __init__.py)
 from api_sources.fmp import FMPSource
 from api_sources.alpha_vantage import AlphaVantageSource
 from scrapers.marketwatch import MarketWatchScraper
-
-# Import delle funzioni AI
 from burry_ai_prompts import (
     build_ai_context_for_ticker,
     ask_gemini_ticker_chat,
@@ -68,6 +65,7 @@ DEFAULT_TAX_RATE = 0.26
 SAFE_INTEREST_COVERAGE = 1e9
 TRADING_DAYS_YEAR = 252
 MAX_CSV_ROWS = 100
+MAX_CSV_SIZE_MB = 10
 MAX_WORKERS = 3
 DEFAULT_RISK_FREE_RATE = 0.04
 FX_TTL_SECONDS = 3600
@@ -76,6 +74,7 @@ ALTMAN_SAFE_THRESHOLD = 1.81
 
 DEFAULT_BENCHMARK = "^GSPC"
 DEFAULT_SMART_WEIGHTS = {"F": 0.40, "T": 0.30, "Q": 0.30}
+UNIFIED_WEIGHTS = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}   # unificati
 TAX_LOSS_COMPENSATION_YEARS = 4
 BENEISH_THRESHOLD = -1.78
 
@@ -83,7 +82,7 @@ POLYGON_RATE_LIMIT_SEC = 12.0
 _last_polygon_call = 0.0
 _polygon_lock = threading.Lock()
 
-def throttle_polygon():
+def throttle_polygon() -> None:
     global _last_polygon_call
     with _polygon_lock:
         now = time.time()
@@ -137,8 +136,8 @@ def get_current_price_safe(ticker_symbol: str) -> float:
                     p = data["results"].get("p")
                     if p is not None:
                         return float(p)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Polygon price error: {e}")
     try:
         yq = YQ_Ticker(symbol)
         price_data = yq.price.get(symbol, {}) if isinstance(yq.price, dict) else {}
@@ -146,12 +145,13 @@ def get_current_price_safe(ticker_symbol: str) -> float:
             p = price_data.get('regularMarketPrice') or price_data.get('preMarketPrice')
             if p is not None:
                 return float(p)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"YQ price error: {e}")
     try:
         t = yf.Ticker(symbol)
         return float(t.fast_info['last_price'])
-    except Exception:
+    except Exception as e:
+        logger.debug(f"yf price error: {e}")
         return 0.0
 
 @st.cache_data(ttl=FX_TTL_SECONDS, show_spinner=False)
@@ -173,8 +173,8 @@ def get_fx_rate(from_currency: str, to_currency: str) -> float:
                 inv_val = safe_float(s.iloc[-1], 1.0)
                 if inv_val != 0:
                     return 1.0 / inv_val
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"FX rate error: {e}")
     return 1.0
 
 @st.cache_data(ttl=RISK_FREE_TTL_SECONDS, show_spinner=False)
@@ -187,8 +187,8 @@ def get_short_term_risk_free_rate() -> float:
                 rf_pct = safe_float(last.iloc[-1], DEFAULT_RISK_FREE_RATE * 100)
                 if 0 <= rf_pct <= 15:
                     return rf_pct / 100.0
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Risk-free rate error: {e}")
     return DEFAULT_RISK_FREE_RATE
 
 def get_active_risk_free_rate() -> float:
@@ -418,6 +418,9 @@ def is_supabase_available() -> bool:
     return get_supabase_client() is not None
 
 def load_user_portfolio() -> None:
+    if not is_authenticated():
+        st.warning("Autenticazione necessaria per caricare il portafoglio.")
+        return
     user_id = get_logged_user_id()
     if not user_id: return
     supabase = get_supabase_client()
@@ -452,6 +455,9 @@ def load_user_portfolio() -> None:
         st.session_state.holdings[t] = qty * pmc
 
 def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, currency: str) -> None:
+    if not is_authenticated():
+        st.error("Autenticazione richiesta per salvare.")
+        return
     user_id = get_logged_user_id()
     if not user_id: return
     supabase = get_supabase_client()
@@ -471,6 +477,8 @@ def save_user_portfolio_position(ticker: str, quantity: float, pmc: float, curre
         st.error(f"Errore Supabase durante il salvataggio di {ticker}: {e}")
 
 def delete_user_portfolio_position(ticker: str) -> None:
+    if not is_authenticated():
+        return
     user_id = get_logged_user_id()
     if not user_id: return
     supabase = get_supabase_client()
@@ -486,15 +494,23 @@ def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     return user, session
 
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+# Password: almeno 8 caratteri, una maiuscola, una minuscola, un numero, un carattere speciale
+PASSWORD_REGEX = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>/?]).{8,}$')
 
 def validate_email(email: str) -> bool:
     return bool(EMAIL_REGEX.match((email or "").strip()))
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:
-    if len(password) < 8: return False, "La password deve avere almeno 8 caratteri."
-    if not re.search(r"[A-Z]", password): return False, "La password deve contenere almeno una maiuscola."
-    if not re.search(r"[a-z]", password): return False, "La password deve contenere almeno una minuscola."
-    if not re.search(r"\d", password): return False, "La password deve contenere almeno un numero."
+    if len(password) < 8:
+        return False, "La password deve avere almeno 8 caratteri."
+    if not re.search(r"[A-Z]", password):
+        return False, "La password deve contenere almeno una maiuscola."
+    if not re.search(r"[a-z]", password):
+        return False, "La password deve contenere almeno una minuscola."
+    if not re.search(r"\d", password):
+        return False, "La password deve contenere almeno un numero."
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};:\"\\|,.<>/?]", password):
+        return False, "La password deve contenere almeno un carattere speciale."
     return True, "OK"
 
 def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
@@ -686,6 +702,15 @@ def safe_float(value: Any, default: float = np.nan) -> float:
         return float(value)
     except (TypeError, ValueError): return default
 
+def safe_div(a: float, b: float, default: float = 0.0) -> float:
+    """Divisione sicura che evita ZeroDivisionError e NaN."""
+    try:
+        if b is None or b == 0:
+            return default
+        return a / b
+    except Exception:
+        return default
+
 def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = None) -> bool:
     t = (ticker or "").upper()
     if t.startswith("^") or "=X" in t or t.endswith("=F"): return True
@@ -702,13 +727,11 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
 # ==========================================================================
 # 2.A RISOLUZIONE ADATTIVA DEL TICKER (DELEGATA AL MODULO ticker_resolver)
 # ==========================================================================
-# La vecchia funzione è stata sostituita dall'import di auto_resolve_ticker_adaptive
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE (corretto)
 # ==========================================================================
 def request_with_backoff(func, *args, **kwargs):
-    """Esegue una funzione con backoff esponenziale in caso di rate limiting"""
     for attempt in range(5):
         try:
             return func(*args, **kwargs)
@@ -723,28 +746,21 @@ def request_with_backoff(func, *args, **kwargs):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Recupera i dati fondamentali usando una cascata di fonti:
-    1. Cache SQLite
-    2. Polygon (se disponibile)
-    3. FMP (se API key presente)
-    4. Alpha Vantage (se API key presente)
-    5. MarketWatch scraper (fallback)
-    6. yfinance (fallback finale)
-    7. YahooQuery (ultimo fallback)
-    """
     cache = get_cache_manager()
     
-    # 1. Controllo cache
+    # 1. Controllo cache (anche per fallimenti)
     cached = cache.get_fundamental(symbol)
-    if cached:
+    if cached is not None:
+        if isinstance(cached, dict) and cached.get("_failed"):
+            logger.debug(f"Cache failed marker for {symbol}")
+            return None
         logger.info(f"Cache hit per fondamentali {symbol}")
         return cached
     
     resolved = auto_resolve_ticker_adaptive(symbol)
     result = None
     
-    # 2. Polygon (solo simboli senza punto)
+    # 2. Polygon
     if '.' not in resolved:
         try:
             poly_data = get_polygon_fundamentals(resolved)
@@ -787,7 +803,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"MarketWatch fallito per {resolved}: {e}")
     
-    # 6. yfinance (con backoff)
+    # 6. yfinance
     if result is None:
         try:
             def _fetch_yf():
@@ -804,7 +820,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.info(f"yfinance fallito per {resolved}: {e}")
     
-    # 7. YahooQuery (ultimo tentativo)
+    # 7. YahooQuery (ultimo tentativo) - con hardening
     if result is None:
         try:
             yq = YQ_Ticker(resolved)
@@ -834,6 +850,10 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             inc_stmt = format_yq_df(yq.income_statement())
             bal_sheet = format_yq_df(yq.balance_sheet())
             cash_flow = format_yq_df(yq.cash_flow())
+            # NON consideriamo YahooQuery un successo se almeno uno dei tre dataset è vuoto
+            if inc_stmt.empty or bal_sheet.empty or cash_flow.empty:
+                logger.warning(f"YahooQuery dati incompleti per {resolved} (vuoti).")
+                raise ValueError("Dati YahooQuery incompleti")
             if not inc_stmt.empty:
                 inc_stmt.rename(index={'TotalRevenue': 'Total Revenue','PretaxIncome': 'Pretax Income','TaxProvision': 'Tax Provision','InterestExpense': 'Interest Expense'}, inplace=True)
             if not bal_sheet.empty:
@@ -843,11 +863,13 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             result = {"info": combined_info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": resolved}
             logger.info(f"YahooQuery success per {resolved}")
         except Exception as e:
-            logger.error(f"Tutte le API hanno fallito per fondamentali di {resolved}: {e}")
+            logger.error(f"YahooQuery fallito per fondamentali di {resolved}: {e}")
     
-    # Salva in cache (anche se None, per evitare richieste ripetute a fonti fallite? Meglio salvare solo se non None)
+    # Salva in cache (se risultato valido) o un marker di fallimento
     if result:
         cache.set_fundamental(symbol, result)
+    else:
+        cache.set_fundamental(symbol, {"_failed": True, "timestamp": time.time()}, ttl=3600)
     return result
 
 def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
@@ -869,44 +891,47 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
         net_income = safe_float(info.get('netIncomeToCommon'), 0.0)
         total_assets = get_first(bs, 'Total Assets', 0.0)
         if total_assets > 0:
-            roa = net_income / total_assets
+            roa = safe_div(net_income, total_assets)
             if roa > 0: fscore += 1
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         if total_assets > 0 and op_cash > 0: fscore += 1
         if 'Net Income' in fin.index and fin.shape[1] >= 2:
             ni0 = safe_float(fin.loc['Net Income'].iloc[0], 0.0)
             ni1 = safe_float(fin.loc['Net Income'].iloc[1], 0.0)
-            if total_assets > 0 and (ni0 / total_assets) > (ni1 / total_assets): fscore += 1
+            if total_assets > 0 and safe_div(ni0, total_assets) > safe_div(ni1, total_assets): fscore += 1
         if total_assets > 0:
-            accruals = (net_income - op_cash) / total_assets
+            accruals = safe_div((net_income - op_cash), total_assets)
             if accruals < 0: fscore += 1
         if 'Total Debt' in bs.index and bs.shape[1] >= 2:
             debt0 = safe_float(bs.loc['Total Debt'].iloc[0], 0.0)
             debt1 = safe_float(bs.loc['Total Debt'].iloc[1], 0.0)
             if debt0 < debt1: fscore += 1
+        # CORREZIONE: Current Ratio ora confronta correttamente primo e secondo anno
         if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index and bs.shape[1] >= 2:
             ca0 = safe_float(bs.loc['Current Assets'].iloc[0], 0.0)
-            cl0 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
+            cl0 = safe_float(bs.loc['Current Liabilities'].iloc[0], 1.0)
             ca1 = safe_float(bs.loc['Current Assets'].iloc[1], 0.0)
             cl1 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
-            cr0 = ca0 / cl0 if cl0 != 0 else 0.0
-            cr1 = ca1 / cl1 if cl1 != 0 else 0.0
+            cr0 = safe_div(ca0, cl0)
+            cr1 = safe_div(ca1, cl1)
             if cr0 > cr1: fscore += 1
         fscore += 1
         if 'Total Revenue' in fin.index and fin.shape[1] >= 2:
             rev0 = safe_float(fin.loc['Total Revenue'].iloc[0], 0.0)
             rev1 = safe_float(fin.loc['Total Revenue'].iloc[1], 0.0)
-            cogs0 = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[0], 0.0) if 'Cost Of Goods Sold' in fin.index else 0.0
-            cogs1 = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[1], 0.0) if 'Cost Of Goods Sold' in fin.index else 0.0
-            gm0 = (rev0 - cogs0) / rev0 if rev0 != 0 else 0.0
-            gm1 = (rev1 - cogs1) / rev1 if rev1 != 0 else 0.0
+            cogs_series0 = fin.loc.get('Cost Of Goods Sold', pd.Series([0]))
+            cogs0 = safe_float(cogs_series0.iloc[0] if len(cogs_series0) > 0 else 0, 0.0)
+            cogs_series1 = fin.loc.get('Cost Of Goods Sold', pd.Series([0]))
+            cogs1 = safe_float(cogs_series1.iloc[1] if len(cogs_series1) > 1 else 0, 0.0)
+            gm0 = safe_div((rev0 - cogs0), rev0)
+            gm1 = safe_div((rev1 - cogs1), rev1)
             if gm0 > gm1: fscore += 1
         if total_assets > 0 and bs.shape[1] >= 2:
             ta0 = total_assets
             ta1 = safe_float(bs.loc['Total Assets'].iloc[1], 0.0)
             if ta1 > 0:
-                at0 = rev0 / ta0 if rev0 else 0.0
-                at1 = rev1 / ta1 if rev1 else 0.0
+                at0 = safe_div(rev0, ta0)
+                at1 = safe_div(rev1, ta1)
                 if at0 > at1: fscore += 1
     except Exception as e:
         logger.debug(f"Piotroski F-Score non calcolabile: {e}")
@@ -930,36 +955,38 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         total_debt = get_first(bs, 'Total Debt', 0.0)
         equity = get_first(bs, 'Stockholders Equity', 1.0)
         revenue = safe_float(info.get('totalRevenue', 0.0), 0.0)
-        cogs = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[0], 0.0) if 'Cost Of Goods Sold' in fin.index else 0.0
+        cogs_series = fin.loc.get('Cost Of Goods Sold', pd.Series([0]))
+        cogs = safe_float(cogs_series.iloc[0] if len(cogs_series) > 0 else 0, 0.0)
         net_income = safe_float(info.get('netIncomeToCommon', 0.0), 0.0)
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         depreciation = get_first(cf, 'Depreciation', 0.0)
         if depreciation == 0.0:
             depreciation = safe_float(info.get('depreciationExpense', 0.0), 0.0)
-        total_assets_prev = safe_float(bs.loc['Total Assets'].iloc[1], total_assets)
-        cur_assets_prev = safe_float(bs.loc['Current Assets'].iloc[1], cur_assets)
-        cur_liab_prev = safe_float(bs.loc['Current Liabilities'].iloc[1], cur_liab)
+        total_assets_prev = safe_float(bs.loc['Total Assets'].iloc[1] if len(bs.loc['Total Assets']) > 1 else total_assets, total_assets)
+        cur_assets_prev = safe_float(bs.loc['Current Assets'].iloc[1] if len(bs.loc['Current Assets']) > 1 else cur_assets, cur_assets)
+        cur_liab_prev = safe_float(bs.loc['Current Liabilities'].iloc[1] if len(bs.loc['Current Liabilities']) > 1 else cur_liab, cur_liab)
         cash_prev = 0.0
-        total_debt_prev = safe_float(bs.loc['Total Debt'].iloc[1], total_debt)
-        equity_prev = safe_float(bs.loc['Stockholders Equity'].iloc[1], equity)
-        revenue_prev = safe_float(fin.loc['Total Revenue'].iloc[1] if 'Total Revenue' in fin.index else revenue, revenue)
-        cogs_prev = safe_float(fin.loc.get('Cost Of Goods Sold', pd.Series([0])).iloc[1], cogs) if 'Cost Of Goods Sold' in fin.index else cogs
-        net_income_prev = safe_float(fin.loc['Net Income'].iloc[1] if 'Net Income' in fin.index else net_income, net_income)
-        op_cash_prev = safe_float(cf.loc['Operating Cash Flow'].iloc[1] if 'Operating Cash Flow' in cf.index else op_cash, op_cash)
-        depreciation_prev = safe_float(cf.loc['Depreciation'].iloc[1] if 'Depreciation' in cf.index else depreciation, depreciation)
+        total_debt_prev = safe_float(bs.loc['Total Debt'].iloc[1] if len(bs.loc['Total Debt']) > 1 else total_debt, total_debt)
+        equity_prev = safe_float(bs.loc['Stockholders Equity'].iloc[1] if len(bs.loc['Stockholders Equity']) > 1 else equity, equity)
+        revenue_prev = safe_float(fin.loc['Total Revenue'].iloc[1] if 'Total Revenue' in fin.index and len(fin.loc['Total Revenue']) > 1 else revenue, revenue)
+        cogs_prev_series = fin.loc.get('Cost Of Goods Sold', pd.Series([0]))
+        cogs_prev = safe_float(cogs_prev_series.iloc[1] if len(cogs_prev_series) > 1 else cogs, cogs)
+        net_income_prev = safe_float(fin.loc['Net Income'].iloc[1] if 'Net Income' in fin.index and len(fin.loc['Net Income']) > 1 else net_income, net_income)
+        op_cash_prev = safe_float(cf.loc['Operating Cash Flow'].iloc[1] if 'Operating Cash Flow' in cf.index and len(cf.loc['Operating Cash Flow']) > 1 else op_cash, op_cash)
+        depreciation_prev = safe_float(cf.loc['Depreciation'].iloc[1] if 'Depreciation' in cf.index and len(cf.loc['Depreciation']) > 1 else depreciation, depreciation)
         def safe_ratio(num, den, default=0.0):
-            return num/den if den != 0 else default
+            return safe_div(num, den, default)
         reliable = True
         if 'Cost Of Goods Sold' not in fin.index: reliable = False
         if 'Total Assets' not in bs.index: reliable = False
-        dsri = safe_ratio((cur_assets - cash) / revenue, (cur_assets_prev - cash_prev) / revenue_prev)
-        gmi = safe_ratio((revenue_prev - cogs_prev)/revenue_prev, (revenue - cogs)/revenue)
-        aqi = safe_ratio(1 - (cur_assets + total_assets - cur_liab - cash)/total_assets, 1 - (cur_assets_prev + total_assets_prev - cur_liab_prev - cash_prev)/total_assets_prev)
+        dsri = safe_ratio((cur_assets - cash), revenue) / safe_ratio((cur_assets_prev - cash_prev), revenue_prev, 1e-9)
+        gmi = safe_ratio((revenue_prev - cogs_prev), revenue_prev) / safe_ratio((revenue - cogs), revenue, 1e-9)
+        aqi = safe_ratio(1 - (cur_assets + total_assets - cur_liab - cash), total_assets) / safe_ratio(1 - (cur_assets_prev + total_assets_prev - cur_liab_prev - cash_prev), total_assets_prev, 1e-9)
         sgi = revenue / revenue_prev if revenue_prev != 0 else 1.0
-        depi = safe_ratio(depreciation_prev/(depreciation_prev + total_assets_prev), depreciation/(depreciation + total_assets))
+        depi = safe_ratio(depreciation_prev, (depreciation_prev + total_assets_prev)) / safe_ratio(depreciation, (depreciation + total_assets), 1e-9)
         sgai = 1.0
-        lvgi = safe_ratio(total_debt/total_assets, total_debt_prev/total_assets_prev)
-        tata = (net_income - op_cash) / total_assets
+        lvgi = safe_ratio(total_debt, total_assets) / safe_ratio(total_debt_prev, total_assets_prev, 1e-9)
+        tata = safe_ratio((net_income - op_cash), total_assets)
         m_score = -4.84 + 0.92*dsri + 0.528*gmi + 0.404*aqi + 0.892*sgi + 0.115*depi - 0.172*sgai + 4.679*tata - 0.327*lvgi
         return float(m_score), reliable
     except Exception as e:
@@ -984,7 +1011,8 @@ def estimate_wacc(info: Dict[str, Any], market_cap: float, total_debt: float, ta
         weight_debt = total_debt / total_capital
         wacc = weight_equity * cost_equity + weight_debt * cost_debt_after_tax
         return float(wacc)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"WACC estimate error: {e}")
         return None
 
 def estimate_epv(ebit: float, tax_rate: float, wacc: float, growth: float = 0.02) -> Optional[float]:
@@ -1017,7 +1045,6 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         bs = raw_data["balance_sheet"]
         cf = raw_data["cashflow"]
         
-        # Protezione contro tipi errati (da API che restituiscono stringhe o None)
         if not isinstance(fin, pd.DataFrame):
             fin = pd.DataFrame()
         if not isinstance(bs, pd.DataFrame):
@@ -1043,54 +1070,60 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         croic = 0.0
         if invested_cap > 0:
             nopat = ebit * (1.0 - tax_rate)
-            roic = float(nopat / invested_cap)
-            croic = float(fcf / invested_cap)
+            roic = safe_div(nopat, invested_cap)
+            croic = safe_div(fcf, invested_cap)
         pe = info.get('trailingPE')
         growth = info.get('earningsGrowth')
         peg = info.get('pegRatio')
         peg_src = "N/A"
         if peg is not None: peg_src = "Official"
         elif pe and pe > 0 and growth and growth > 0:
-            peg = float(pe / (growth * 100))
+            peg = safe_div(pe, (growth * 100))
             peg_src = "Estimated"
         int_exp = get_first(fin, 'Interest Expense', 0.0)
         if int_exp == 0.0:
             interest_coverage = SAFE_INTEREST_COVERAGE
         else:
-            interest_coverage = float(ebit / abs(int_exp)) if ebit != 0 else 0.0
+            interest_coverage = safe_div(ebit, abs(int_exp), 0.0)
         total_revenue = info.get('totalRevenue')
         net_income = info.get('netIncomeToCommon')
         revenue_growth = info.get('revenueGrowth')
         debt_to_equity = None
-        if equity is not None and not np.isnan(equity) and equity != 0: debt_to_equity = float(total_debt / equity)
+        if equity is not None and not np.isnan(equity) and equity != 0:
+            debt_to_equity = safe_div(total_debt, equity)
         net_margin = None
-        if total_revenue not in (None, 0) and net_income is not None: net_margin = safe_float(net_income, 0.0) / float(total_revenue)
+        if total_revenue not in (None, 0) and net_income is not None:
+            net_margin = safe_div(safe_float(net_income, 0.0), float(total_revenue))
         fcf_margin = None
-        if total_revenue not in (None, 0): fcf_margin = fcf / float(total_revenue)
+        if total_revenue not in (None, 0):
+            fcf_margin = safe_div(fcf, float(total_revenue))
         mc = info.get('marketCap')
         fcf_yield = None
-        if mc and mc > 0 and fcf != 0: fcf_yield = fcf / float(mc)
+        if mc and mc > 0 and fcf != 0:
+            fcf_yield = safe_div(fcf, float(mc))
         ev = info.get('enterpriseValue')
         ebitda = info.get('ebitda')
         ev_to_ebit = None
-        if ev and ebit and ebit != 0: ev_to_ebit = ev / ebit
+        if ev and ebit and ebit != 0:
+            ev_to_ebit = safe_div(ev, ebit)
         ev_to_ebitda = None
-        if ev and ebitda and ebitda != 0: ev_to_ebitda = ev / ebitda
+        if ev and ebitda and ebitda != 0:
+            ev_to_ebitda = safe_div(ev, ebitda)
         pb = info.get('priceToBook')
         ps = info.get('priceToSalesTrailing12Months')
         fscore = calculate_piotroski_fscore(raw_data)
         mscore, mscore_reliable = calculate_beneish_mscore(raw_data)
         current_assets = get_first(bs, 'Current Assets', 0.0)
         current_liabilities = get_first(bs, 'Current Liabilities', 1.0)
-        current_ratio = current_assets / current_liabilities if current_liabilities != 0 else None
+        current_ratio = safe_div(current_assets, current_liabilities, None) if current_liabilities != 0 else None
         inventory = get_first(bs, 'Inventory', 0.0)
-        quick_ratio = (current_assets - inventory) / current_liabilities if current_liabilities != 0 else None
+        quick_ratio = safe_div((current_assets - inventory), current_liabilities, None) if current_liabilities != 0 else None
         roe = None
         if equity is not None and not np.isnan(equity) and equity != 0 and net_income is not None:
-            roe = net_income / equity
+            roe = safe_div(net_income, equity)
         total_assets = get_first(bs, 'Total Assets', 0.0)
         capital_employed = total_assets - current_liabilities
-        roce = ebit / capital_employed if capital_employed != 0 else None
+        roce = safe_div(ebit, capital_employed, None) if capital_employed != 0 else None
         eps = info.get('trailingEps')
         bvps = info.get('bookValue')
         graham_number = None
@@ -1137,6 +1170,7 @@ def fetch_metrics_for_ticker(ticker: str) -> Tuple[str, Optional[Dict[str, Any]]
         if not met: return ticker, None, "impossibile calcolare le metriche"
         return ticker, met.to_ui_dict(), None
     except Exception as e:
+        logger.exception(f"Errore in fetch_metrics_for_ticker per {ticker}")
         return ticker, None, str(e)
 
 def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -1146,28 +1180,25 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch_metrics_for_ticker, t): t for t in tickers}
         for f in as_completed(futures):
-            t, ui_dict, err = f.result()
-            if err: errors.append(f"{t}: {err}")
-            elif ui_dict is not None: results.append(ui_dict)
+            try:
+                t, ui_dict, err = f.result()
+                if err: errors.append(f"{t}: {err}")
+                elif ui_dict is not None: results.append(ui_dict)
+            except Exception as e:
+                t = futures[f]
+                logger.exception(f"Errore nel thread per {t}")
+                errors.append(f"{t}: errore thread: {e}")
             time.sleep(BATCH_RATE_LIMIT_SEC)
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA CON CACHE E CASCATA)
+# 4. DATA ENGINE: ANALISI TECNICA (MIGLIORATA CON CACHE E CASCATA) - CORRETTA
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
-    """
-    Recupera i dati tecnici (OHLCV giornalieri) usando:
-    1. Cache SQLite
-    2. Polygon (se API key presente)
-    3. Alpha Vantage (se API key)
-    4. yfinance
-    5. YahooQuery (fallback)
-    """
     cache = get_cache_manager()
     cached = cache.get_technical(symbol)
-    if cached is not None and isinstance(cached, pd.DataFrame) and not cached.empty:
+    if cached is not None and isinstance(cached, pd.DataFrame) and not cached.empty and len(cached) >= 60:
         logger.info(f"Cache hit per tecnici {symbol}")
         return cached
     
@@ -1192,6 +1223,8 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
                     if len(df) >= 60:
                         logger.info(f"Polygon success per tecnici {resolved}")
+                    else:
+                        df = None
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
     
@@ -1203,6 +1236,8 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
             if av_df is not None and isinstance(av_df, pd.DataFrame) and len(av_df) >= 60:
                 df = av_df
                 logger.info(f"Alpha Vantage success per tecnici {resolved}")
+            else:
+                df = None
         except Exception as e:
             logger.debug(f"Alpha Vantage tecnico fallito: {e}")
     
@@ -1218,6 +1253,8 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                 if len(yf_df) >= 60:
                     df = yf_df
                     logger.info(f"yfinance success per tecnici {resolved}")
+                else:
+                    df = None
         except Exception as e:
             logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
     
@@ -1235,12 +1272,17 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                 if len(yq_df) >= 60:
                     df = yq_df
                     logger.info(f"YahooQuery success per tecnici {resolved}")
+                else:
+                    df = None
         except Exception as e:
             logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
     
-    # Salva in cache
-    if df is not None and not df.empty:
+    # Salva in cache solo se valido e con almeno 60 righe
+    if df is not None and not df.empty and len(df) >= 60:
         cache.set_technical(symbol, df)
+    else:
+        cache.set_technical(symbol, pd.DataFrame(), ttl=1800)
+        return None
     return df
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -1399,7 +1441,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE (invariate)
+# 5. METRICHE QUANTITATIVE AVANZATE (invariate ma con safe_div)
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1506,18 +1548,18 @@ def calculate_quant_metrics(df: pd.DataFrame, fund_data: Optional[Dict[str, Any]
             fin = fund_data.get("financials")
             info = fund_data.get("info", {})
             if isinstance(bs, pd.DataFrame) and not bs.empty and isinstance(fin, pd.DataFrame) and not fin.empty:
-                ta_val = bs.loc['Total Assets'].iloc[0] if 'Total Assets' in bs.index else 0
+                ta_val = get_first(bs, 'Total Assets', 0.0)
                 if ta_val and ta_val > 0:
-                    wc = (bs.loc['Current Assets'].iloc[0] - bs.loc['Current Liabilities'].iloc[0]) if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index else 0
-                    re_val = bs.loc['Retained Earnings'].iloc[0] if 'Retained Earnings' in bs.index else 0
-                    ebit = fin.loc['EBIT'].iloc[0] if 'EBIT' in fin.index else 0
+                    wc = (get_first(bs, 'Current Assets', 0.0) - get_first(bs, 'Current Liabilities', 0.0))
+                    re_val = get_first(bs, 'Retained Earnings', 0.0)
+                    ebit = get_first(fin, 'EBIT', 0.0)
                     mc = info.get('marketCap')
-                    tl = (bs.loc['Total Liabilities Net Minority Interest'].iloc[0] if 'Total Liabilities Net Minority Interest' in bs.index else (bs.loc['Total Liabilities'].iloc[0] if 'Total Liabilities' in bs.index else 0))
+                    tl = (get_first(bs, 'Total Liabilities Net Minority Interest', 0.0) if 'Total Liabilities Net Minority Interest' in bs.index else (get_first(bs, 'Total Liabilities', 0.0)))
                     if mc is not None and tl and tl > 0:
                         rev = info.get('totalRevenue', 0) or 0
-                        z_score = float((1.2 * (wc / ta_val)) + (1.4 * (re_val / ta_val)) + (3.3 * (ebit / ta_val)) + (0.6 * (mc / tl)) + (1.0 * (rev / ta_val)))
-                        bv_equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else 0
-                        if bv_equity: z_score2 = float(6.56 * (wc / ta_val) + 3.26 * (re_val / ta_val) + 6.72 * (ebit / ta_val) + 1.05 * (bv_equity / tl))
+                        z_score = float((1.2 * safe_div(wc, ta_val)) + (1.4 * safe_div(re_val, ta_val)) + (3.3 * safe_div(ebit, ta_val)) + (0.6 * safe_div(mc, tl)) + (1.0 * safe_div(rev, ta_val)))
+                        bv_equity = get_first(bs, 'Stockholders Equity', 0.0)
+                        if bv_equity: z_score2 = float(6.56 * safe_div(wc, ta_val) + 3.26 * safe_div(re_val, ta_val) + 6.72 * safe_div(ebit, ta_val) + 1.05 * safe_div(bv_equity, tl))
         except Exception as e:
             logger.debug(f"Altman Z-Score errore: {e}")
     return {"Sharpe Ratio": float(sharpe) if not np.isnan(sharpe) else 0.0, "Annual Volatility": float(vol) if not np.isnan(vol) else np.nan, "R-Squared": float(r_sq) if not np.isnan(r_sq) else np.nan, "Altman Z-Score": z_score, "Altman Z''-Score": z_score2, "Price Percentile": float((df['Close'] < df['Close'].iloc[-1]).mean() * 100), "Trend Slope": slope, "Risk Free Used": float(rf)}
@@ -1543,8 +1585,8 @@ def calculate_risk_metrics(df: pd.DataFrame) -> Dict[str, float]:
     downside = returns[returns < rf_daily]
     downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
     ann_excess_ret = (returns.mean() - rf_daily) * TRADING_DAYS_YEAR
-    sortino = ann_excess_ret / downside_dev if downside_dev and downside_dev > 0 else np.nan
-    calmar = cagr / abs(max_dd) if max_dd and max_dd < 0 and not np.isnan(cagr) else np.nan
+    sortino = safe_div(ann_excess_ret, downside_dev, np.nan) if downside_dev and downside_dev > 0 else np.nan
+    calmar = safe_div(cagr, abs(max_dd), np.nan) if max_dd and max_dd < 0 and not np.isnan(cagr) else np.nan
     omega = omega_ratio(returns, rf_annual=get_active_risk_free_rate(), threshold=0.0)
     ulcer = ulcer_index(returns)
     garch = fit_garch(returns)
@@ -1654,7 +1696,8 @@ def compute_smart_quant_score(row: Any, timing_score: int, qm: Dict[str, Any], r
     return {"SmartScore": smart, "FundamentalScore": f_score, "TechnicalScore": t_score, "QuantRiskScore": q_score}
 
 def compute_unified_verdict(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], macro: Dict[str, float]) -> Dict[str, Any]:
-    weights = {"F": 0.40, "V": 0.30, "T": 0.15, "Q": 0.15}
+    # Usa i pesi unificati
+    weights = UNIFIED_WEIGHTS
     thresholds = {"roic_min": 0.10, "croic_min": 0.05, "fcf_margin_min": 0.08, "net_margin_min": 0.10, "de_max": 1.0, "interest_cov_min": 3.0, "fscore_min": 4, "mscore_max": -1.78, "altman_safe": ALTMAN_SAFE_THRESHOLD, "peg_max": 1.5, "ev_ebit_max": 15, "fcf_yield_min": 0.04, "pb_max": 3.0}
     fqs = 0.0
     details = []
@@ -1812,7 +1855,7 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
     mu = port_ret.mean() * TRADING_DAYS_YEAR
     sigma = port_ret.std() * np.sqrt(TRADING_DAYS_YEAR)
     excess = mu - rf
-    sharpe = excess / sigma if sigma > 0 else np.nan
+    sharpe = safe_div(excess, sigma, np.nan) if sigma > 0 else np.nan
     equity = (1 + port_ret).cumprod()
     roll_max = equity.cummax()
     drawdown = equity / roll_max - 1.0
@@ -1820,10 +1863,13 @@ def calculate_portfolio_metrics(port_ret: pd.Series) -> Dict[str, float]:
     rf_daily = rf / TRADING_DAYS_YEAR
     downside = port_ret[port_ret < rf_daily]
     downside_dev = downside.std() * np.sqrt(TRADING_DAYS_YEAR) if not downside.empty else np.nan
-    sortino = excess / downside_dev if downside_dev and downside_dev > 0 else np.nan
+    sortino = safe_div(excess, downside_dev, np.nan) if downside_dev and downside_dev > 0 else np.nan
     n_years = len(port_ret) / TRADING_DAYS_YEAR
-    cagr = (equity.iloc[-1]) ** (1.0 / n_years) - 1.0 if n_years > 0 else np.nan
-    calmar = cagr / abs(max_dd) if max_dd < 0 and not np.isnan(cagr) else np.nan
+    if n_years > 0 and equity.iloc[-1] > 0:
+        cagr = (equity.iloc[-1]) ** (1.0 / n_years) - 1.0
+    else:
+        cagr = np.nan
+    calmar = safe_div(cagr, abs(max_dd), np.nan) if max_dd < 0 and not np.isnan(cagr) else np.nan
     return {"AnnRet": float(mu), "AnnVol": float(sigma), "Sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan, "MaxDD": float(max_dd) if not np.isnan(max_dd) else np.nan, "Sortino": float(sortino) if not np.isnan(sortino) else np.nan, "Calmar": float(calmar) if not np.isnan(calmar) else np.nan, "CAGR": float(cagr) if not np.isnan(cagr) else np.nan}
 
 def calculate_concentration_metrics(weights_pct: Dict[str, float]) -> Dict[str, float]:
@@ -1847,7 +1893,7 @@ def calculate_portfolio_beta(port_ret: pd.Series, benchmark_symbol: str = DEFAUL
         joined.columns = ['port', 'bench']
         cov = joined['port'].cov(joined['bench'])
         var_b = joined['bench'].var()
-        beta = cov / var_b if var_b > 0 else np.nan
+        beta = safe_div(cov, var_b, np.nan) if var_b > 0 else np.nan
         rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
         alpha_daily = (joined['port'].mean() - rf_daily) - beta * (joined['bench'].mean() - rf_daily)
         alpha_ann = alpha_daily * TRADING_DAYS_YEAR
@@ -1899,7 +1945,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2000,7 +2046,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR
+# 6. UI: SIDEBAR (invariato)
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -2086,7 +2132,6 @@ def setup_sidebar() -> Dict[str, Any]:
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
         st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
         
-        # Mostra la cronologia completa
         for msg in st.session_state.get('burry_ai_history', []):
             with st.chat_message(msg.get('role', 'assistant')):
                 st.markdown(msg.get('content', ''))
@@ -2158,7 +2203,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB (invariate)
+# 7. FUNZIONI DI RENDERING DEI TAB (con rimozione salvataggi automatici Supabase)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2360,9 +2405,8 @@ def render_portafoglio_tab(ui):
                     st.session_state.holdings_quantity.setdefault(t_clean, 0.0)
                     st.session_state.holdings_pmc.setdefault(t_clean, 0.0)
                     st.session_state.holdings_currency.setdefault(t_clean, 'USD')
-                    if is_authenticated():
-                        save_user_portfolio_position(t_clean, st.session_state.holdings_quantity[t_clean], st.session_state.holdings_pmc[t_clean], st.session_state.holdings_currency[t_clean])
-                    st.success(f"Aggiunto {t_clean} al portafoglio.")
+                    # SALVATAGGIO RIMOSSO QUI: ora solo tramite pulsante
+                    st.success(f"Aggiunto {t_clean} al portafoglio. Ricordati di salvare.")
             except ValueError as e:
                 st.error(f"Ticker non valido: {e}")
         else:
@@ -2391,7 +2435,7 @@ def render_portafoglio_tab(ui):
             holdings_quantity[t] = qty
             holdings_pmc[t] = pmc
             holdings[t] = float(derived['Importo Investito'])
-            if is_authenticated(): save_user_portfolio_position(t, qty, pmc, cur)
+            # SALVATAGGIO AUTOMATICO RIMOSSO
             price_text = "N/D" if pd.isna(derived['Prezzo Attuale']) else f"{derived['Prezzo Attuale']:.2f}"
             native_cur = derived.get('Valuta Nativa', cur)
             fx_used = derived.get('FX Native->User', 1.0)
@@ -2559,7 +2603,6 @@ def main():
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
     
-    # Pulisci cache scaduta all'avvio
     cache = get_cache_manager()
     cache.clear_expired()
     
@@ -2573,7 +2616,10 @@ def main():
         targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
             try:
-                csv_df = pd.read_csv(ui["file"])
+                if ui["file"].size > MAX_CSV_SIZE_MB * 1024 * 1024:
+                    st.error(f"Il file CSV supera i {MAX_CSV_SIZE_MB} MB.")
+                else:
+                    csv_df = pd.read_csv(ui["file"])
             except Exception as e:
                 st.error(f"Errore lettura CSV: {e}")
                 csv_df = None
