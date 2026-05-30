@@ -871,7 +871,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         # Merge financials (prendi il primo non vuoto o combina)
         if not r.get("financials", pd.DataFrame()).empty:
             if merged_financials.empty:
-                merged_financials = r["financials"]
+                merged_financials = r["financials"].copy()
             else:
                 # Aggiungi righe mancanti
                 for idx in r["financials"].index:
@@ -881,7 +881,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         # Merge balance sheet
         if not r.get("balance_sheet", pd.DataFrame()).empty:
             if merged_balance.empty:
-                merged_balance = r["balance_sheet"]
+                merged_balance = r["balance_sheet"].copy()
             else:
                 for idx in r["balance_sheet"].index:
                     if idx not in merged_balance.index:
@@ -890,11 +890,19 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
         # Merge cashflow
         if not r.get("cashflow", pd.DataFrame()).empty:
             if merged_cashflow.empty:
-                merged_cashflow = r["cashflow"]
+                merged_cashflow = r["cashflow"].copy()
             else:
                 for idx in r["cashflow"].index:
                     if idx not in merged_cashflow.index:
                         merged_cashflow.loc[idx] = r["cashflow"].loc[idx]
+    
+    # Rimuovi colonne duplicate (stesso anno) nei DataFrame
+    if not merged_financials.empty:
+        merged_financials = merged_financials.loc[:, ~merged_financials.columns.duplicated()]
+    if not merged_balance.empty:
+        merged_balance = merged_balance.loc[:, ~merged_balance.columns.duplicated()]
+    if not merged_cashflow.empty:
+        merged_cashflow = merged_cashflow.loc[:, ~merged_cashflow.columns.duplicated()]
     
     # Assicura che i DataFrame abbiano le colonne in ordine cronologico
     if not merged_financials.empty:
@@ -1121,6 +1129,14 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
             bs = pd.DataFrame()
         if not isinstance(cf, pd.DataFrame):
             cf = pd.DataFrame()
+        
+        # Rimuovi colonne duplicate anche qui (per sicurezza)
+        if not fin.empty:
+            fin = fin.loc[:, ~fin.columns.duplicated()]
+        if not bs.empty:
+            bs = bs.loc[:, ~bs.columns.duplicated()]
+        if not cf.empty:
+            cf = cf.loc[:, ~cf.columns.duplicated()]
         
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
@@ -2168,7 +2184,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2431,7 +2447,11 @@ def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series]
         if raw_data:
             met = calculate_fundamental_metrics(raw_data)
             if met:
-                row = pd.Series(met.to_ui_dict())
+                try:
+                    row = pd.Series(met.to_ui_dict())
+                except Exception as e:
+                    logger.warning(f"Errore creazione Series per {fallback_ticker}: {e}")
+                    row = None
         return fallback_ticker, row, raw_data, 'standalone'
     except Exception as e:
         logger.warning(f'Standalone analysis unavailable for {fallback_ticker}: {e}')
