@@ -36,9 +36,10 @@ from cache_manager import get_cache_manager
 from rate_limiter import get_rate_limiter
 from ticker_resolver import auto_resolve_ticker_adaptive
 
-# Nuove fonti API e scraper
-from api_sources import FMPSource, AlphaVantageSource
-from scrapers import MarketWatchScraper
+# Nuove fonti API e scraper (import diretto per evitare problemi con __init__.py)
+from api_sources.fmp import FMPSource
+from api_sources.alpha_vantage import AlphaVantageSource
+from scrapers.marketwatch import MarketWatchScraper
 
 # Import delle funzioni AI
 from burry_ai_prompts import (
