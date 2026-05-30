@@ -866,7 +866,8 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     if result:
         cache.set_fundamental(symbol, result)
     else:
-        cache.set_fundamental(symbol, {"_failed": True, "timestamp": time.time()}, ttl=3600)
+        # FIX: rimossa la ttl=3600 (non supportata dal metodo set_fundamental nel cache_manager attuale)
+        cache.set_fundamental(symbol, {"_failed": True, "timestamp": time.time()})
     return result
 
 def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
@@ -906,13 +907,13 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
         # CORREZIONE: Current Ratio ora confronta correttamente primo e secondo anno
         if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index and bs.shape[1] >= 2:
             ca0 = safe_float(bs.loc['Current Assets'].iloc[0], 0.0)
-            cl0 = safe_float(bs.loc['Current Liabilities'].iloc[0], 1.0)
+            cl0 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
             ca1 = safe_float(bs.loc['Current Assets'].iloc[1], 0.0)
             cl1 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
             cr0 = safe_div(ca0, cl0)
             cr1 = safe_div(ca1, cl1)
             if cr0 > cr1: fscore += 1
-        fscore += 1
+        # RIMOSSO L'INCREMENTO INCONDIZIONATO (era fscore += 1 qui)
         if 'Total Revenue' in fin.index and fin.shape[1] >= 2:
             rev0 = safe_float(fin.loc['Total Revenue'].iloc[0], 0.0)
             rev1 = safe_float(fin.loc['Total Revenue'].iloc[1], 0.0)
@@ -981,7 +982,17 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         aqi = safe_ratio(1 - (cur_assets + total_assets - cur_liab - cash), total_assets) / safe_ratio(1 - (cur_assets_prev + total_assets_prev - cur_liab_prev - cash_prev), total_assets_prev, 1e-9)
         sgi = revenue / revenue_prev if revenue_prev != 0 else 1.0
         depi = safe_ratio(depreciation_prev, (depreciation_prev + total_assets_prev)) / safe_ratio(depreciation, (depreciation + total_assets), 1e-9)
-        sgai = 1.0
+        
+        # FIX: calcolo reale di sgai (Selling, General & Administrative Expense Index)
+        sga = get_first(fin, 'Selling General And Administrative Expense', 0.0)
+        sga_prev = 0.0
+        if 'Selling General And Administrative Expense' in fin.index and fin.shape[1] >= 2:
+            sga_prev = safe_float(fin.loc['Selling General And Administrative Expense'].iloc[1], 0.0)
+        if sga_prev != 0:
+            sgai = sga / sga_prev
+        else:
+            sgai = 1.0
+        
         lvgi = safe_ratio(total_debt, total_assets) / safe_ratio(total_debt_prev, total_assets_prev, 1e-9)
         tata = safe_ratio((net_income - op_cash), total_assets)
         m_score = -4.84 + 0.92*dsri + 0.528*gmi + 0.404*aqi + 0.892*sgi + 0.115*depi - 0.172*sgai + 4.679*tata - 0.327*lvgi
@@ -1056,7 +1067,10 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         cash_equiv = safe_float(info.get('totalCash'), 0.0)
         net_debt = max(0.0, total_debt - cash_equiv)
         equity = get_first(bs, 'Stockholders Equity', np.nan)
-        invested_cap = net_debt + equity if not np.isnan(equity) and equity is not None else 0.0
+        # FIX: gestione equity NaN
+        if np.isnan(equity):
+            equity = 0.0
+        invested_cap = net_debt + equity
         ebit = get_first(fin, 'EBIT', 0.0)
         tax_rate = DEFAULT_TAX_RATE
         if 'Tax Provision' in fin.index and 'Pretax Income' in fin.index and not fin.empty:
@@ -1940,7 +1954,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
