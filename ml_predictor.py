@@ -21,8 +21,14 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # Calcola indicatori già presenti nel codice principale
     df['SMA_50'] = df['Close'].rolling(50).mean()
     df['SMA_200'] = df['Close'].rolling(200).mean()
-    df['RSI'] = 100 - (100 / (1 + (df['Close'].diff().clip(lower=0).ewm(alpha=1/14).mean() / 
-                                 (-df['Close'].diff().clip(upper=0)).ewm(alpha=1/14).mean())))
+    # RSI
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df['RSI'] = 100 - (100 / (1 + rs))
     # MACD
     ema12 = df['Close'].ewm(span=12).mean()
     ema26 = df['Close'].ewm(span=26).mean()
@@ -62,14 +68,19 @@ def load_or_train_model(df: Optional[pd.DataFrame] = None) -> Optional[RandomFor
     else:
         return None
 
-def predict_trend(ticker: str, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """Predice il trend a 5 giorni per un ticker usando il modello salvato."""
+def predict_trend(df: pd.DataFrame, ticker: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Predice il trend a 5 giorni usando il modello salvato.
+    Parametri:
+        df (pd.DataFrame): Dati storici con colonna 'Close'
+        ticker (str, opzionale): Non usato direttamente, mantenuto per compatibilità
+    """
     model = load_or_train_model()
     if model is None:
-        return None
+        return {"error": "Modello non disponibile"}
     features_df = build_features(df)
     if features_df.empty:
-        return None
+        return {"error": "Dati insufficienti per la previsione"}
     # Prendi l'ultima riga disponibile
     last_features = features_df.drop('target', axis=1).iloc[-1:].values
     prob_up = model.predict_proba(last_features)[0][1]  # probabilità di rialzo
