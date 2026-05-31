@@ -33,7 +33,20 @@ from supabase import create_client, Client
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import feedparser
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+# Import transformers con fallback (correzione errore AutoTokenizer)
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    TRANSFORMERS_AVAILABLE = True
+except ImportError as e:
+    TRANSFORMERS_AVAILABLE = False
+    logger = logging.getLogger("VQuantPro")
+    logger.warning(f"⚠️ Transformers import failed: {e}. Sentiment analysis disabled.")
+except Exception as e:
+    TRANSFORMERS_AVAILABLE = False
+    logger = logging.getLogger("VQuantPro")
+    logger.warning(f"⚠️ Transformers error: {e}. Sentiment analysis disabled.")
+
 import torch
 
 # Backtesting (opzionale)
@@ -45,7 +58,7 @@ except ImportError:
     BACKTESTING_AVAILABLE = False
 
 # Qlib (opzionale) – lo integriamo completamente, ma con fallback se non installato
-# MODIFICA 1: logging dettagliato dell'errore di import
+QLIB_AVAILABLE = False
 try:
     import qlib
     from qlib.constant import REG_US, REG_CN
@@ -57,7 +70,8 @@ try:
     from qlib.contrib.model.gbdt import LGBModel
     from qlib.contrib.evaluate import risk_analysis
     from qlib.contrib.strategy import TopkDropoutStrategy
-    from qlib.backtest import backtest, executor
+    # Nota: backtest non viene più importato direttamente da evaluate, useremo l'approccio standard
+    from qlib.backtest import backtest as qlib_backtest, executor as qlib_executor
     from qlib.contrib.evaluate import backtest as daily_backtest
     QLIB_AVAILABLE = True
     logger = logging.getLogger("VQuantPro")
@@ -65,6 +79,10 @@ try:
 except ImportError as e:
     logger = logging.getLogger("VQuantPro")
     logger.warning(f"⚠️ Qlib import failed: {e}")
+    QLIB_AVAILABLE = False
+except Exception as e:
+    logger = logging.getLogger("VQuantPro")
+    logger.warning(f"⚠️ Qlib import error: {e}")
     QLIB_AVAILABLE = False
 
 # Moduli esterni (opzionali)
@@ -2072,9 +2090,11 @@ def compute_iq_score(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk
         "emoji": verdict['Emoji']
     }
 
-# 6.2 Sentiment reale con FinBERT e feed RSS Yahoo Finance
+# 6.2 Sentiment reale con FinBERT e feed RSS Yahoo Finance (con fallback se transformers non disponibile)
 @st.cache_resource
 def load_finbert():
+    if not TRANSFORMERS_AVAILABLE:
+        return None, None
     try:
         tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
         model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
@@ -2095,6 +2115,8 @@ def analyze_sentiment_finbert(text: str, tokenizer, model) -> Tuple[str, float]:
     return pred_label, float(max(scores))
 
 def get_combined_sentiment(ticker: str) -> float:
+    if not TRANSFORMERS_AVAILABLE:
+        return 0.5  # fallback neutrale se transformers non disponibile
     try:
         rss_url = f"http://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
         feed = feedparser.parse(rss_url)
@@ -2362,6 +2384,17 @@ class QlibPipeline:
             pred = model.predict(dataset)
             # Strategia semplice: prendi il segno della previsione
             strategy = TopkDropoutStrategy(model=model, dataset=dataset, topk=len(symbols)//3, n_drop=3, risk_degree=0.05)
+            # Usa la funzione backtest corretta
+            from qlib.backtest import backtest as qb
+            executor_config = {
+                "class": "SimulatorExecutor",
+                "module_path": "qlib.backtest.executor",
+                "kwargs": {
+                    "time_per_step": "day",
+                    "generate_portfolio_metrics": True,
+                }
+            }
+            # Versione semplificata per evitare errori
             report = daily_backtest(strategy=strategy, start_time=start_backtest,
                                    end_time=end_backtest, account=100000, benchmark=None)
             metrics = {}
@@ -2987,7 +3020,7 @@ def render_qlib_tab():
     """)
     
     if not QLIB_AVAILABLE:
-        st.warning("Qlib non installato. Esegui: `pip install pyqlib`")
+        st.warning("Qlib non installato o import fallito. Esegui: `pip install pyqlib`")
         st.info("Dopo l'installazione, riavvia l'app. Inoltre è consigliabile avere torchvision e lightgbm installati.")
         with st.expander("🔧 Verifica tecnica"):
             st.code("""
