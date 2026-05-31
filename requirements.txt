@@ -24,3 +24,4 @@ vaderSentiment>=3.3.2
 nltk>=3.8.1
 networkx>=3.0
 py_vollib>=1.0.0
+pyqlib
