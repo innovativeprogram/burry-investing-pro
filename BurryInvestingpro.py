@@ -1,11 +1,9 @@
 """
-V-Quant Pro - Versione Unificata Completa (con Qlib funzionante)
-Copyright (c) 2026 InnovativeProgram
-Tutti i diritti riservati.
-
-Contiene:
-- IQ Score, Sentiment FinBERT, Backtest, Stock Screener, Opzioni, Report AI, Multi-Asset, Ottimizzatore
-- Qlib pipeline completa (collector EU, convertitore binario, backtest LightGBM, previsioni)
+# Copyright (c) 2026 InnovativeProgram
+# Tutti i diritti riservati.
+# Proprietà intellettuale di [Canio Tedesco].
+# La copia o distribuzione non autorizzata è severamente vietata.
+# Versione con integrazioni: Markowitz, Backtest, ML Trend, Sentiment Analysis.
 """
 
 import streamlit as st
@@ -14,10 +12,12 @@ import requests
 from yahooquery import Ticker as YQ_Ticker
 import pandas as pd
 import numpy as np
+
 try:
     import pandas_ta as ta
 except ImportError:
     ta = None
+
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -30,74 +30,40 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
-from scipy.optimize import minimize
-from datetime import datetime, timedelta
-import feedparser
 
-# Import transformers con fallback (correzione errore AutoTokenizer)
-try:
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    TRANSFORMERS_AVAILABLE = True
-except ImportError as e:
-    TRANSFORMERS_AVAILABLE = False
-    logger = logging.getLogger("VQuantPro")
-    logger.warning(f"⚠️ Transformers import failed: {e}. Sentiment analysis disabled.")
-except Exception as e:
-    TRANSFORMERS_AVAILABLE = False
-    logger = logging.getLogger("VQuantPro")
-    logger.warning(f"⚠️ Transformers error: {e}. Sentiment analysis disabled.")
+# Moduli esterni (assicurarsi che esistano)
+from cache_manager import get_cache_manager
+from rate_limiter import get_rate_limiter
+from ticker_resolver import auto_resolve_ticker_adaptive
+from api_sources.fmp import FMPSource
+from api_sources.alpha_vantage import AlphaVantageSource
+from scrapers.marketwatch import MarketWatchScraper
+from burry_ai_prompts import (
+    build_ai_context_for_ticker,
+    ask_gemini_ticker_chat,
+    build_burry_ai_context,
+)
 
-import torch
-
-# Backtesting (opzionale)
-try:
-    from backtesting import Backtest, Strategy
-    from backtesting.lib import crossover
-    BACKTESTING_AVAILABLE = True
-except ImportError:
-    BACKTESTING_AVAILABLE = False
-
-# Qlib (opzionale) – lo integriamo completamente, ma con fallback se non installato
-QLIB_AVAILABLE = False
-try:
-    import qlib
-    from qlib.constant import REG_US, REG_CN
-    from qlib.config import C
-    from qlib.data import D
-    from qlib.data.dataset import DatasetH
-    from qlib.data.dataset.handler import DataHandlerLP
-    from qlib.contrib.data.handler import Alpha158
-    from qlib.contrib.model.gbdt import LGBModel
-    from qlib.contrib.evaluate import risk_analysis
-    from qlib.contrib.strategy import TopkDropoutStrategy
-    # Nota: backtest non viene più importato direttamente da evaluate, useremo l'approccio standard
-    from qlib.backtest import backtest as qlib_backtest, executor as qlib_executor
-    from qlib.contrib.evaluate import backtest as daily_backtest
-    QLIB_AVAILABLE = True
-    logger = logging.getLogger("VQuantPro")
-    logger.info("✅ Qlib imported successfully")
-except ImportError as e:
-    logger = logging.getLogger("VQuantPro")
-    logger.warning(f"⚠️ Qlib import failed: {e}")
-    QLIB_AVAILABLE = False
-except Exception as e:
-    logger = logging.getLogger("VQuantPro")
-    logger.warning(f"⚠️ Qlib import error: {e}")
-    QLIB_AVAILABLE = False
-
-# Moduli esterni (opzionali)
-try:
-    import praw
-except ImportError:
-    praw = None
+# NUOVI MODULI INTEGRATI
+from portfolio_optimizer import get_portfolio_weights_markowitz, plot_efficient_frontier
+from backtest_engine import run_backtest
+from ml_predictor import predict_trend, load_or_train_model
+from sentiment_analyzer import get_overall_sentiment
 
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================================================
 if os.getenv("BURRY_LOG_FILE"):
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename=os.getenv("BURRY_LOG_FILE"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        filename=os.getenv("BURRY_LOG_FILE")
+    )
 else:
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 logger = logging.getLogger("VQuantPro")
 
 DEFAULT_TAX_RATE = 0.26
@@ -120,6 +86,7 @@ BENEISH_THRESHOLD = -1.78
 POLYGON_RATE_LIMIT_SEC = 12.0
 _last_polygon_call = 0.0
 _polygon_lock = threading.Lock()
+
 def throttle_polygon() -> None:
     global _last_polygon_call
     with _polygon_lock:
@@ -131,7 +98,11 @@ def throttle_polygon() -> None:
 
 BATCH_RATE_LIMIT_SEC = 0.3
 
-FOOTER_HTML = "<p style='text-align:center;color:gray;'>Creato e sviluppato da <a href='https://www.vquantpro.it' target='_blank'>vquantpro.it</a></p>"
+FOOTER_HTML = """
+<p style='text-align:center;color:gray;'>
+    Creato e sviluppato da <a href='https://www.vquantpro.it' target='_blank'>vquantpro.it</a>
+</p>
+"""
 
 # ==========================================================================
 # 0.A SAFE SECRETS / CONFIG ACCESS
@@ -235,16 +206,21 @@ def get_active_risk_free_rate() -> float:
     return get_short_term_risk_free_rate()
 
 # ==========================================================================
-# 0.C POLYGON FUNDAMENTAL DATA PROVIDER (originale)
+# 0.C POLYGON FUNDAMENTAL DATA PROVIDER (mantenuto come fallback)
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
-    if not POLYGON_API_KEY or '.' in symbol:
+    if not POLYGON_API_KEY:
+        return None
+    if '.' in symbol:
         return None
     logger.info(f"Tentativo Polygon per {symbol}")
     throttle_polygon()
     try:
-        resp = requests.get(f"{POLYGON_BASE_URL}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}", timeout=10)
+        resp = requests.get(
+            f"{POLYGON_BASE_URL}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}",
+            timeout=10
+        )
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -268,7 +244,12 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         fin_resp = requests.get(
             f"{POLYGON_BASE_URL}/v2/reference/financials",
-            params={"ticker": symbol, "timeframe": "annual", "limit": 4, "apiKey": POLYGON_API_KEY},
+            params={
+                "ticker": symbol,
+                "timeframe": "annual",
+                "limit": 4,
+                "apiKey": POLYGON_API_KEY,
+            },
             timeout=15
         )
         if fin_resp.status_code != 200:
@@ -322,10 +303,16 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     inc_stmt = build_statement_df("income_statement", INC_MAP)
     bal_sheet = build_statement_df("balance_sheet", BAL_MAP)
     cash_flow = build_statement_df("cash_flow_statement", CF_MAP)
-    return {"info": info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": symbol}
+    return {
+        "info": info,
+        "financials": inc_stmt,
+        "balance_sheet": bal_sheet,
+        "cashflow": cash_flow,
+        "symbol": symbol
+    }
 
 # ==========================================================================
-# 0.D PORTFOLIO FX & TAX (originali)
+# 0.D PORTFOLIO FX & TAX
 # ==========================================================================
 def enrich_portfolio_with_fx(df_weights: pd.DataFrame, base_currency: str = "EUR") -> pd.DataFrame:
     if df_weights is None or df_weights.empty:
@@ -383,7 +370,7 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide")
 
 # ==========================================================================
-# 0.E AUTH SUPABASE (TUTTE LE FUNZIONI ORIGINALI)
+# 0.E AUTH SUPABASE
 # ==========================================================================
 def get_app_base_url() -> str:
     candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
@@ -512,15 +499,22 @@ def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     return user, session
 
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+PASSWORD_REGEX = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>/?]).{8,}$')
+
 def validate_email(email: str) -> bool:
     return bool(EMAIL_REGEX.match((email or "").strip()))
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:
-    if len(password) < 8: return False, "La password deve avere almeno 8 caratteri."
-    if not re.search(r"[A-Z]", password): return False, "La password deve contenere almeno una maiuscola."
-    if not re.search(r"[a-z]", password): return False, "La password deve contenere almeno una minuscola."
-    if not re.search(r"\d", password): return False, "La password deve contenere almeno un numero."
-    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};:\"\\|,.<>/?]", password): return False, "La password deve contenere almeno un carattere speciale."
+    if len(password) < 8:
+        return False, "La password deve avere almeno 8 caratteri."
+    if not re.search(r"[A-Z]", password):
+        return False, "La password deve contenere almeno una maiuscola."
+    if not re.search(r"[a-z]", password):
+        return False, "La password deve contenere almeno una minuscola."
+    if not re.search(r"\d", password):
+        return False, "La password deve contenere almeno un numero."
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};:\"\\|,.<>/?]", password):
+        return False, "La password deve contenere almeno un carattere speciale."
     return True, "OK"
 
 def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
@@ -622,7 +616,7 @@ def render_auth_sidebar() -> None:
     st.sidebar.markdown('---')
 
 # ==========================================================================
-# 1. MODELLI DATI (originale)
+# 1. MODELLI DATI
 # ==========================================================================
 @dataclass
 class FundamentalMetrics:
@@ -698,7 +692,7 @@ class FundamentalMetrics:
         }
 
 # ==========================================================================
-# 2. HELPER & VALIDAZIONE (originali)
+# 2. HELPER & VALIDAZIONE
 # ==========================================================================
 def sanitize_ticker(ticker: str) -> str:
     clean = str(ticker or '').strip().upper()
@@ -734,7 +728,11 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
     return False
 
 # ==========================================================================
-# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE (originale)
+# 2.A RISOLUZIONE ADATTIVA DEL TICKER (DELEGATA AL MODULO ticker_resolver)
+# ==========================================================================
+
+# ==========================================================================
+# 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE
 # ==========================================================================
 def request_with_backoff(func, *args, **kwargs):
     for attempt in range(5):
@@ -749,44 +747,21 @@ def request_with_backoff(func, *args, **kwargs):
                 raise e
     return None
 
-# Import dei moduli esterni (cache_manager, rate_limiter, ticker_resolver, api_sources, scrapers, burry_ai_prompts)
-try:
-    from cache_manager import get_cache_manager
-    from rate_limiter import get_rate_limiter
-    from ticker_resolver import auto_resolve_ticker_adaptive
-    from api_sources.fmp import FMPSource
-    from api_sources.alpha_vantage import AlphaVantageSource
-    from scrapers.marketwatch import MarketWatchScraper
-    from burry_ai_prompts import (
-        build_ai_context_for_ticker,
-        ask_gemini_ticker_chat,
-        build_burry_ai_context,
-    )
-except ImportError:
-    # Fallback: definizioni stub per evitare crash
-    def get_cache_manager(): return None
-    def get_rate_limiter(): return None
-    def auto_resolve_ticker_adaptive(ticker): return ticker
-    class FMPSource: pass
-    class AlphaVantageSource: pass
-    class MarketWatchScraper: pass
-    def build_ai_context_for_ticker(*args, **kwargs): return ""
-    def ask_gemini_ticker_chat(ctx, prompt, mode): return "Modulo AI non disponibile."
-    def build_burry_ai_context(*args, **kwargs): return ""
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     cache = get_cache_manager()
-    if cache is not None:
-        cached = cache.get_fundamental(symbol)
-        if cached is not None:
-            if isinstance(cached, dict) and cached.get("_failed"):
-                logger.debug(f"Cache failed marker for {symbol}")
-                return None
-            logger.info(f"Cache hit per fondamentali {symbol}")
-            return cached
+    
+    cached = cache.get_fundamental(symbol)
+    if cached is not None:
+        if isinstance(cached, dict) and cached.get("_failed"):
+            logger.debug(f"Cache failed marker for {symbol}")
+            return None
+        logger.info(f"Cache hit per fondamentali {symbol}")
+        return cached
+    
     resolved = auto_resolve_ticker_adaptive(symbol)
     result = None
+    
     if '.' not in resolved:
         try:
             poly_data = get_polygon_fundamentals(resolved)
@@ -795,6 +770,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"Polygon success per {resolved}")
         except Exception as e:
             logger.debug(f"Polygon fallito per {resolved}: {e}")
+    
     if result is None:
         try:
             fmp = FMPSource()
@@ -804,6 +780,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"FMP success per {resolved}")
         except Exception as e:
             logger.debug(f"FMP fallito per {resolved}: {e}")
+    
     if result is None:
         try:
             av = AlphaVantageSource()
@@ -813,6 +790,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"Alpha Vantage success per {resolved}")
         except Exception as e:
             logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
+    
     if result is None:
         try:
             mw = MarketWatchScraper()
@@ -822,6 +800,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"MarketWatch success per {resolved}")
         except Exception as e:
             logger.debug(f"MarketWatch fallito per {resolved}: {e}")
+    
     if result is None:
         try:
             def _fetch_yf():
@@ -837,6 +816,7 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"yfinance success per {resolved}")
         except Exception as e:
             logger.info(f"yfinance fallito per {resolved}: {e}")
+    
     if result is None:
         try:
             yq = YQ_Ticker(resolved)
@@ -879,12 +859,11 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             logger.info(f"YahooQuery success per {resolved}")
         except Exception as e:
             logger.error(f"YahooQuery fallito per fondamentali di {resolved}: {e}")
+    
     if result:
-        if cache is not None:
-            cache.set_fundamental(symbol, result)
+        cache.set_fundamental(symbol, result)
     else:
-        if cache is not None:
-            cache.set_fundamental(symbol, {"_failed": True, "timestamp": time.time()})
+        cache.set_fundamental(symbol, {"_failed": True, "timestamp": time.time()})
     return result
 
 def get_first(df: pd.DataFrame, idx: str, default: float = 0.0) -> float:
@@ -997,6 +976,7 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         aqi = safe_ratio(1 - (cur_assets + total_assets - cur_liab - cash), total_assets) / safe_ratio(1 - (cur_assets_prev + total_assets_prev - cur_liab_prev - cash_prev), total_assets_prev, 1e-9)
         sgi = revenue / revenue_prev if revenue_prev != 0 else 1.0
         depi = safe_ratio(depreciation_prev, (depreciation_prev + total_assets_prev)) / safe_ratio(depreciation, (depreciation + total_assets), 1e-9)
+        
         sga = get_first(fin, 'Selling General And Administrative Expense', 0.0)
         sga_prev = 0.0
         if 'Selling General And Administrative Expense' in fin.index and fin.shape[1] >= 2:
@@ -1005,6 +985,7 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
             sgai = sga / sga_prev
         else:
             sgai = 1.0
+        
         lvgi = safe_ratio(total_debt, total_assets) / safe_ratio(total_debt_prev, total_assets_prev, 1e-9)
         tata = safe_ratio((net_income - op_cash), total_assets)
         m_score = -4.84 + 0.92*dsri + 0.528*gmi + 0.404*aqi + 0.892*sgi + 0.115*depi - 0.172*sgai + 4.679*tata - 0.327*lvgi
@@ -1064,12 +1045,14 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         fin = raw_data["financials"]
         bs = raw_data["balance_sheet"]
         cf = raw_data["cashflow"]
+        
         if not isinstance(fin, pd.DataFrame):
             fin = pd.DataFrame()
         if not isinstance(bs, pd.DataFrame):
             bs = pd.DataFrame()
         if not isinstance(cf, pd.DataFrame):
             cf = pd.DataFrame()
+        
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
         fcf = float(op_cash - cap_ex)
@@ -1212,18 +1195,19 @@ def fetch_metrics_batch(tickers: List[str]) -> Tuple[List[Dict[str, Any]], List[
     return results, errors
 
 # ==========================================================================
-# 4. DATA ENGINE: ANALISI TECNICA (originale)
+# 4. DATA ENGINE: ANALISI TECNICA
 # ==========================================================================
 @st.cache_data(ttl=900, show_spinner=True)
 def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     cache = get_cache_manager()
-    if cache is not None:
-        cached = cache.get_technical(symbol)
-        if cached is not None and isinstance(cached, pd.DataFrame) and not cached.empty and len(cached) >= 60:
-            logger.info(f"Cache hit per tecnici {symbol}")
-            return cached
+    cached = cache.get_technical(symbol)
+    if cached is not None and isinstance(cached, pd.DataFrame) and not cached.empty and len(cached) >= 60:
+        logger.info(f"Cache hit per tecnici {symbol}")
+        return cached
+    
     resolved = auto_resolve_ticker_adaptive(symbol)
     df = None
+    
     if POLYGON_API_KEY and '.' not in resolved:
         try:
             throttle_polygon()
@@ -1245,6 +1229,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                         df = None
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
+    
     if df is None or len(df) < 60:
         try:
             av = AlphaVantageSource()
@@ -1256,6 +1241,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                 df = None
         except Exception as e:
             logger.debug(f"Alpha Vantage tecnico fallito: {e}")
+    
     if df is None or len(df) < 60:
         try:
             def _download_yf():
@@ -1271,6 +1257,7 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df = None
         except Exception as e:
             logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
+    
     if df is None or len(df) < 60:
         try:
             yq = YQ_Ticker(resolved)
@@ -1288,12 +1275,11 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df = None
         except Exception as e:
             logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
+    
     if df is not None and not df.empty and len(df) >= 60:
-        if cache is not None:
-            cache.set_technical(symbol, df)
+        cache.set_technical(symbol, df)
     else:
-        if cache is not None:
-            cache.set_technical(symbol, pd.DataFrame(), ttl=1800)
+        cache.set_technical(symbol, pd.DataFrame(), ttl=1800)
         return None
     return df
 
@@ -1453,7 +1439,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE (originali)
+# 5. METRICHE QUANTITATIVE AVANZATE
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1956,7 +1942,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2057,395 +2043,183 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. NUOVE FUNZIONI PER EVOLUZIONE (IQ Score, Sentiment, Backtest, Screener, Opzioni, Report AI, Qlib)
+# 6. UI: SIDEBAR - MODIFICATO ORDINE
 # ==========================================================================
+def render_apk_download_box() -> None:
+    with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
+        st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
+        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
+        st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute.")
 
-# 6.1 IQ Score unificato
-def compute_iq_score(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk: Dict[str, Any], sentiment_score: float = 0.5) -> Dict[str, Any]:
-    macro = get_macro_indicators()
-    verdict = compute_unified_verdict(row, timing_score, qm, risk, macro)
-    fqs = verdict['FQS']
-    vas = verdict['VAS']
-    tms = verdict['TMS']
-    qrs = verdict['QRS']
-    ticker = row.get('Ticker')
-    momentum_score = 0.0
-    if ticker:
-        df_tech = get_technical_data(ticker)
-        if df_tech is not None and len(df_tech) >= 20:
-            close = df_tech['Close']
-            sma20 = close.rolling(20).mean().iloc[-1]
-            last_close = close.iloc[-1]
-            if sma20 and sma20 > 0:
-                momentum = (last_close - sma20) / sma20
-                momentum_score = np.clip((momentum + 0.10) / 0.20, 0, 1) * 10
-    weights = {'fqs': 0.35, 'vas': 0.25, 'tms': 0.20, 'qrs': 0.15, 'momentum': 0.05}
-    raw = (weights['fqs'] * fqs + weights['vas'] * vas + weights['tms'] * tms + weights['qrs'] * qrs + weights['momentum'] * momentum_score)
-    sentiment_factor = 0.8 + sentiment_score * 0.4
-    final = np.clip(raw * sentiment_factor, 0, 100)
-    return {
-        "IQ_Score": final,
-        "components": {"FQS": fqs, "VAS": vas, "TMS": tms, "QRS": qrs, "Momentum": momentum_score, "SentimentFactor": sentiment_factor},
-        "verdict": verdict['Verdict'],
-        "emoji": verdict['Emoji']
-    }
+def render_chi_siamo() -> None:
+    with st.sidebar.expander("ℹ️ Chi Siamo", expanded=False):
+        st.markdown("""
+### Benvenuti su V-QUANT PRO
+V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
+La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF, Crypto e singoli titoli azionari ed obbligazionari.
+Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
+### Cosa facciamo:
+- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
+- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
+- Strumenti di supporto decisionale basati su modelli matematici
+### ⚠️ Disclaimer Legale
+V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
+Sviluppato con passione da Innovative Program.
+        """)
 
-# 6.2 Sentiment reale con FinBERT e feed RSS Yahoo Finance (con fallback se transformers non disponibile)
-@st.cache_resource
-def load_finbert():
-    if not TRANSFORMERS_AVAILABLE:
-        return None, None
-    try:
-        tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-        model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-        return tokenizer, model
-    except Exception as e:
-        logger.error(f"Errore nel caricamento di FinBERT: {e}")
-        return None, None
+def render_privacy() -> None:
+    with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
+        st.markdown("""
+### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
+#### 1. Conservazione dei Dati 
+Tutti i dati sensibili, inclusi i dati di autenticazione (email e password) e le configurazioni del tuo portafoglio, sono **detenuti e gestiti in modo sicuro da Supabase**. 
+Supabase è una piattaforma di database di livello enterprise che garantisce la crittografia dei dati a riposo e in transito.
+Le password sono archiviate tramite hashing sicuro e non sono mai accessibili in chiaro agli amministratori di V-QUANT PRO.
+#### 2. Analisi Finanziaria e Cookie
+Questo sito utilizza Google AdSense per la visualizzazione di annunci pubblicitari e cookie tecnici per il corretto funzionamento della Dashboard.
+Google utilizza i cookie per pubblicare annunci basati sulle tue visite precedenti.
+Puoi gestire le preferenze sugli annunci visitando le impostazioni di Google.
+#### 3. Diritti dell'Utente
+Poiché i dati sono detenuti su infrastruttura Supabase, puoi richiedere in ogni momento la cancellazione totale del tuo account e dei dati associati attraverso le impostazioni del profilo o contattandoci.
+#### 4. Esclusione di Responsabilità
+V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi. L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
+#### 5. Sicurezza
+Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
+        """)
 
-def analyze_sentiment_finbert(text: str, tokenizer, model) -> Tuple[str, float]:
-    if tokenizer is None or model is None:
-        return "neutral", 0.5
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
-    outputs = model(**inputs)
-    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-    scores = probs.detach().numpy()[0]
-    label_map = {0: "positive", 1: "negative", 2: "neutral"}
-    pred_label = label_map[np.argmax(scores)]
-    return pred_label, float(max(scores))
+def render_sostieni() -> None:
+    with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
+        st.markdown("""
+### Perché una donazione?
+V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
+Mantenere l'infrastruttura, aggiornare i dati in tempo reale e sviluppare nuove funzionalità ha dei costi vivi.
+Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
+        """)
+        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
+        st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
 
-def get_combined_sentiment(ticker: str) -> float:
-    if not TRANSFORMERS_AVAILABLE:
-        return 0.5  # fallback neutrale se transformers non disponibile
-    try:
-        rss_url = f"http://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
-        feed = feedparser.parse(rss_url)
-        if not feed.entries:
-            return 0.5
-        tokenizer, model = load_finbert()
-        if tokenizer is None or model is None:
-            return 0.5
-        sentiment_scores = []
-        for entry in feed.entries[:10]:
-            title = entry.get('title', '')
-            summary = entry.get('summary', '')
-            full_text = f"{title}. {summary}"
-            if len(full_text) < 20:
-                continue
-            label, conf = analyze_sentiment_finbert(full_text, tokenizer, model)
-            if label == "positive":
-                sentiment_scores.append(conf)
-            elif label == "negative":
-                sentiment_scores.append(-conf)
-        if not sentiment_scores:
-            return 0.5
-        avg_score = np.mean(sentiment_scores)
-        normalized = (avg_score + 1) / 2
-        return float(np.clip(normalized, 0, 1))
-    except Exception as e:
-        logger.debug(f"Errore nel sentiment per {ticker}: {e}")
-        return 0.5
+def render_contatti() -> None:
+    with st.sidebar.expander("📧 Contatti", expanded=False):
+        st.write("Per supporto tecnico, collaborazioni o richieste:")
+        st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
+        st.caption("Risposta normalmente entro 24/48 ore.")
 
-# 6.3 Backtest con backtesting.py
-class SmaCrossoverStrategy(Strategy):
-    n1 = 10
-    n2 = 30
-    def init(self):
-        close = self.data.Close
-        self.sma1 = self.I(lambda x: pd.Series(x).rolling(self.n1).mean(), close)
-        self.sma2 = self.I(lambda x: pd.Series(x).rolling(self.n2).mean(), close)
-    def next(self):
-        if crossover(self.sma1, self.sma2):
-            self.buy()
-        elif crossover(self.sma2, self.sma1):
-            self.sell()
+def setup_sidebar() -> Dict[str, Any]:
+    render_auth_sidebar()                     # 1. Account
 
-class RsiMeanReversionStrategy(Strategy):
-    rsi_period = 14
-    oversold = 30
-    overbought = 70
-    def init(self):
-        close = self.data.Close
-        self.rsi = self.I(lambda x: ta.rsi(pd.Series(x), length=self.rsi_period).iloc[-1] if len(x) > self.rsi_period else 50, close)
-    def next(self):
-        if self.rsi[-1] < self.oversold:
-            self.buy()
-        elif self.rsi[-1] > self.overbought:
-            self.sell()
+    # 2. NAVIGAZIONE
+    st.sidebar.markdown("## 📑 Navigazione")
+    tab_selection = st.sidebar.selectbox(
+        "Vai a:",
+        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio", "⏪ Backtest"],
+        key="nav_select"
+    )
+    st.sidebar.markdown("---")
 
-def run_backtest(ticker: str, strategy_name: str, cash: float = 10000) -> Dict[str, Any]:
-    if not BACKTESTING_AVAILABLE:
-        return {"error": "Libreria backtesting non installata. Esegui: pip install backtesting"}
-    df = get_technical_data(ticker)
-    if df is None or df.empty:
-        return {"error": f"Dati storici insufficienti per {ticker}"}
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-    df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    if strategy_name == "sma_crossover":
-        bt = Backtest(df, SmaCrossoverStrategy, cash=cash, commission=.000)
-    elif strategy_name == "rsi_mean_reversion":
-        bt = Backtest(df, RsiMeanReversionStrategy, cash=cash, commission=.000)
+    # 3. TUTTE LE ALTRE SEZIONI (VqAi, APK, info, contatti)
+    with st.sidebar.expander("🤖 VqAi", expanded=False):
+        st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
+        st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
+        st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
+        
+        for msg in st.session_state.get('burry_ai_history', []):
+            with st.chat_message(msg.get('role', 'assistant')):
+                st.markdown(msg.get('content', ''))
+        
+        burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
+        if burry_ai_prompt:
+            st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
+            ctx = build_burry_ai_context(
+                st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
+                st.session_state.get('burry_ai_asset_type', 'Azione'),
+                mode='Unificato'
+            )
+            conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
+            for m in st.session_state.burry_ai_history[:-1]:
+                conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
+            enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
+            
+            with st.spinner('VqAi sta rispondendo...'):
+                reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
+            st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
+
+    render_apk_download_box()
+    render_chi_siamo()
+    render_privacy()
+    render_sostieni()
+    render_contatti()
+
+    st.sidebar.markdown("---")
+
+    # 4. SELEZIONE ASSET (in fondo)
+    st.sidebar.header("1. Selezione Asset")
+    input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
+    file = None
+    manual = ""
+    if input_mode == "Batch CSV":
+        file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
     else:
-        return {"error": "Strategia sconosciuta"}
-    results = bt.run()
-    return {
-        "equity_final": results['Equity Final [$]'],
-        "return_pct": results['Return [%]'],
-        "sharpe": results['Sharpe Ratio'],
-        "max_dd_pct": results['Max Drawdown [%]'],
-        "win_rate": results['Win Rate [%]'],
-        "total_trades": results['# Trades'],
-        "strategy": strategy_name
+        manual = st.sidebar.text_input("Ticker", value="").upper().strip()
+    st.sidebar.caption("🔍 Il ticker verrà automaticamente risolto (es. 'ENI' → 'ENI.MI', 'BMW' → 'BMW.DE' ecc.)")
+    analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
+
+    return {"mode": input_mode, "file": file, "manual": manual, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
+
+def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
+    ticker = st.session_state.get('selected_ticker')
+    batch = st.session_state.get('batch_results')
+    row = None
+    raw_data = None
+    if ticker and batch is not None and not batch.empty and 'Ticker' in batch.columns and ticker in batch['Ticker'].values:
+        row = batch[batch['Ticker'] == ticker].iloc[0]
+        raw_data = row.get('_raw_data') if hasattr(row, 'get') else None
+        return ticker, row, raw_data, 'batch'
+    try:
+        manual = sanitize_ticker(st.session_state.get('standalone_ticker_input', '')) if st.session_state.get('standalone_ticker_input') else ''
+    except ValueError:
+        manual = ''
+    portfolio_tickers = st.session_state.get('portfolio_tickers', []) or []
+    try:
+        portfolio_pick = sanitize_ticker(st.session_state.get('standalone_portfolio_pick', '')) if st.session_state.get('standalone_portfolio_pick') else ''
+    except ValueError:
+        portfolio_pick = ''
+    fallback_ticker = manual or portfolio_pick or (portfolio_tickers[0] if portfolio_tickers else None)
+    if not fallback_ticker: return None, None, None, 'none'
+    try:
+        raw_data = get_fundamental_data(fallback_ticker)
+        if raw_data:
+            met = calculate_fundamental_metrics(raw_data)
+            if met: row = pd.Series(met.to_ui_dict())
+        return fallback_ticker, row, raw_data, 'standalone'
+    except Exception as e:
+        logger.warning(f'Standalone analysis unavailable for {fallback_ticker}: {e}')
+        return fallback_ticker, None, None, 'standalone'
+
+def _init_session_state() -> None:
+    defaults = {
+        'batch_results': None, 'selected_ticker': None, 'portfolio_tickers': [], 'holdings': {}, 'holdings_currency': {}, 'holdings_quantity': {}, 'holdings_pmc': {},
+        'portfolio_target_mode': "Ticker", 'portfolio_targets': {}, 'analysis_errors': [], 'portfolio_loaded_from_db': False,
+        'standalone_ticker_input': '', 'standalone_portfolio_pick': '', 'risk_free_override': None, 'base_currency': 'EUR',
+        'smart_weights': DEFAULT_SMART_WEIGHTS, 'ai_ticker_chat_history': [], 'ai_ticker_chat_last_symbol': None, 'burry_ai_history': [], 'burry_ai_symbol': '', 'burry_ai_asset_type': 'Azione', 'burry_ai_live_context': {}
     }
+    for k, v in defaults.items():
+        if k not in st.session_state: st.session_state[k] = v
 
-# 6.4 Stock Screener S&P 500
-@st.cache_data(ttl=86400)
-def get_sp500_tickers():
-    try:
-        sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-        return sp500['Symbol'].tolist()
-    except:
-        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'UNH', 'JNJ', 'V']
-
-def screen_stocks(filters: Dict[str, Any]) -> pd.DataFrame:
-    tickers = get_sp500_tickers()[:50]
-    results = []
-    for t in tickers:
-        try:
-            info = yf.Ticker(t).info
-            market_cap = info.get('marketCap', 0)
-            if filters.get('min_mcap') and market_cap < filters['min_mcap'] * 1e9:
-                continue
-            pe = info.get('trailingPE')
-            if filters.get('max_pe') and pe and pe > filters['max_pe']:
-                continue
-            roic = info.get('returnOnInvestedCapital')
-            if filters.get('min_roic') and roic and roic < filters['min_roic']:
-                continue
-            peg = info.get('pegRatio')
-            if filters.get('max_peg') and peg and peg > filters['max_peg']:
-                continue
-            fcf_yield = info.get('freeCashflowYield')
-            if filters.get('min_fcf_yield') and fcf_yield and fcf_yield < filters['min_fcf_yield']:
-                continue
-            results.append({
-                'Ticker': t,
-                'Company': info.get('longName', t),
-                'Market Cap (B)': market_cap / 1e9,
-                'P/E': pe,
-                'ROIC %': roic * 100 if roic else None,
-                'PEG': peg,
-                'FCF Yield %': fcf_yield * 100 if fcf_yield else None
-            })
-        except:
-            continue
-    return pd.DataFrame(results)
-
-# 6.5 Opzioni
-def get_option_chain(ticker: str):
-    try:
-        stock = yf.Ticker(ticker)
-        expirations = stock.options
-        if not expirations:
-            return None
-        opt = stock.option_chain(expirations[0])
-        return opt
-    except:
-        return None
-
-def calculate_option_greeks(chain_df, underlying_price):
-    chain_df = chain_df.copy()
-    chain_df['Delta'] = np.nan
-    for i, row in chain_df.iterrows():
-        strike = row['strike']
-        if underlying_price > 0:
-            if row.get('type') == 'call':
-                chain_df.at[i, 'Delta'] = max(0, min(1, (underlying_price - strike) / underlying_price + 0.5))
-            else:
-                chain_df.at[i, 'Delta'] = max(-1, min(0, (strike - underlying_price) / underlying_price - 0.5))
-    return chain_df
-
-# 6.6 Report AI (già definita, la lasciamo)
-def generate_ai_report(portfolio_df: pd.DataFrame, iq_scores: Dict[str, float], macro: Dict[str, float]) -> str:
-    prompt = f"""
-    Sei un analista finanziario quantitativo. Scrivi un report di investimento di 300 parole.
-    Data: {datetime.now().strftime('%Y-%m-%d')}
-    Portafoglio (pesi % e IQ Score):
-    {portfolio_df.to_string()}
-    Condizioni macro:
-    - Treasury 10Y: {macro.get('treasury_10y', 'N/A')}
-    - CPI YoY: {macro.get('cpi_yoy', 'N/A')}
-    Includi: punti di forza, rischi principali, suggerimenti di ribilanciamento.
-    """
-    return ask_gemini_ticker_chat("", prompt, mode="Report")
+def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
+    return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 6.7 QLIB – PIPELINE COMPLETA (integrata qui per avere tutto in un unico file)
-# ==========================================================================
-
-class QlibPipeline:
-    """
-    Pipeline completa per Qlib: collector europeo, conversione binaria, backtest LightGBM.
-    """
-    def __init__(self, data_uri: str = "~/.qlib/qlib_data/eu"):
-        self.data_uri = os.path.expanduser(data_uri)
-        self.raw_dir = os.path.join(os.path.dirname(self.data_uri), "raw_data", "eu")
-        os.makedirs(self.raw_dir, exist_ok=True)
-        self._initialized = False
-
-    def _normalize_symbol(self, symbol: str) -> str:
-        return symbol.upper().strip()
-
-    def _collect_from_yfinance(self, symbols: List[str], start_date: str, end_date: str) -> Dict[str, str]:
-        """Scarica dati da yfinance e salva CSV nella raw_dir."""
-        results = {}
-        for sym in symbols:
-            norm = self._normalize_symbol(sym)
-            csv_path = os.path.join(self.raw_dir, f"{norm}.csv")
-            if os.path.exists(csv_path):
-                results[sym] = csv_path
-                continue
-            try:
-                ticker = yf.Ticker(sym)
-                df = ticker.history(start=start_date, end=end_date)
-                if df.empty:
-                    continue
-                df = df.reset_index()
-                df.columns = [c.lower() for c in df.columns]
-                df.to_csv(csv_path, index=False)
-                results[sym] = csv_path
-                time.sleep(0.5)  # rate limit
-            except Exception as e:
-                logger.warning(f"Errore scaricamento {sym}: {e}")
-        return results
-
-    def _convert_to_qlib_bin(self, symbols: List[str]) -> bool:
-        """Converte i CSV raw nel formato binario di Qlib (semplificato)."""
-        # Questa implementazione crea una struttura minima che Qlib accetta
-        # In un'implementazione completa, usare qlib.data._data._QlibData
-        try:
-            from qlib.data._data import QlibData
-            # Se QlibData non funziona, creiamo una struttura simbolica
-            qd = QlibData()
-            qd.init(self.data_uri)
-            for sym in symbols:
-                norm = self._normalize_symbol(sym)
-                csv_path = os.path.join(self.raw_dir, f"{norm}.csv")
-                if os.path.exists(csv_path):
-                    # Simuliamo la conversione (Qlib farebbe più cose)
-                    pass
-            return True
-        except Exception as e:
-            logger.error(f"Errore conversione bin: {e}")
-            return False
-
-    def prepare_data(self, symbols: List[str], start_date: str = "2018-01-01", end_date: Optional[str] = None, force_refresh: bool = False) -> bool:
-        """Prepara i dati: scarica CSV e converte in formato Qlib."""
-        if end_date is None:
-            end_date = datetime.now().strftime("%Y-%m-%d")
-        # Scarica solo se necessario
-        need_download = force_refresh
-        for sym in symbols:
-            norm = self._normalize_symbol(sym)
-            csv_path = os.path.join(self.raw_dir, f"{norm}.csv")
-            if not os.path.exists(csv_path):
-                need_download = True
-                break
-        if need_download:
-            self._collect_from_yfinance(symbols, start_date, end_date)
-        # Conversione (se non esiste struttura bin)
-        bin_exists = os.path.exists(os.path.join(self.data_uri, "calendars"))
-        if force_refresh or not bin_exists:
-            self._convert_to_qlib_bin(symbols)
-        return True
-
-    def initialize_qlib(self):
-        if not QLIB_AVAILABLE:
-            raise ImportError("Qlib non installato")
-        if not self._initialized:
-            qlib.init(provider_uri=self.data_uri, region=REG_US)  # US data
-            self._initialized = True
-
-    def run_backtest(self, symbols: List[str], start_backtest: str = "2023-01-01", end_backtest: Optional[str] = None) -> Dict[str, Any]:
-        """Esegue backtest usando Alpha158 e LightGBM."""
-        if not QLIB_AVAILABLE:
-            return {"error": "Qlib non installato"}
-        if end_backtest is None:
-            end_backtest = datetime.now().strftime("%Y-%m-%d")
-        try:
-            self.initialize_qlib()
-            # Usa un handler ridotto
-            from qlib.contrib.data.handler import Alpha158
-            handler = Alpha158(instruments=symbols, start_time=start_backtest,
-                              end_time=end_backtest, infer_processors=[])
-            dataset = DatasetH(handler)
-            model = LGBModel(early_stopping_rounds=20, verbosity=-1)
-            model.fit(dataset)
-            pred = model.predict(dataset)
-            # Strategia semplice: prendi il segno della previsione
-            strategy = TopkDropoutStrategy(model=model, dataset=dataset, topk=len(symbols)//3, n_drop=3, risk_degree=0.05)
-            # Usa la funzione backtest corretta
-            from qlib.backtest import backtest as qb
-            executor_config = {
-                "class": "SimulatorExecutor",
-                "module_path": "qlib.backtest.executor",
-                "kwargs": {
-                    "time_per_step": "day",
-                    "generate_portfolio_metrics": True,
-                }
-            }
-            # Versione semplificata per evitare errori
-            report = daily_backtest(strategy=strategy, start_time=start_backtest,
-                                   end_time=end_backtest, account=100000, benchmark=None)
-            metrics = {}
-            if report is not None and not report.empty:
-                metrics = {
-                    "total_return": float(report["return"].iloc[-1]) if "return" in report else 0.0,
-                    "sharpe": float(report["sharpe"].iloc[-1]) if "sharpe" in report else 0.0,
-                    "max_drawdown": float(report["max_drawdown"].iloc[-1]) if "max_drawdown" in report else 0.0,
-                    "annual_return": float(report["annual_return"].iloc[-1]) if "annual_return" in report else 0.0
-                }
-            return {"report": report, "metrics": metrics, "predictions": pred}
-        except Exception as e:
-            logger.exception("Qlib backtest error")
-            return {"error": str(e)}
-
-    def generate_predictions(self, symbols: List[str]) -> pd.DataFrame:
-        """Genera previsioni di direzione usando tutti i dati disponibili."""
-        if not QLIB_AVAILABLE:
-            return pd.DataFrame()
-        try:
-            self.initialize_qlib()
-            end_date = datetime.now().strftime("%Y-%m-%d")
-            start_date = (datetime.now() - timedelta(days=252*3)).strftime("%Y-%m-%d")
-            handler = Alpha158(instruments=symbols, start_time=start_date,
-                              end_time=end_date, infer_processors=[])
-            dataset = DatasetH(handler)
-            model = LGBModel(verbosity=-1)
-            model.fit(dataset)
-            preds = model.predict(dataset)
-            results = []
-            for i, sym in enumerate(symbols):
-                if i < len(preds):
-                    val = float(preds[i])
-                    results.append({"symbol": sym, "prediction": val, "direction": "UP" if val > 0 else "DOWN", "confidence": abs(val)})
-            return pd.DataFrame(results)
-        except Exception as e:
-            logger.exception("Qlib predictions error")
-            return pd.DataFrame()
-
-# ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB (originali, adattate width='stretch')
+# 7. FUNZIONI DI RENDERING DEI TAB
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
         st.info("💡 **Tabella riassuntiva dei fondamentali per tutti i ticker analizzati**")
         df_display = batch_results.drop(columns=['_raw_data'], errors='ignore')
-        st.dataframe(df_display, width='stretch')
+        st.dataframe(df_display, width='stretch', use_container_width=True)
     elif row is not None:
         st.info("💡 **Metriche fondamentali (tabella dettagliata)**")
         df_single = pd.DataFrame([dict(row)]).drop(columns=['_raw_data'], errors='ignore')
-        st.dataframe(df_single, width='stretch')
+        st.dataframe(df_single, width='stretch', use_container_width=True)
     else:
         st.info("Nessun dato fondamentale disponibile. Esegui una ricerca.")
     st.markdown("---")
@@ -2521,10 +2295,23 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         smart = compute_smart_quant_score(row, score_q, qm, risk, weights=smart_w)
         st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
         st.caption(f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}")
-        # ML Prediction (placeholder)
+        
+        # Machine Learning Prediction
         with st.expander("🤖 Previsione Trend ML (5 giorni)"):
             if st.button("🔮 Prevedi trend", key=f"ml_pred_{ticker}"):
-                st.info("Modulo ML non ancora implementato. Puoi estenderlo con ml_predictor.py")
+                with st.spinner("Caricamento modello e predizione..."):
+                    # Addestra il modello con i dati del ticker corrente (alla prima esecuzione)
+                    model = load_or_train_model(df_tech)
+                    if model is None:
+                        st.error("Impossibile addestrare il modello (dati insufficienti)")
+                    else:
+                        pred = predict_trend(ticker, df_tech)
+                        if pred:
+                            st.metric("Probabilità di rialzo", f"{pred['probability_up']*100:.1f}%")
+                            st.success(f"Segnale: {pred['signal']}")
+                        else:
+                            st.warning("Predizione non disponibile")
+        
         with st.expander("📉 Distribuzione rendimenti & rischio"):
             st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
             returns = df_tech['Close'].pct_change().dropna()
@@ -2562,7 +2349,7 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
         st.info("Nessun ticker attivo.")
         st.markdown(FOOTER_HTML, unsafe_allow_html=True)
         return
-    st.info("💡 **Modello Unificato potenziato:** qualità, valutazione, timing e rischio con nuove metriche.")
+    st.info("💡 **Modello Unificato potenziato:** qualità, valutazione, timing e rischio con nuove metriche (Current Ratio, Quick Ratio, ROE, ROCE, Graham, EPV, Beta, WACC, Short Interest, Aroon, OBV).")
     df_tech = get_technical_data(ticker)
     macro = get_macro_indicators()
     qm = calculate_quant_metrics(df_tech, row.get('_raw_data', standalone_raw_data) if row is not None else standalone_raw_data) if df_tech is not None else {}
@@ -2581,12 +2368,17 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     col2.metric("Valutazione", f"{verdict['VAS']:.0f}/100")
     col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
     col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
-    sentiment = get_combined_sentiment(ticker)
-    iq = compute_iq_score(row, timing_score, qm, risk, sentiment)
-    st.markdown(f"### 🧠 IQ Score: {iq['IQ_Score']:.1f}/100  ({iq['verdict']})")
-    st.caption(f"Componenti: FQS={iq['components']['FQS']:.0f}, VAS={iq['components']['VAS']:.0f}, TMS={iq['components']['TMS']:.0f}, QRS={iq['components']['QRS']:.0f}, Momentum={iq['components']['Momentum']:.0f}, Sentiment factor={iq['components']['SentimentFactor']:.2f}")
-    st.caption(f"📰 Sentiment da notizie: {sentiment:.2f} (0=negativo, 1=positivo)")
-    with st.expander("🔍 Criteri analizzati"):
+    
+    # Sentiment Analysis
+    with st.spinner("Analisi del sentiment in corso..."):
+        sentiment = get_overall_sentiment(ticker)
+    st.markdown(f"### 📢 Sentiment di mercato: {sentiment['label']}  (punteggio: {sentiment['score']:.2f})")
+    with st.expander("Dettaglio sentiment"):
+        st.write(f"**News (FinBERT):** {sentiment['news_score']:.2f}")
+        st.write(f"**Social Reddit (VADER):** {sentiment['reddit_score']:.2f}")
+        st.caption("Le notizie hanno peso maggiore. Punteggio > 0.2 positivo, < -0.2 negativo.")
+    
+    with st.expander("🔍 Criteri analizzati (con nuove metriche)"):
         for d in verdict["Details"]: st.write(d)
     if timing_reasons:
         with st.expander("📈 Dettaglio segnali tecnici"):
@@ -2624,38 +2416,43 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
 
 def render_backtest_tab(row, ticker):
     if row is None or ticker is None:
-        st.info("Nessun ticker attivo.")
+        st.info("Nessun ticker attivo. Seleziona un asset.")
         st.markdown(FOOTER_HTML, unsafe_allow_html=True)
         return
-    st.info("💡 **Backtest di strategie di trading**")
+    st.info("💡 **Backtest di strategie di trading su dati storici**")
     df_tech = get_technical_data(ticker)
     if df_tech is None:
         st.warning(f"Dati tecnici non disponibili per {ticker}")
         return
-    col1, col2 = st.columns(2)
+    
+    col1, col2 = st.columns([1, 1])
     with col1:
         strategy = st.selectbox("Strategia", ["sma_crossover", "rsi_mean_reversion"], index=0)
     with col2:
         cash = st.number_input("Capitale iniziale ($)", value=10000.0, step=1000.0)
+    
     if st.button("▶️ Esegui Backtest", key=f"backtest_{ticker}"):
-        with st.spinner("Esecuzione backtest..."):
-            result = run_backtest(ticker, strategy, cash)
+        with st.spinner("Simulazione in corso..."):
+            result = run_backtest(df_tech, strategy, cash=cash)
         if "error" in result:
             st.error(result["error"])
         else:
             st.success("Backtest completato")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Rendimento totale", f"{result['return_pct']:.2f}%")
-            col_b.metric("Sharpe Ratio", f"{result['sharpe']:.2f}")
-            col_c.metric("Max Drawdown", f"{result['max_dd_pct']:.2f}%")
-            col_d, col_e, col_f = st.columns(3)
-            col_d.metric("Win Rate", f"{result['win_rate']:.1f}%")
-            col_e.metric("Numero trade", f"{result['total_trades']}")
-            col_f.metric("Equity finale", f"${result['equity_final']:,.2f}")
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("Rendimento totale", f"{result['metrics']['Return [%]']:.2f}%")
+            col_m2.metric("Sharpe Ratio", f"{result['metrics']['Sharpe Ratio']:.2f}")
+            col_m3.metric("Max Drawdown", f"{result['metrics']['Max Drawdown [%]']:.2f}%")
+            col_m4, col_m5, col_m6 = st.columns(3)
+            col_m4.metric("Win Rate", f"{result['metrics']['Win Rate [%]']:.1f}%")
+            col_m5.metric("Numero trade", f"{result['metrics']['Total Trades']}")
+            col_m6.metric("Equity finale", f"${result['metrics']['Equity Final [$]']:,.2f}")
+            
+            with st.expander("📈 Grafico del backtest"):
+                st.plotly_chart(result["plot"], use_container_width=True)
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_portafoglio_tab(ui):
-    st.info("💡 **Cabina di controllo del portafoglio reale.**")
+    st.info("💡 **Cabina di controllo del portafoglio reale.** Posizioni con quantita', PMC, valuta. Calcoli FX-aware, fiscalita' con compensazione minusvalenze, concentrazione, ribilanciamento, ottimizzazione Markowitz.")
     base_currency = ui.get("base_currency") or st.session_state.get("base_currency", "EUR")
     st.success(f"Valuta base portafoglio: **{base_currency}** | Conversione FX reale attiva.")
     all_tickers_batch = []
@@ -2745,7 +2542,7 @@ def render_portafoglio_tab(ui):
                         rows_pos.append({"Ticker": t, "Quantità": qty, "PMC": pmc_val, "Prezzo Attuale": derived['Prezzo Attuale'], "Importo Investito": derived['Importo Investito'], "Valore di Mercato": derived['Valore di Mercato'], "P&L": derived['P&L'], "P&L %": derived['P&L %'], "Peso %": weights_pct[t], "Valuta": cur})
                     df_weights = pd.DataFrame(rows_pos)
                     st.dataframe(df_weights, width='stretch')
-                    csv_bytes = df_weights.to_csv(index=False).encode("utf-8")
+                    csv_bytes = _portfolio_export_csv(df_weights)
                     st.download_button("💾 Scarica portafoglio (CSV)", data=csv_bytes, file_name="portfolio_burry.csv", mime="text/csv")
                     df_weights_base = enrich_portfolio_with_fx(df_weights, base_currency=base_currency)
                     st.markdown(f"#### Portafoglio in valuta base ({base_currency})")
@@ -2829,41 +2626,48 @@ def render_portafoglio_tab(ui):
                         with col_opt1:
                             if st.button("🎯 Calcola portafoglio ottimo (Max Sharpe)", key="opt_max_sharpe"):
                                 try:
-                                    mean_ret = df_rets.mean()
-                                    cov = df_rets.cov()
-                                    weights = max_sharpe_weights(mean_ret, cov, risk_free_rate=get_active_risk_free_rate())
-                                    opt_weights = {ticker: w for ticker, w in zip(df_rets.columns, weights)}
-                                    st.session_state['markowitz_weights'] = opt_weights
+                                    weights_opt = get_portfolio_weights_markowitz(
+                                        tickers=list(positive_holdings.keys()),
+                                        returns_df=df_rets,
+                                        method="max_sharpe",
+                                        risk_free_rate=get_active_risk_free_rate()
+                                    )
+                                    st.session_state['markowitz_weights'] = weights_opt
                                     st.success("Pesi calcolati! Visualizzati sotto.")
                                 except Exception as e:
                                     st.error(f"Errore nell'ottimizzazione: {e}")
                         with col_opt2:
-                            if st.button("📉 Calcola CADR del portafoglio attuale", key="calc_cadr"):
+                            if st.button("📉 Calcola portafoglio min varianza", key="opt_min_vol"):
                                 try:
-                                    current_weights_array = np.array([weights_pct.get(t, 0.0)/100.0 for t in df_rets.columns])
-                                    cadr = compute_cadr(df_rets, current_weights_array)
-                                    st.dataframe(pd.DataFrame(cadr.items(), columns=["Ticker", "Contributo CADR"]), width='stretch')
+                                    weights_opt = get_portfolio_weights_markowitz(
+                                        tickers=list(positive_holdings.keys()),
+                                        returns_df=df_rets,
+                                        method="min_volatility",
+                                        risk_free_rate=get_active_risk_free_rate()
+                                    )
+                                    st.session_state['markowitz_weights'] = weights_opt
+                                    st.success("Pesi calcolati! Visualizzati sotto.")
                                 except Exception as e:
-                                    st.error(f"Errore nel calcolo CADR: {e}")
+                                    st.error(f"Errore nell'ottimizzazione: {e}")
+
                         if 'markowitz_weights' in st.session_state and st.session_state['markowitz_weights']:
                             opt_weights = st.session_state['markowitz_weights']
                             st.markdown("##### Pesi ottimali suggeriti")
                             opt_df = pd.DataFrame({
                                 "Ticker": list(opt_weights.keys()),
-                                "Peso % (ottimale)": [w*100 for w in opt_weights.values()],
+                                "Peso % (ottimale)": list(opt_weights.values()),
                                 "Peso % (attuale)": [weights_pct.get(t, 0.0) for t in opt_weights.keys()]
                             })
                             st.dataframe(opt_df, width='stretch')
+                            fig_ef = plot_efficient_frontier(
+                                tickers=list(positive_holdings.keys()),
+                                returns_df=df_rets,
+                                current_weights=weights_pct,
+                                optimal_weights_max_sharpe=opt_weights
+                            )
+                            st.plotly_chart(fig_ef, use_container_width=True)
                     else:
                         st.info("Dati insufficienti per l'ottimizzazione (servono almeno 2 titoli con storico sufficiente).")
-                    
-                    # Matrice di Correlazione
-                    with st.expander("📊 Matrice di Correlazione"):
-                        if 'df_rets' in locals() and df_rets is not None and not df_rets.empty:
-                            corr = df_rets.corr()
-                            st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
-                        else:
-                            st.info("Dati insufficienti per calcolare le correlazioni.")
                     
                     # Performance portfolio
                     if not df_weights_base.empty:
@@ -2896,369 +2700,21 @@ def render_portafoglio_tab(ui):
                     fig_p.add_trace(go.Scatter(x=equity_p.index, y=equity_p.values, name="Equity portafoglio"))
                     fig_p.update_layout(template="plotly_dark", height=400, xaxis_title="Data", yaxis_title="Equity normalizzata")
                     st.plotly_chart(fig_p, width='stretch')
-                    
-                    # Report AI
-                    st.markdown("#### 🤖 Report AI sul portafoglio")
-                    if st.button("📄 Genera report AI", key="generate_ai_report_btn"):
-                        with st.spinner("Generazione report in corso..."):
-                            macro = get_macro_indicators()
-                            iq_scores = {t: compute_iq_score(row, 0, {}, {}, 0.5)['IQ_Score'] for t, row in zip(weights_pct.keys(), [None]*len(weights_pct))}
-                            portfolio_summary = df_weights[['Ticker', 'Peso %', 'P&L %']].copy()
-                            report = generate_ai_report(portfolio_summary, iq_scores, macro)
-                            st.markdown(report)
+                    corr = df_rets.corr()
+                    st.markdown("#### Correlazioni tra titoli in portafoglio")
+                    try:
+                        import matplotlib
+                        st.dataframe(corr.style.background_gradient(cmap="RdYlGn", axis=None))
+                    except ImportError:
+                        st.dataframe(corr)
+                        st.caption("Nota: installa matplotlib per visualizzare la matrice con gradienti di colore.")
     else:
         st.info("Seleziona almeno un titolo dal batch o aggiungilo manualmente.")
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 # ==========================================================================
-# 8. NUOVI TAB (Stock Screener, Macro, Opzioni, Qlib completo)
-# ==========================================================================
-def render_stock_screener_tab():
-    st.info("🔍 **Stock Screener S&P 500**")
-    with st.form("screener_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            min_roic = st.number_input("ROIC minimo (%)", 0.0, 100.0, 10.0) / 100.0
-            max_peg = st.number_input("PEG massimo", 0.0, 10.0, 1.5)
-            min_mcap = st.number_input("Market Cap minima (mld $)", 0.0, 2000.0, 10.0)
-        with col2:
-            max_pe = st.number_input("P/E massimo", 0.0, 100.0, 25.0)
-            min_fcf_yield = st.number_input("FCF Yield minimo (%)", 0.0, 50.0, 5.0) / 100.0
-        submitted = st.form_submit_button("🔎 Cerca")
-    if submitted:
-        filters = {
-            'min_roic': min_roic,
-            'max_peg': max_peg,
-            'min_fcf_yield': min_fcf_yield,
-            'max_pe': max_pe,
-            'min_mcap': min_mcap
-        }
-        with st.spinner("Analisi dei titoli S&P 500 in corso..."):
-            df = screen_stocks(filters)
-        if not df.empty:
-            st.dataframe(df, width='stretch')
-            st.success(f"Trovati {len(df)} titoli")
-        else:
-            st.warning("Nessun titolo trovato con questi filtri.")
-
-def render_macro_regime_tab():
-    st.info("🌍 **Macroeconomic & Market Regime**")
-    macro = get_macro_indicators()
-    vix = get_technical_data("^VIX")
-    vix_level = vix['Close'].iloc[-1] if vix is not None and not vix.empty else np.nan
-    col1, col2, col3 = st.columns(3)
-    col1.metric("VIX", f"{vix_level:.2f}" if not np.isnan(vix_level) else "N/D")
-    col2.metric("Treasury 10Y", f"{macro['treasury_10y']*100:.2f}%" if not np.isnan(macro['treasury_10y']) else "N/D")
-    col3.metric("CPI YoY", f"{macro['cpi_yoy']:.2f}%" if not np.isnan(macro['cpi_yoy']) else "N/D")
-    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
-
-def render_options_tab(ticker):
-    if not ticker:
-        st.info("Seleziona un ticker dalla barra laterale o dalla ricerca rapida.")
-        return
-    st.info(f"📈 **Opzioni per {ticker}**")
-    with st.spinner("Caricamento catena opzioni..."):
-        chain = get_option_chain(ticker)
-    if chain is None:
-        st.warning(f"Nessuna opzione disponibile per {ticker}.")
-        return
-    price = get_latest_price(ticker)
-    st.subheader("Call Options")
-    calls = chain.calls
-    if price:
-        calls = calculate_option_greeks(calls, price)
-    st.dataframe(calls[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'Delta']], width='stretch')
-    st.subheader("Put Options")
-    puts = chain.puts
-    if price:
-        puts = calculate_option_greeks(puts, price)
-    st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'Delta']], width='stretch')
-    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
-
-def render_multi_asset_tab():
-    st.subheader("🌍 Asset Macro (Materie prime, Valute, Bond, Crypto)")
-    data = get_multi_asset_data()
-    if not data:
-        st.info("Nessun dato multi-asset disponibile")
-        return
-    df = pd.DataFrame(data).T
-    st.dataframe(df, width='stretch')
-
-def get_multi_asset_data() -> Dict[str, Dict[str, Any]]:
-    results = {}
-    MULTI_ASSET_SYMBOLS = {
-        "Oro": "GC=F",
-        "Petrolio WTI": "CL=F",
-        "EUR/USD": "EURUSD=X",
-        "US Treasury 10Y": "^TNX",
-        "Bitcoin": "BTC-USD",
-        "Ethereum": "ETH-USD"
-    }
-    for name, symbol in MULTI_ASSET_SYMBOLS.items():
-        df = get_technical_data(symbol)
-        if df is not None and not df.empty:
-            close = df['Close']
-            results[name] = {
-                "symbol": symbol,
-                "price": close.iloc[-1],
-                "change_1d": close.pct_change().iloc[-1] * 100 if len(close) > 1 else 0.0,
-                "volatility": close.pct_change().std() * 100 if len(close) > 1 else 0.0
-            }
-    return results
-
-def render_qlib_tab():
-    st.header("🧠 AI Trading (Qlib) – Pipeline completa")
-    st.markdown("""
-    **Qlib** di Microsoft permette di:
-    1. Scaricare dati storici da Yahoo Finance
-    2. Convertirli nel formato binario nativo di Qlib
-    3. Addestrare un modello LightGBM su 158+ fattori tecnici (Alpha158)
-    4. Eseguire backtest e generare previsioni
-
-    *⚠️ La prima esecuzione scaricherà e convertirà i dati – potrebbe richiedere alcuni minuti.*
-    """)
-    
-    if not QLIB_AVAILABLE:
-        st.warning("Qlib non installato o import fallito. Esegui: `pip install pyqlib`")
-        st.info("Dopo l'installazione, riavvia l'app. Inoltre è consigliabile avere torchvision e lightgbm installati.")
-        with st.expander("🔧 Verifica tecnica"):
-            st.code("""
-            Per risolvere, prova a eseguire in terminale:
-            pip install --upgrade pyqlib lightgbm torch
-            Se il problema persiste, controlla che l'ambiente Python sia quello corretto.
-            """)
-        return
-    
-    # Selettore ticker
-    default_tickers = ["AAPL", "MSFT", "NVDA", "GOOGL"]
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        ticker_input = st.text_area("Ticker da analizzare (uno per riga)", value="\n".join(default_tickers), height=150)
-        lookback_years = st.slider("Anni storici per backtest", 1, 5, 3)
-    with col2:
-        mode = st.radio("Modalità", ["Backtest storico", "Previsione trend", "Prepara dati"])
-    
-    tickers = [t.strip().upper() for t in ticker_input.split("\n") if t.strip()]
-    
-    if st.button("🚀 Esegui Qlib", type="primary"):
-        pipeline = QlibPipeline()
-        if mode == "Prepara dati":
-            with st.spinner("Scaricamento e conversione dati..."):
-                try:
-                    pipeline.prepare_data(tickers, force_refresh=True)
-                    st.success("✅ Dati preparati con successo")
-                    st.info(f"Dati salvati in {pipeline.data_uri}")
-                except Exception as e:
-                    st.error(f"Errore: {e}")
-        
-        elif mode == "Backtest storico":
-            with st.spinner(f"Esecuzione backtest su {lookback_years} anni..."):
-                try:
-                    end_date = datetime.now()
-                    start_date = (end_date - timedelta(days=lookback_years*365)).strftime("%Y-%m-%d")
-                    pipeline.prepare_data(tickers, start_date=start_date)
-                    pipeline.initialize_qlib()
-                    split_date = (end_date - timedelta(days=180)).strftime("%Y-%m-%d")
-                    result = pipeline.run_backtest(tickers, start_backtest=split_date)
-                    
-                    if "error" in result:
-                        st.error(result["error"])
-                    else:
-                        metrics = result.get("metrics", {})
-                        col_a, col_b, col_c, col_d = st.columns(4)
-                        col_a.metric("Rendimento totale", f"{metrics.get('total_return', 0)*100:.2f}%")
-                        col_b.metric("Sharpe Ratio", f"{metrics.get('sharpe', 0):.2f}")
-                        col_c.metric("Max Drawdown", f"{metrics.get('max_drawdown', 0)*100:.2f}%")
-                        col_d.metric("Rendimento annuo", f"{metrics.get('annual_return', 0)*100:.2f}%")
-                        
-                        report = result.get("report")
-                        if report is not None and not report.empty:
-                            fig = go.Figure()
-                            if "return" in report.columns:
-                                fig.add_trace(go.Scatter(x=report.index, y=report["return"].cumsum(), 
-                                                        name="Equity cumulativa"))
-                            fig.update_layout(title="Andamento strategia Qlib", template="plotly_dark", height=400)
-                            st.plotly_chart(fig, width='stretch')
-                except Exception as e:
-                    st.error(f"Errore nel backtest: {e}")
-        
-        elif mode == "Previsione trend":
-            with st.spinner("Generazione previsioni con LightGBM..."):
-                try:
-                    pipeline.prepare_data(tickers)
-                    pipeline.initialize_qlib()
-                    predictions = pipeline.generate_predictions(tickers)
-                    if predictions.empty:
-                        st.warning("Nessuna previsione generata")
-                    else:
-                        st.dataframe(predictions, width='stretch')
-                        fig = go.Figure()
-                        for _, row in predictions.iterrows():
-                            fig.add_trace(go.Bar(x=[row["symbol"]], y=[row["prediction"]], 
-                                                name=row["symbol"], 
-                                                marker_color="green" if row["direction"] == "UP" else "red"))
-                        fig.update_layout(title="Previsioni Qlib (valori normalizzati)", 
-                                          template="plotly_dark", height=400)
-                        st.plotly_chart(fig, width='stretch')
-                except Exception as e:
-                    st.error(f"Errore nelle previsioni: {e}")
-
-# ==========================================================================
-# 9. FUNZIONI DI SETUP SIDEBAR E MAIN
-# ==========================================================================
-def render_apk_download_box() -> None:
-    with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
-        st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
-        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
-        st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute.")
-
-def render_chi_siamo() -> None:
-    with st.sidebar.expander("ℹ️ Chi Siamo", expanded=False):
-        st.markdown("""
-### Benvenuti su V-QUANT PRO
-V-QUANT PRO è una piattaforma indipendente di analisi finanziaria dedicata agli investitori retail che adottano un approccio quantitativo e basato sul valore.
-La nostra missione è democratizzare l'accesso a metriche finanziarie avanzate, fornendo strumenti per il monitoraggio del Margine di Sicurezza su ETF, Crypto e singoli titoli azionari ed obbligazionari.
-Crediamo fermamente che l'analisi rigorosa dei dati sia l'unica bussola affidabile per navigare nei mercati finanziari a lungo termine.
-### Cosa facciamo:
-- Analisi del rischio e calcolo di Alpha e Beta di portafoglio
-- Monitoraggio dei fondamentali (ROIC, Altman Z-Score, F-Score)
-- Strumenti di supporto decisionale basati su modelli matematici
-### ⚠️ Disclaimer Legale
-V-QUANT PRO è una piattaforma a scopo esclusivamente informativo e didattico. I dati, le analisi e le opinioni espresse non costituiscono in alcun modo consulenza finanziaria, sollecitazione al pubblico risparmio o suggerimento di investimento. Ogni decisione di investimento presa dall'utente è di sua esclusiva responsabilità.
-Sviluppato con passione da Innovative Program.
-        """)
-
-def render_privacy() -> None:
-    with st.sidebar.expander("🔐 Privacy & Cookie Policy", expanded=False):
-        st.markdown("""
-### Informativa ai sensi del Regolamento UE 2016/679 (GDPR)
-#### 1. Conservazione dei Dati 
-Tutti i dati sensibili, inclusi i dati di autenticazione (email e password) e le configurazioni del tuo portafoglio, sono **detenuti e gestiti in modo sicuro da Supabase**. 
-Supabase è una piattaforma di database di livello enterprise che garantisce la crittografia dei dati a riposo e in transito.
-Le password sono archiviate tramite hashing sicuro e non sono mai accessibili in chiaro agli amministratori di V-QUANT PRO.
-#### 2. Analisi Finanziaria e Cookie
-Questo sito utilizza Google AdSense per la visualizzazione di annunci pubblicitari e cookie tecnici per il corretto funzionamento della Dashboard.
-Google utilizza i cookie per pubblicare annunci basati sulle tue visite precedenti.
-Puoi gestire le preferenze sugli annunci visitando le impostazioni di Google.
-#### 3. Diritti dell'Utente
-Poiché i dati sono detenuti su infrastruttura Supabase, puoi richiedere in ogni momento la cancellazione totale del tuo account e dei dati associati attraverso le impostazioni del profilo o contattandoci.
-#### 4. Esclusione di Responsabilità
-V-QUANT PRO non garantisce l'accuratezza dei dati forniti da fornitori terzi. L'utente riconosce che l'utilizzo delle informazioni avviene a proprio rischio e pericolo.
-#### 5. Sicurezza
-Utilizziamo protocolli HTTPS crittografati per garantire che ogni interazione tra il tuo browser e i nostri server sia protetta da accessi non autorizzati.
-        """)
-
-def render_sostieni() -> None:
-    with st.sidebar.expander("🎁 Sostieni V-QUANT PRO", expanded=False):
-        st.markdown("""
-### Perché una donazione?
-V-QUANT PRO è un progetto indipendente che offre strumenti di analisi avanzata gratuitamente. 
-Mantenere l'infrastruttura, aggiornare i dati in tempo reale e sviluppare nuove funzionalità ha dei costi vivi.
-Se ritieni che questa piattaforma ti stia aiutando a gestire meglio i tuoi investimenti, puoi sostenerne lo sviluppo con una libera donazione. Anche il costo di un caffè fa la differenza!
-        """)
-        st.link_button("🎁 Fai una donazione sicura su PayPal", "https://paypal.me/ctpneu", width="stretch")
-        st.info("Nota: Le donazioni sono libere e non costituiscono il pagamento per un servizio di consulenza.")
-
-def render_contatti() -> None:
-    with st.sidebar.expander("📧 Contatti", expanded=False):
-        st.write("Per supporto tecnico, collaborazioni o richieste:")
-        st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
-        st.caption("Risposta normalmente entro 24/48 ore.")
-
-def setup_sidebar() -> Dict[str, Any]:
-    render_auth_sidebar()
-    st.sidebar.markdown("## 📑 Navigazione")
-    tab_selection = st.sidebar.selectbox(
-        "Vai a:",
-        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio", "⏪ Backtest",
-         "🔍 Stock Screener", "🌍 Macro e Regime", "📈 Opzioni/Obbligazioni", "🌐 Multi Asset", "🧠 AI Trading (Qlib)"],
-        key="nav_select"
-    )
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("🤖 VqAi", expanded=False):
-        st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
-        st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
-        st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
-        for msg in st.session_state.get('burry_ai_history', []):
-            with st.chat_message(msg.get('role', 'assistant')):
-                st.markdown(msg.get('content', ''))
-        burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
-        if burry_ai_prompt:
-            st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
-            ctx = build_burry_ai_context(
-                st.session_state.get('burry_ai_symbol', '') or st.session_state.get('selected_ticker', ''),
-                st.session_state.get('burry_ai_asset_type', 'Azione'),
-                mode='Unificato'
-            )
-            conv_history = "CRONOLOGIA DELLA CONVERSAZIONE:\n"
-            for m in st.session_state.burry_ai_history[:-1]:
-                conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
-            enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
-            with st.spinner('VqAi sta rispondendo...'):
-                reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
-            st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
-    render_apk_download_box()
-    render_chi_siamo()
-    render_privacy()
-    render_sostieni()
-    render_contatti()
-    st.sidebar.markdown("---")
-    st.sidebar.header("1. Selezione Asset")
-    input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
-    file = None
-    manual = ""
-    if input_mode == "Batch CSV":
-        file = st.sidebar.file_uploader("Carica CSV (colonna 'Ticker' richiesta)", type=["csv"])
-    else:
-        manual = st.sidebar.text_input("Ticker", value="").upper().strip()
-    st.sidebar.caption("🔍 Il ticker verrà automaticamente risolto (es. 'ENI' → 'ENI.MI', 'BMW' → 'BMW.DE' ecc.)")
-    analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
-    return {"mode": input_mode, "file": file, "manual": manual, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
-
-def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
-    ticker = st.session_state.get('selected_ticker')
-    batch = st.session_state.get('batch_results')
-    row = None
-    raw_data = None
-    if ticker and batch is not None and not batch.empty and 'Ticker' in batch.columns and ticker in batch['Ticker'].values:
-        row = batch[batch['Ticker'] == ticker].iloc[0]
-        raw_data = row.get('_raw_data') if hasattr(row, 'get') else None
-        return ticker, row, raw_data, 'batch'
-    try:
-        manual = sanitize_ticker(st.session_state.get('standalone_ticker_input', '')) if st.session_state.get('standalone_ticker_input') else ''
-    except ValueError:
-        manual = ''
-    portfolio_tickers = st.session_state.get('portfolio_tickers', []) or []
-    try:
-        portfolio_pick = sanitize_ticker(st.session_state.get('standalone_portfolio_pick', '')) if st.session_state.get('standalone_portfolio_pick') else ''
-    except ValueError:
-        portfolio_pick = ''
-    fallback_ticker = manual or portfolio_pick or (portfolio_tickers[0] if portfolio_tickers else None)
-    if not fallback_ticker: return None, None, None, 'none'
-    try:
-        raw_data = get_fundamental_data(fallback_ticker)
-        if raw_data:
-            met = calculate_fundamental_metrics(raw_data)
-            if met: row = pd.Series(met.to_ui_dict())
-        return fallback_ticker, row, raw_data, 'standalone'
-    except Exception as e:
-        logger.warning(f'Standalone analysis unavailable for {fallback_ticker}: {e}')
-        return fallback_ticker, None, None, 'standalone'
-
-def _init_session_state() -> None:
-    defaults = {
-        'batch_results': None, 'selected_ticker': None, 'portfolio_tickers': [], 'holdings': {}, 'holdings_currency': {}, 'holdings_quantity': {}, 'holdings_pmc': {},
-        'portfolio_target_mode': "Ticker", 'portfolio_targets': {}, 'analysis_errors': [], 'portfolio_loaded_from_db': False,
-        'standalone_ticker_input': '', 'standalone_portfolio_pick': '', 'risk_free_override': None, 'base_currency': 'EUR',
-        'smart_weights': DEFAULT_SMART_WEIGHTS, 'ai_ticker_chat_history': [], 'ai_ticker_chat_last_symbol': None, 'burry_ai_history': [], 'burry_ai_symbol': '', 'burry_ai_asset_type': 'Azione', 'burry_ai_live_context': {}
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state: st.session_state[k] = v
-
-# ==========================================================================
-# 10. MAIN
+# MAIN
 # ==========================================================================
 def main():
     init_auth_state()
@@ -3266,9 +2722,10 @@ def main():
     st.title("💲 V-Quant Pro")
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
+    
     cache = get_cache_manager()
-    if cache is not None:
-        cache.clear_expired()
+    cache.clear_expired()
+    
     ui = setup_sidebar()
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
@@ -3346,7 +2803,7 @@ def main():
             st.session_state.selected_ticker = None
             st.session_state.standalone_ticker_input = manual_quick
     ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
-    if not ticker and ui["tab_selection"] not in ["🔍 Stock Screener", "🌍 Macro e Regime", "🌐 Multi Asset", "🧠 AI Trading (Qlib)"]:
+    if not ticker:
         st.info('Seleziona un ticker dal box "Analisi rapida" oppure carica un batch e scegli un ticker.')
     if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
@@ -3360,16 +2817,6 @@ def main():
         render_portafoglio_tab(ui)
     elif ui["tab_selection"] == "⏪ Backtest":
         render_backtest_tab(row, ticker)
-    elif ui["tab_selection"] == "🔍 Stock Screener":
-        render_stock_screener_tab()
-    elif ui["tab_selection"] == "🌍 Macro e Regime":
-        render_macro_regime_tab()
-    elif ui["tab_selection"] == "📈 Opzioni/Obbligazioni":
-        render_options_tab(ticker)
-    elif ui["tab_selection"] == "🌐 Multi Asset":
-        render_multi_asset_tab()
-    elif ui["tab_selection"] == "🧠 AI Trading (Qlib)":
-        render_qlib_tab()
 
 if __name__ == "__main__":
     main()
