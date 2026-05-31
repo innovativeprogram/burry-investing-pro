@@ -27,3 +27,4 @@ py_vollib>=1.0.0
 torchvision>0.15.0
 pyqlib>=0.9.7
 lightgbm>=4.6.0
+packaging==21.3
