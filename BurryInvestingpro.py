@@ -2,7 +2,7 @@
 V-Quant Pro - Versione Unificata Completa
 Copyright (c) 2026 InnovativeProgram
 Tutti i diritti riservati.
-Contiene TUTTE le funzioni originali + nuove integrazioni (IQ Score, Dashboard, Sentiment, Multi-Asset, Ottimizzatore, Report AI)
+Contiene TUTTE le funzioni originali + nuove integrazioni (IQ Score, Dashboard, Sentiment reale con FinBERT, Multi-Asset, Ottimizzatore, Report AI)
 """
 
 import streamlit as st
@@ -29,6 +29,9 @@ from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 from scipy.optimize import minimize
 from datetime import datetime
+import feedparser
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
 
 # Moduli esterni (opzionali, se non presenti verranno gestiti con fallback)
 try:
@@ -1902,7 +1905,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2003,7 +2006,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. NUOVE FUNZIONI PER EVOLUZIONE (IQ Score, Sentiment, Multi-Asset, Ottimizzatore, Report AI)
+# 6. NUOVE FUNZIONI PER EVOLUZIONE (IQ Score, Sentiment reale con FinBERT, Multi-Asset, Ottimizzatore, Report AI)
 # ==========================================================================
 
 # 6.1 IQ Score unificato
@@ -2043,15 +2046,80 @@ def compute_iq_score(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk
         "emoji": verdict['Emoji']
     }
 
-# 6.2 Sentiment avanzato (notizie + Reddit, se disponibile)
+# 6.2 Sentiment reale con FinBERT e feed RSS Yahoo Finance
+@st.cache_resource
+def load_finbert():
+    """Carica il modello FinBERT e il tokenizer (caching Streamlit)."""
+    try:
+        tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+        model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+        return tokenizer, model
+    except Exception as e:
+        logger.error(f"Errore nel caricamento di FinBERT: {e}")
+        return None, None
+
+def analyze_sentiment_finbert(text: str, tokenizer, model) -> Tuple[str, float]:
+    """
+    Analizza il sentiment di un singolo testo usando FinBERT.
+    Restituisce (label, confidence) dove label in ['positive', 'negative', 'neutral']
+    e confidence è la probabilità (0-1).
+    """
+    if tokenizer is None or model is None:
+        return "neutral", 0.5
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+    outputs = model(**inputs)
+    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    scores = probs.detach().numpy()[0]
+    # Mappa: 0: positive, 1: negative, 2: neutral
+    label_map = {0: "positive", 1: "negative", 2: "neutral"}
+    pred_label = label_map[np.argmax(scores)]
+    return pred_label, float(max(scores))
+
 def get_combined_sentiment(ticker: str) -> float:
     """
-    Restituisce un punteggio 0-1 combinando notizie e social.
-    Se non disponibile, restituisce 0.5.
+    Restituisce un punteggio di sentiment da 0 (molto negativo) a 1 (molto positivo)
+    basato sulle ultime notizie Yahoo Finance per il ticker.
+    Se non ci sono notizie o errore, restituisce 0.5 (neutrale).
     """
-    # Placeholder: qui si potrebbe integrare con FinBERT e PRAW
-    # Per ora restituisce neutro
-    return 0.5
+    try:
+        # Feed RSS di Yahoo Finance per le notizie sul ticker
+        rss_url = f"http://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+        feed = feedparser.parse(rss_url)
+        
+        if not feed.entries:
+            logger.debug(f"Nessuna notizia RSS per {ticker}")
+            return 0.5
+        
+        tokenizer, model = load_finbert()
+        if tokenizer is None or model is None:
+            return 0.5
+        
+        sentiment_scores = []
+        for entry in feed.entries[:10]:  # Prime 10 notizie
+            title = entry.get('title', '')
+            summary = entry.get('summary', '')
+            full_text = f"{title}. {summary}"
+            if len(full_text) < 20:
+                continue
+            label, conf = analyze_sentiment_finbert(full_text, tokenizer, model)
+            if label == "positive":
+                sentiment_scores.append(conf)
+            elif label == "negative":
+                sentiment_scores.append(-conf)
+            # neutral: non contribuisce
+        
+        if not sentiment_scores:
+            return 0.5
+        
+        # Punteggio medio nell'intervallo [-1, 1]
+        avg_score = np.mean(sentiment_scores)
+        # Normalizza a [0, 1]
+        normalized = (avg_score + 1) / 2
+        return float(np.clip(normalized, 0, 1))
+        
+    except Exception as e:
+        logger.debug(f"Errore nel sentiment per {ticker}: {e}")
+        return 0.5
 
 # 6.3 Multi-asset (materie prime, valute, bond)
 MULTI_ASSET_SYMBOLS = {
@@ -2302,24 +2370,27 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
     col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
     
-    # IQ Score aggiunto
+    # IQ Score aggiunto con sentiment reale
     sentiment = get_combined_sentiment(ticker)
     iq = compute_iq_score(row, timing_score, qm, risk, sentiment)
     st.markdown(f"### 🧠 IQ Score: {iq['IQ_Score']:.1f}/100  ({iq['verdict']})")
     st.caption(f"Componenti: FQS={iq['components']['FQS']:.0f}, VAS={iq['components']['VAS']:.0f}, TMS={iq['components']['TMS']:.0f}, QRS={iq['components']['QRS']:.0f}, Momentum={iq['components']['Momentum']:.0f}, Sentiment factor={iq['components']['SentimentFactor']:.2f}")
     
-    # Sentiment Analysis
+    # Mostra il sentiment grezzo (opzionale)
+    st.caption(f"📰 Sentiment da notizie: {sentiment:.2f} (0=negativo, 1=positivo)")
+    
+    # Sentiment Analysis (opzionale, se presente sentiment_analyzer.py)
     try:
         from sentiment_analyzer import get_overall_sentiment
         with st.spinner("Analisi del sentiment in corso..."):
-            sentiment = get_overall_sentiment(ticker)
-        st.markdown(f"### 📢 Sentiment di mercato: {sentiment['label']}  (punteggio: {sentiment['score']:.2f})")
+            sentiment_legacy = get_overall_sentiment(ticker)
+        st.markdown(f"### 📢 Sentiment di mercato (legacy): {sentiment_legacy['label']}  (punteggio: {sentiment_legacy['score']:.2f})")
         with st.expander("Dettaglio sentiment"):
-            st.write(f"**News (FinBERT):** {sentiment['news_score']:.2f}")
-            st.write(f"**Social Reddit (VADER):** {sentiment['reddit_score']:.2f}")
+            st.write(f"**News (FinBERT):** {sentiment_legacy['news_score']:.2f}")
+            st.write(f"**Social Reddit (VADER):** {sentiment_legacy['reddit_score']:.2f}")
             st.caption("Le notizie hanno peso maggiore. Punteggio > 0.2 positivo, < -0.2 negativo.")
     except ImportError:
-        st.info("Modulo sentiment non disponibile. Per attivare l'analisi, aggiungi sentiment_analyzer.py nella cartella.")
+        pass
     
     with st.expander("🔍 Criteri analizzati (con nuove metriche)"):
         for d in verdict["Details"]: st.write(d)
