@@ -1,10 +1,7 @@
 """
 # Copyright (c) 2026 InnovativeProgram
 # Tutti i diritti riservati.
-# Proprietà intellettuale di [Canio Tedesco].
-# Versione integrata TUTTE le funzionalità: Markowitz, Backtest, ML, Sentiment,
-# Stock Screener, Macro, ESG, Opzioni, Correlazioni, Market Regime.
-# File unificato completo - include auth Supabase.
+# V-Quant Pro – versione completa con tutte le funzionalità integrate.
 """
 
 import streamlit as st
@@ -13,12 +10,10 @@ import requests
 from yahooquery import Ticker as YQ_Ticker
 import pandas as pd
 import numpy as np
-
 try:
     import pandas_ta as ta
 except ImportError:
     ta = None
-
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -32,7 +27,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 
-# Moduli esterni (assicurarsi che esistano nella stessa cartella)
+# Moduli esterni (DEVONO esistere nella stessa cartella)
 from cache_manager import get_cache_manager
 from rate_limiter import get_rate_limiter
 from ticker_resolver import auto_resolve_ticker_adaptive
@@ -49,16 +44,9 @@ from burry_ai_prompts import (
 # 0. SETUP LOGGING & COSTANTI GLOBALI
 # ==========================================================================
 if os.getenv("BURRY_LOG_FILE"):
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        filename=os.getenv("BURRY_LOG_FILE")
-    )
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', filename=os.getenv("BURRY_LOG_FILE"))
 else:
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("VQuantPro")
 
 DEFAULT_TAX_RATE = 0.26
@@ -81,7 +69,6 @@ BENEISH_THRESHOLD = -1.78
 POLYGON_RATE_LIMIT_SEC = 12.0
 _last_polygon_call = 0.0
 _polygon_lock = threading.Lock()
-
 def throttle_polygon() -> None:
     global _last_polygon_call
     with _polygon_lock:
@@ -93,11 +80,7 @@ def throttle_polygon() -> None:
 
 BATCH_RATE_LIMIT_SEC = 0.3
 
-FOOTER_HTML = """
-<p style='text-align:center;color:gray;'>
-    Creato e sviluppato da <a href='https://www.vquantpro.it' target='_blank'>vquantpro.it</a>
-</p>
-"""
+FOOTER_HTML = "<p style='text-align:center;color:gray;'>Creato e sviluppato da <a href='https://www.vquantpro.it' target='_blank'>vquantpro.it</a></p>"
 
 # ==========================================================================
 # 0.A SAFE SECRETS / CONFIG ACCESS
@@ -201,21 +184,16 @@ def get_active_risk_free_rate() -> float:
     return get_short_term_risk_free_rate()
 
 # ==========================================================================
-# 0.C POLYGON FUNDAMENTAL DATA PROVIDER (mantenuto come fallback)
+# 0.C POLYGON FUNDAMENTAL DATA PROVIDER
 # ==========================================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
-    if not POLYGON_API_KEY:
-        return None
-    if '.' in symbol:
+    if not POLYGON_API_KEY or '.' in symbol:
         return None
     logger.info(f"Tentativo Polygon per {symbol}")
     throttle_polygon()
     try:
-        resp = requests.get(
-            f"{POLYGON_BASE_URL}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}",
-            timeout=10
-        )
+        resp = requests.get(f"{POLYGON_BASE_URL}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}", timeout=10)
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -239,12 +217,7 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         fin_resp = requests.get(
             f"{POLYGON_BASE_URL}/v2/reference/financials",
-            params={
-                "ticker": symbol,
-                "timeframe": "annual",
-                "limit": 4,
-                "apiKey": POLYGON_API_KEY,
-            },
+            params={"ticker": symbol, "timeframe": "annual", "limit": 4, "apiKey": POLYGON_API_KEY},
             timeout=15
         )
         if fin_resp.status_code != 200:
@@ -298,13 +271,7 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
     inc_stmt = build_statement_df("income_statement", INC_MAP)
     bal_sheet = build_statement_df("balance_sheet", BAL_MAP)
     cash_flow = build_statement_df("cash_flow_statement", CF_MAP)
-    return {
-        "info": info,
-        "financials": inc_stmt,
-        "balance_sheet": bal_sheet,
-        "cashflow": cash_flow,
-        "symbol": symbol
-    }
+    return {"info": info, "financials": inc_stmt, "balance_sheet": bal_sheet, "cashflow": cash_flow, "symbol": symbol}
 
 # ==========================================================================
 # 0.D PORTFOLIO FX & TAX
@@ -494,22 +461,15 @@ def _extract_auth_payload(auth_response: Any) -> Tuple[Any, Any]:
     return user, session
 
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-PASSWORD_REGEX = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>/?]).{8,}$')
-
 def validate_email(email: str) -> bool:
     return bool(EMAIL_REGEX.match((email or "").strip()))
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:
-    if len(password) < 8:
-        return False, "La password deve avere almeno 8 caratteri."
-    if not re.search(r"[A-Z]", password):
-        return False, "La password deve contenere almeno una maiuscola."
-    if not re.search(r"[a-z]", password):
-        return False, "La password deve contenere almeno una minuscola."
-    if not re.search(r"\d", password):
-        return False, "La password deve contenere almeno un numero."
-    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};:\"\\|,.<>/?]", password):
-        return False, "La password deve contenere almeno un carattere speciale."
+    if len(password) < 8: return False, "La password deve avere almeno 8 caratteri."
+    if not re.search(r"[A-Z]", password): return False, "La password deve contenere almeno una maiuscola."
+    if not re.search(r"[a-z]", password): return False, "La password deve contenere almeno una minuscola."
+    if not re.search(r"\d", password): return False, "La password deve contenere almeno un numero."
+    if not re.search(r"[!@#$%^&*()_+\-=\[\]{};:\"\\|,.<>/?]", password): return False, "La password deve contenere almeno un carattere speciale."
     return True, "OK"
 
 def sign_up_with_supabase(email: str, password: str) -> Tuple[bool, str]:
@@ -609,8 +569,8 @@ def render_auth_sidebar() -> None:
                 else: st.sidebar.error(msg)
     st.sidebar.caption('Auth gestita con Supabase email/password.')
     st.sidebar.markdown('---')
-    
-    # ==========================================================================
+
+# ==========================================================================
 # 1. MODELLI DATI
 # ==========================================================================
 @dataclass
@@ -721,10 +681,6 @@ def is_non_traditional_asset(ticker: str, raw_info: Optional[Dict[str, Any]] = N
         qt = str(raw_info.get('quoteType', '')).upper()
         if qt in {"CRYPTOCURRENCY", "CURRENCY", "FUTURE", "INDEX", "ETF", "MUTUALFUND"}: return True
     return False
-
-# ==========================================================================
-# 2.A RISOLUZIONE ADATTIVA DEL TICKER (DELEGATA AL MODULO ticker_resolver)
-# ==========================================================================
 
 # ==========================================================================
 # 3. DATA ENGINE: ANALISI FONDAMENTALE CON CASCATA MULTIFONTE E CACHE
@@ -1415,7 +1371,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
     return score, reasons
 
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE
+# 5. METRICHE QUANTITATIVE AVANZATE (versione integrale)
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -2019,7 +1975,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR - MODIFICATO ORDINE
+# 6. UI: SIDEBAR - FUNZIONI DI RENDERING (APK, CHI SIAMO, PRIVACY, SOSTIENI, CONTATTI)
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -2081,13 +2037,10 @@ def render_contatti() -> None:
         st.caption("Risposta normalmente entro 24/48 ore.")
 
 # ==========================================================================
-# 6. UI: SIDEBAR (continua) e FUNZIONI DI RENDERING
+# 7. SETUP SIDEBAR E FUNZIONI DI RESOLVE
 # ==========================================================================
-
 def setup_sidebar() -> Dict[str, Any]:
-    render_auth_sidebar()                     # 1. Account
-
-    # 2. NAVIGAZIONE
+    render_auth_sidebar()
     st.sidebar.markdown("## 📑 Navigazione")
     tab_selection = st.sidebar.selectbox(
         "Vai a:",
@@ -2096,17 +2049,13 @@ def setup_sidebar() -> Dict[str, Any]:
         key="nav_select"
     )
     st.sidebar.markdown("---")
-
-    # 3. TUTTE LE ALTRE SEZIONI (VqAi, APK, info, contatti)
     with st.sidebar.expander("🤖 VqAi", expanded=False):
         st.caption('Chiedi chiarimenti su azioni o ETF usando i risultati correnti.')
         st.session_state.burry_ai_asset_type = st.selectbox('Tipo strumento', ['Azione', 'ETF'], index=0 if st.session_state.get('burry_ai_asset_type', 'Azione') == 'Azione' else 1, key='burry_ai_asset_type_select')
         st.session_state.burry_ai_symbol = st.text_input('Ticker o nome', value=st.session_state.get('burry_ai_symbol', ''), key='burry_ai_symbol_input')
-        
         for msg in st.session_state.get('burry_ai_history', []):
             with st.chat_message(msg.get('role', 'assistant')):
                 st.markdown(msg.get('content', ''))
-        
         burry_ai_prompt = st.chat_input('Chiedi a VqAi', key='burry_ai_prompt_sidebar')
         if burry_ai_prompt:
             st.session_state.burry_ai_history.append({'role': 'user', 'content': burry_ai_prompt})
@@ -2119,20 +2068,15 @@ def setup_sidebar() -> Dict[str, Any]:
             for m in st.session_state.burry_ai_history[:-1]:
                 conv_history += f"[{m['role'].upper()}]: {m['content']}\n"
             enriched_prompt = f"{conv_history}\nDOMANDA ATTUALE: {burry_ai_prompt}"
-            
             with st.spinner('VqAi sta rispondendo...'):
                 reply = ask_gemini_ticker_chat(ctx, enriched_prompt, mode='Unificato')
             st.session_state.burry_ai_history.append({'role': 'assistant', 'content': reply})
-
     render_apk_download_box()
     render_chi_siamo()
     render_privacy()
     render_sostieni()
     render_contatti()
-
     st.sidebar.markdown("---")
-
-    # 4. SELEZIONE ASSET (in fondo)
     st.sidebar.header("1. Selezione Asset")
     input_mode = st.sidebar.radio("Modalità", ["Manuale", "Batch CSV"], horizontal=True)
     file = None
@@ -2143,7 +2087,6 @@ def setup_sidebar() -> Dict[str, Any]:
         manual = st.sidebar.text_input("Ticker", value="").upper().strip()
     st.sidebar.caption("🔍 Il ticker verrà automaticamente risolto (es. 'ENI' → 'ENI.MI', 'BMW' → 'BMW.DE' ecc.)")
     analyze_btn = st.sidebar.button("🚀 Avvia Analisi", width='stretch')
-
     return {"mode": input_mode, "file": file, "manual": manual, "btn": analyze_btn, "tab_selection": tab_selection, "base_currency": "EUR"}
 
 def resolve_active_analysis_target() -> Tuple[Optional[str], Optional[pd.Series], Optional[Dict[str, Any]], str]:
@@ -2188,7 +2131,7 @@ def _init_session_state() -> None:
 
 def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
-
+    
 # ==========================================================================
 # 7. FUNZIONI DI RENDERING DEI TAB (ORIGINALI)
 # ==========================================================================
