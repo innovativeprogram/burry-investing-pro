@@ -1,135 +1,42 @@
 """
-Ottimizzazione portafoglio con Markowitz (PyPortfolioOpt)
-Utilizza i rendimenti storici dei ticker per calcolare i pesi ottimali.
+portfolio_optimizer.py
+Ottimizzazione portafoglio con Sharpe massimo, min varianza, e calcolo CADR.
 """
 
-import pandas as pd
 import numpy as np
-from pypfopt import EfficientFrontier, expected_returns, risk_models
-from pypfopt import plotting
-from typing import List, Dict, Tuple, Optional
-import plotly.graph_objects as go
+import pandas as pd
+import streamlit as st
+from scipy.optimize import minimize
 
+def portfolio_annualised_performance(weights, mean_returns, cov_matrix, risk_free_rate=0.04):
+    returns = np.sum(mean_returns * weights) * 252
+    std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix * 252, weights)))
+    sharpe = (returns - risk_free_rate) / std
+    return std, returns, sharpe
 
-def get_portfolio_weights_markowitz(
-    tickers: List[str],
-    returns_df: pd.DataFrame,
-    method: str = "max_sharpe",
-    risk_free_rate: float = 0.04,
-) -> Dict[str, float]:
-    """
-    Calcola i pesi ottimali usando la teoria di Markowitz.
+def neg_sharpe(weights, mean_returns, cov_matrix, risk_free_rate):
+    return -portfolio_annualised_performance(weights, mean_returns, cov_matrix, risk_free_rate)[2]
 
-    Args:
-        tickers: Lista dei ticker nel portafoglio.
-        returns_df: DataFrame con i rendimenti giornalieri (colonne = ticker).
-        method: "max_sharpe" o "min_volatility".
-        risk_free_rate: Tasso privo di rischio annualizzato (default 4%).
+def max_sharpe_weights(mean_returns, cov_matrix, risk_free_rate=0.04):
+    num_assets = len(mean_returns)
+    args = (mean_returns, cov_matrix, risk_free_rate)
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((0, 1) for _ in range(num_assets))
+    result = minimize(neg_sharpe, num_assets * [1./num_assets,], args=args, method='SLSQP', bounds=bounds, constraints=constraints)
+    return result.x
 
-    Returns:
-        Dizionario {ticker: peso_ottimale (in percentuale, somma 100%)}
-    """
-    if returns_df.empty or len(tickers) == 0:
-        return {}
-
-    # Calcola rendimenti attesi annualizzati e matrice di covarianza
-    mu = expected_returns.mean_historical_return(returns_df, frequency=252)
-    S = risk_models.sample_cov(returns_df, frequency=252)
-
-    # Ottimizzazione
-    ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))  # no short selling
-
-    if method == "max_sharpe":
-        ef.max_sharpe(risk_free_rate=risk_free_rate)
-    elif method == "min_volatility":
-        ef.min_volatility()
-    else:
-        raise ValueError("method deve essere 'max_sharpe' o 'min_volatility'")
-
-    cleaned_weights = ef.clean_weights()
-    # Converti in percentuali e arrotonda
-    weights_pct = {ticker: round(weight * 100, 2) for ticker, weight in cleaned_weights.items()}
-    return weights_pct
-
-
-def get_efficient_frontier_points(
-    tickers: List[str],
-    returns_df: pd.DataFrame,
-    points: int = 50,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Calcola una serie di punti sulla frontiera efficiente.
-    Restituisce (volatilità, rendimento atteso).
-    """
-    if returns_df.empty:
-        return np.array([]), np.array([])
-
-    mu = expected_returns.mean_historical_return(returns_df, frequency=252)
-    S = risk_models.sample_cov(returns_df, frequency=252)
-    ef = EfficientFrontier(mu, S)
-
-    # Genera la frontiera
-    try:
-        rets, vols = ef.efficient_frontier(points)
-        return vols, rets
-    except Exception as e:
-        print(f"Errore frontiera efficiente: {e}")
-        return np.array([]), np.array([])
-
-
-def plot_efficient_frontier(
-    tickers: List[str],
-    returns_df: pd.DataFrame,
-    current_weights: Optional[Dict[str, float]] = None,
-    optimal_weights_max_sharpe: Optional[Dict[str, float]] = None,
-) -> go.Figure:
-    """
-    Crea un grafico Plotly della frontiera efficiente con i punti:
-    - portafoglio attuale (se fornito)
-    - portafoglio max Sharpe
-    - portafoglio min varianza
-    """
-    vols, rets = get_efficient_frontier_points(tickers, returns_df)
-    if len(vols) == 0:
-        return go.Figure()
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=vols * 100, y=rets * 100,
-        mode='lines', name='Frontiera Efficiente',
-        line=dict(color='blue', dash='dot')
-    ))
-
-    # Portafoglio attuale (se fornito)
-    if current_weights is not None and returns_df is not None:
-        # Calcola rendimento atteso e volatilità del portafoglio attuale
-        w = np.array([current_weights.get(t, 0.0) for t in tickers]) / 100.0
-        mu = expected_returns.mean_historical_return(returns_df, frequency=252).values
-        S = risk_models.sample_cov(returns_df, frequency=252).values
-        port_ret = np.dot(w, mu) * 100
-        port_vol = np.sqrt(np.dot(w.T, np.dot(S, w))) * 100
-        fig.add_trace(go.Scatter(
-            x=[port_vol], y=[port_ret],
-            mode='markers', name='Portafoglio attuale',
-            marker=dict(color='orange', size=12, symbol='circle')
-        ))
-
-    # Aggiungi i pesi ottimali (max Sharpe e min vol)
-    if optimal_weights_max_sharpe is not None:
-        w_opt = np.array([optimal_weights_max_sharpe.get(t, 0.0) for t in tickers]) / 100.0
-        mu_opt = np.dot(w_opt, mu) * 100 if 'mu' in locals() else 0
-        vol_opt = np.sqrt(np.dot(w_opt.T, np.dot(S, w_opt))) * 100 if 'S' in locals() else 0
-        fig.add_trace(go.Scatter(
-            x=[vol_opt], y=[mu_opt],
-            mode='markers', name='Max Sharpe',
-            marker=dict(color='green', size=14, symbol='star')
-        ))
-
-    fig.update_layout(
-        title="Frontiera Efficiente di Markowitz",
-        xaxis_title="Volatilità annualizzata (%)",
-        yaxis_title="Rendimento atteso annualizzato (%)",
-        template="plotly_dark",
-        height=500,
-    )
-    return fig
+def compute_cadr(returns_df, weights):
+    """Correlation-Adjusted Drawdown Risk"""
+    port_ret = (returns_df * pd.Series(weights)).sum(axis=1)
+    equity = (1 + port_ret).cumprod()
+    rolling_max = equity.expanding().max()
+    drawdown = (equity - rolling_max) / rolling_max
+    contributions = {}
+    for ticker in weights:
+        asset_ret = returns_df[ticker]
+        cov = np.cov(asset_ret.dropna(), drawdown.dropna())[0,1]
+        std_asset = asset_ret.std()
+        if std_asset != 0:
+            beta_dd = cov / std_asset**2
+            contributions[ticker] = beta_dd * weights[ticker] * drawdown.mean()
+    return contributions
