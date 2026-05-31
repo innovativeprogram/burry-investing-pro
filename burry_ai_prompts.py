@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="google.generat
 
 # Tentativi di import per i motori
 try:
-    import google.generativeai as genai
+    import google.genai as genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
