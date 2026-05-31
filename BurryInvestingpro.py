@@ -2,8 +2,9 @@
 # Copyright (c) 2026 InnovativeProgram
 # Tutti i diritti riservati.
 # Proprietà intellettuale di [Canio Tedesco].
-# La copia o distribuzione non autorizzata è severamente vietata.
-# Versione con integrazioni: Markowitz, Backtest, ML Trend, Sentiment Analysis.
+# Versione integrata TUTTE le funzionalità: Markowitz, Backtest, ML, Sentiment,
+# Stock Screener, Macro, ESG, Opzioni, Correlazioni, Market Regime.
+# File unificato completo - include auth Supabase.
 """
 
 import streamlit as st
@@ -31,7 +32,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from sklearn.linear_model import LinearRegression
 from supabase import create_client, Client
 
-# Moduli esterni (assicurarsi che esistano)
+# Moduli esterni (assicurarsi che esistano nella stessa cartella)
 from cache_manager import get_cache_manager
 from rate_limiter import get_rate_limiter
 from ticker_resolver import auto_resolve_ticker_adaptive
@@ -43,12 +44,6 @@ from burry_ai_prompts import (
     ask_gemini_ticker_chat,
     build_burry_ai_context,
 )
-
-# NUOVI MODULI INTEGRATI
-from portfolio_optimizer import get_portfolio_weights_markowitz, plot_efficient_frontier
-from backtest_engine import run_backtest
-from ml_predictor import predict_trend, load_or_train_model
-from sentiment_analyzer import get_overall_sentiment
 
 # ==========================================================================
 # 0. SETUP LOGGING & COSTANTI GLOBALI
@@ -370,7 +365,7 @@ def calculate_tax_with_loss_offset(df_weights_base: pd.DataFrame, tax_rate: floa
 st.set_page_config(page_title="V-Quant Pro", page_icon="💲", layout="wide")
 
 # ==========================================================================
-# 0.E AUTH SUPABASE
+# 0.E AUTH SUPABASE (TUTTE LE FUNZIONI ORIGINALI)
 # ==========================================================================
 def get_app_base_url() -> str:
     candidates = [os.getenv('APP_BASE_URL'), os.getenv('STREAMLIT_APP_URL'), os.getenv('PUBLIC_APP_URL')]
@@ -614,8 +609,8 @@ def render_auth_sidebar() -> None:
                 else: st.sidebar.error(msg)
     st.sidebar.caption('Auth gestita con Supabase email/password.')
     st.sidebar.markdown('---')
-
-# ==========================================================================
+    
+    # ==========================================================================
 # 1. MODELLI DATI
 # ==========================================================================
 @dataclass
@@ -750,7 +745,6 @@ def request_with_backoff(func, *args, **kwargs):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
     cache = get_cache_manager()
-    
     cached = cache.get_fundamental(symbol)
     if cached is not None:
         if isinstance(cached, dict) and cached.get("_failed"):
@@ -758,10 +752,8 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             return None
         logger.info(f"Cache hit per fondamentali {symbol}")
         return cached
-    
     resolved = auto_resolve_ticker_adaptive(symbol)
     result = None
-    
     if '.' not in resolved:
         try:
             poly_data = get_polygon_fundamentals(resolved)
@@ -770,7 +762,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"Polygon success per {resolved}")
         except Exception as e:
             logger.debug(f"Polygon fallito per {resolved}: {e}")
-    
     if result is None:
         try:
             fmp = FMPSource()
@@ -780,7 +771,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"FMP success per {resolved}")
         except Exception as e:
             logger.debug(f"FMP fallito per {resolved}: {e}")
-    
     if result is None:
         try:
             av = AlphaVantageSource()
@@ -790,7 +780,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"Alpha Vantage success per {resolved}")
         except Exception as e:
             logger.debug(f"Alpha Vantage fallito per {resolved}: {e}")
-    
     if result is None:
         try:
             mw = MarketWatchScraper()
@@ -800,7 +789,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"MarketWatch success per {resolved}")
         except Exception as e:
             logger.debug(f"MarketWatch fallito per {resolved}: {e}")
-    
     if result is None:
         try:
             def _fetch_yf():
@@ -816,7 +804,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
                 logger.info(f"yfinance success per {resolved}")
         except Exception as e:
             logger.info(f"yfinance fallito per {resolved}: {e}")
-    
     if result is None:
         try:
             yq = YQ_Ticker(resolved)
@@ -859,7 +846,6 @@ def get_fundamental_data(symbol: str) -> Optional[Dict[str, Any]]:
             logger.info(f"YahooQuery success per {resolved}")
         except Exception as e:
             logger.error(f"YahooQuery fallito per fondamentali di {resolved}: {e}")
-    
     if result:
         cache.set_fundamental(symbol, result)
     else:
@@ -976,7 +962,6 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
         aqi = safe_ratio(1 - (cur_assets + total_assets - cur_liab - cash), total_assets) / safe_ratio(1 - (cur_assets_prev + total_assets_prev - cur_liab_prev - cash_prev), total_assets_prev, 1e-9)
         sgi = revenue / revenue_prev if revenue_prev != 0 else 1.0
         depi = safe_ratio(depreciation_prev, (depreciation_prev + total_assets_prev)) / safe_ratio(depreciation, (depreciation + total_assets), 1e-9)
-        
         sga = get_first(fin, 'Selling General And Administrative Expense', 0.0)
         sga_prev = 0.0
         if 'Selling General And Administrative Expense' in fin.index and fin.shape[1] >= 2:
@@ -985,7 +970,6 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
             sgai = sga / sga_prev
         else:
             sgai = 1.0
-        
         lvgi = safe_ratio(total_debt, total_assets) / safe_ratio(total_debt_prev, total_assets_prev, 1e-9)
         tata = safe_ratio((net_income - op_cash), total_assets)
         m_score = -4.84 + 0.92*dsri + 0.528*gmi + 0.404*aqi + 0.892*sgi + 0.115*depi - 0.172*sgai + 4.679*tata - 0.327*lvgi
@@ -1045,14 +1029,12 @@ def calculate_fundamental_metrics(raw_data: Dict[str, Any]) -> Optional[Fundamen
         fin = raw_data["financials"]
         bs = raw_data["balance_sheet"]
         cf = raw_data["cashflow"]
-        
         if not isinstance(fin, pd.DataFrame):
             fin = pd.DataFrame()
         if not isinstance(bs, pd.DataFrame):
             bs = pd.DataFrame()
         if not isinstance(cf, pd.DataFrame):
             cf = pd.DataFrame()
-        
         op_cash = get_first(cf, 'Operating Cash Flow', 0.0)
         cap_ex = get_first(cf, 'Capital Expenditure', 0.0)
         fcf = float(op_cash - cap_ex)
@@ -1204,10 +1186,8 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
     if cached is not None and isinstance(cached, pd.DataFrame) and not cached.empty and len(cached) >= 60:
         logger.info(f"Cache hit per tecnici {symbol}")
         return cached
-    
     resolved = auto_resolve_ticker_adaptive(symbol)
     df = None
-    
     if POLYGON_API_KEY and '.' not in resolved:
         try:
             throttle_polygon()
@@ -1229,7 +1209,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                         df = None
         except Exception as e:
             logger.info(f"Polygon tecnico fallito per {resolved}: {e}")
-    
     if df is None or len(df) < 60:
         try:
             av = AlphaVantageSource()
@@ -1241,7 +1220,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                 df = None
         except Exception as e:
             logger.debug(f"Alpha Vantage tecnico fallito: {e}")
-    
     if df is None or len(df) < 60:
         try:
             def _download_yf():
@@ -1257,7 +1235,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df = None
         except Exception as e:
             logger.info(f"yfinance tecnico fallito per {resolved}: {e}")
-    
     if df is None or len(df) < 60:
         try:
             yq = YQ_Ticker(resolved)
@@ -1275,7 +1252,6 @@ def get_technical_data(symbol: str) -> Optional[pd.DataFrame]:
                     df = None
         except Exception as e:
             logger.error(f"Tutte le API hanno fallito per analisi tecnica di {resolved}: {e}")
-    
     if df is not None and not df.empty and len(df) >= 60:
         cache.set_technical(symbol, df)
     else:
@@ -1942,7 +1918,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -2104,6 +2080,10 @@ def render_contatti() -> None:
         st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
         st.caption("Risposta normalmente entro 24/48 ore.")
 
+# ==========================================================================
+# 6. UI: SIDEBAR (continua) e FUNZIONI DI RENDERING
+# ==========================================================================
+
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()                     # 1. Account
 
@@ -2111,7 +2091,8 @@ def setup_sidebar() -> Dict[str, Any]:
     st.sidebar.markdown("## 📑 Navigazione")
     tab_selection = st.sidebar.selectbox(
         "Vai a:",
-        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio", "⏪ Backtest"],
+        ["📊 Fondamentali", "📉 Tecnico", "⚛️ Quant", "⚖️ Verdetto", "📁 Portafoglio", "⏪ Backtest",
+         "🔍 Stock Screener", "🌍 Macro e Regime", "📈 Opzioni/Obbligazioni"],
         key="nav_select"
     )
     st.sidebar.markdown("---")
@@ -2209,7 +2190,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
 
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB
+# 7. FUNZIONI DI RENDERING DEI TAB (ORIGINALI)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2300,7 +2281,6 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         with st.expander("🤖 Previsione Trend ML (5 giorni)"):
             if st.button("🔮 Prevedi trend", key=f"ml_pred_{ticker}"):
                 with st.spinner("Caricamento modello e predizione..."):
-                    # Addestra il modello con i dati del ticker corrente (alla prima esecuzione)
                     model = load_or_train_model(df_tech)
                     if model is None:
                         st.error("Impossibile addestrare il modello (dati insufficienti)")
@@ -2446,7 +2426,6 @@ def render_backtest_tab(row, ticker):
             col_m4.metric("Win Rate", f"{result['metrics']['Win Rate [%]']:.1f}%")
             col_m5.metric("Numero trade", f"{result['metrics']['Total Trades']}")
             col_m6.metric("Equity finale", f"${result['metrics']['Equity Final [$]']:,.2f}")
-            
             with st.expander("📈 Grafico del backtest"):
                 st.plotly_chart(result["plot"], use_container_width=True)
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
@@ -2649,7 +2628,6 @@ def render_portafoglio_tab(ui):
                                     st.success("Pesi calcolati! Visualizzati sotto.")
                                 except Exception as e:
                                     st.error(f"Errore nell'ottimizzazione: {e}")
-
                         if 'markowitz_weights' in st.session_state and st.session_state['markowitz_weights']:
                             opt_weights = st.session_state['markowitz_weights']
                             st.markdown("##### Pesi ottimali suggeriti")
@@ -2668,6 +2646,13 @@ def render_portafoglio_tab(ui):
                             st.plotly_chart(fig_ef, use_container_width=True)
                     else:
                         st.info("Dati insufficienti per l'ottimizzazione (servono almeno 2 titoli con storico sufficiente).")
+                    
+                    # Matrice di Correlazione e Rete (NUOVA FUNZIONALITÀ)
+                    with st.expander("📊 Matrice di Correlazione e Rete"):
+                        if 'df_rets' in locals() and df_rets is not None and not df_rets.empty:
+                            render_correlation_tab(list(positive_holdings.keys()), df_rets)
+                        else:
+                            st.info("Dati insufficienti per calcolare le correlazioni.")
                     
                     # Performance portfolio
                     if not df_weights_base.empty:
@@ -2714,7 +2699,106 @@ def render_portafoglio_tab(ui):
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 # ==========================================================================
-# MAIN
+# 8. FUNZIONI DI RENDERING DEI NUOVI TAB
+# ==========================================================================
+def render_stock_screener_tab():
+    st.info("🔍 **Stock Screener** – Filtra i titoli S&P 500 in base a metriche fondamentali.")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        min_roic = st.number_input("ROIC minimo (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0) / 100.0
+    with col2:
+        max_peg = st.number_input("PEG massimo", min_value=0.0, max_value=10.0, value=1.5, step=0.1)
+    with col3:
+        min_fcf_yield = st.number_input("FCF Yield minimo (%)", min_value=0.0, max_value=50.0, value=5.0, step=1.0) / 100.0
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        max_pe = st.number_input("P/E massimo", min_value=0.0, max_value=100.0, value=25.0, step=1.0)
+    with col5:
+        min_mcap = st.number_input("Market Cap minima (mld $)", min_value=0.0, max_value=2000.0, value=10.0, step=5.0)
+    with col6:
+        st.write("")
+    
+    filters = {
+        'min_roic': min_roic if min_roic > 0 else None,
+        'max_peg': max_peg if max_peg > 0 else None,
+        'min_fcf_yield': min_fcf_yield if min_fcf_yield > 0 else None,
+        'max_pe': max_pe if max_pe > 0 else None,
+        'min_mcap': min_mcap if min_mcap > 0 else None,
+    }
+    if st.button("🔎 Cerca titoli", use_container_width=True):
+        with st.spinner("Analisi in corso..."):
+            df = get_screened_tickers(filters)
+            if not df.empty:
+                st.dataframe(df, use_container_width=True)
+                st.success(f"Trovati {len(df)} titoli che soddisfano i criteri.")
+            else:
+                st.warning("Nessun titolo trovato con questi filtri.")
+
+def render_macro_regime_tab():
+    st.info("🌍 **Macroeconomic & Market Regime** – Indici macro e regime di mercato.")
+    with st.spinner("Caricamento dati macro..."):
+        macro = get_macro_data()
+        vix = get_vix_level()
+        breadth = get_breadth(SP500_TICKERS[:30])
+        regime = detect_market_regime(vix, breadth)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("VIX", f"{vix:.2f}")
+    col2.metric("Breadth (S&P 500 > SMA50)", f"{breadth:.1f}%")
+    col3.metric("Regime di Mercato", regime)
+    st.markdown("---")
+    st.subheader("Indicatori Macro")
+    if macro:
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("PIL (GDP) ultimo", f"{macro.get('gdp_latest', 'N/D'):,.0f} mld $" if macro.get('gdp_latest') else "N/D")
+        col_b.metric("Tasso Disoccupazione", f"{macro.get('unemployment', 'N/D')}%" if macro.get('unemployment') else "N/D")
+        col_c.metric("Inflazione CPI (YoY)", f"{macro.get('cpi_yoy', 'N/D'):.1f}%" if macro.get('cpi_yoy') else "N/D")
+        st.metric("Tasso Fed Funds", f"{macro.get('fed_rate', 'N/D'):.2f}%" if macro.get('fed_rate') else "N/D")
+
+def render_options_tab(ticker):
+    if not ticker:
+        st.info("Seleziona un ticker dalla barra laterale o dalla ricerca rapida.")
+        return
+    st.info(f"📈 **Opzioni per {ticker}** – Catena delle opzioni e greci (Delta).")
+    with st.spinner("Caricamento catena opzioni..."):
+        chain = get_option_chain(ticker)
+    if chain is None:
+        st.warning(f"Nessuna opzione disponibile per {ticker}.")
+        return
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Call Options")
+        calls = chain.calls
+        calls['Type'] = 'Call'
+        st.dataframe(calls[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest']], use_container_width=True)
+    with col2:
+        st.subheader("Put Options")
+        puts = chain.puts
+        puts['Type'] = 'Put'
+        st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest']], use_container_width=True)
+    
+    if st.button("Calcola Delta (approssimato)"):
+        price = get_latest_price(ticker)
+        if price is None:
+            st.error("Prezzo sottostante non disponibile.")
+        else:
+            calls_with_delta = calculate_option_greeks(calls, price)
+            st.dataframe(calls_with_delta[['strike', 'lastPrice', 'Delta']], use_container_width=True)
+
+def render_correlation_tab(tickers, returns_df):
+    if returns_df is None or returns_df.empty or len(tickers) < 2:
+        st.info("Sono necessari almeno due ticker con storico prezzi per visualizzare le correlazioni.")
+        return
+    corr = returns_df.corr()
+    st.plotly_chart(plot_correlation_heatmap(corr), use_container_width=True)
+    threshold = st.slider("Soglia correlazione per grafo a rete", 0.0, 1.0, 0.5, 0.05)
+    fig_net = plot_network_graph(corr, threshold)
+    if fig_net:
+        st.plotly_chart(fig_net, use_container_width=True)
+    else:
+        st.info("Nessuna correlazione sopra la soglia selezionata.")
+
+# ==========================================================================
+# 9. MAIN
 # ==========================================================================
 def main():
     init_auth_state()
@@ -2732,6 +2816,8 @@ def main():
         st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
+    
+    # Gestione analisi batch/manuale
     if ui["btn"]:
         targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2774,9 +2860,11 @@ def main():
                 st.session_state.selected_ticker = results[0]["Ticker"]
             else:
                 st.session_state.selected_ticker = None
+    
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
+    
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
         batch_options = []
@@ -2802,9 +2890,12 @@ def main():
         if manual_quick:
             st.session_state.selected_ticker = None
             st.session_state.standalone_ticker_input = manual_quick
+    
     ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
-    if not ticker:
+    if not ticker and ui["tab_selection"] not in ["🔍 Stock Screener", "🌍 Macro e Regime"]:
         st.info('Seleziona un ticker dal box "Analisi rapida" oppure carica un batch e scegli un ticker.')
+    
+    # Selezione tab
     if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
     elif ui["tab_selection"] == "📉 Tecnico":
@@ -2817,6 +2908,12 @@ def main():
         render_portafoglio_tab(ui)
     elif ui["tab_selection"] == "⏪ Backtest":
         render_backtest_tab(row, ticker)
+    elif ui["tab_selection"] == "🔍 Stock Screener":
+        render_stock_screener_tab()
+    elif ui["tab_selection"] == "🌍 Macro e Regime":
+        render_macro_regime_tab()
+    elif ui["tab_selection"] == "📈 Opzioni/Obbligazioni":
+        render_options_tab(ticker)
 
 if __name__ == "__main__":
     main()
