@@ -7,7 +7,7 @@ plotly>=5.17.0
 scikit-learn>=1.3.0
 pandas-ta>=0.3.14b0
 supabase>=1.0.3
-google-generativeai>=0.3.0
+google-generativeai>=0.8.0
 requests>=2.31.0
 pandas-datareader>=0.10.0
 arch>=6.0.0
@@ -25,3 +25,4 @@ nltk>=3.8.1
 networkx>=3.0
 py_vollib>=1.0.0
 pyqlib
+torchvision>0.15.0
