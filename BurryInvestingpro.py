@@ -2133,7 +2133,7 @@ def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
     
 # ==========================================================================
-# 7. FUNZIONI DI RENDERING DEI TAB (ORIGINALI)
+# 8. FUNZIONI DI RENDERING DEI TAB (ORIGINALI + NUOVI)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2224,6 +2224,7 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         with st.expander("🤖 Previsione Trend ML (5 giorni)"):
             if st.button("🔮 Prevedi trend", key=f"ml_pred_{ticker}"):
                 with st.spinner("Caricamento modello e predizione..."):
+                    from ml_predictor import load_or_train_model, predict_trend
                     model = load_or_train_model(df_tech)
                     if model is None:
                         st.error("Impossibile addestrare il modello (dati insufficienti)")
@@ -2294,6 +2295,7 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     
     # Sentiment Analysis
     with st.spinner("Analisi del sentiment in corso..."):
+        from sentiment_analyzer import get_overall_sentiment
         sentiment = get_overall_sentiment(ticker)
     st.markdown(f"### 📢 Sentiment di mercato: {sentiment['label']}  (punteggio: {sentiment['score']:.2f})")
     with st.expander("Dettaglio sentiment"):
@@ -2370,7 +2372,7 @@ def render_backtest_tab(row, ticker):
             col_m5.metric("Numero trade", f"{result['metrics']['Total Trades']}")
             col_m6.metric("Equity finale", f"${result['metrics']['Equity Final [$]']:,.2f}")
             with st.expander("📈 Grafico del backtest"):
-                st.plotly_chart(result["plot"], use_container_width=True)
+                st.write("(Grafico non disponibile nella versione integrata – usa la libreria backtesting.py per un grafico completo)")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_portafoglio_tab(ui):
@@ -2548,6 +2550,7 @@ def render_portafoglio_tab(ui):
                         with col_opt1:
                             if st.button("🎯 Calcola portafoglio ottimo (Max Sharpe)", key="opt_max_sharpe"):
                                 try:
+                                    from portfolio_optimizer import get_portfolio_weights_markowitz
                                     weights_opt = get_portfolio_weights_markowitz(
                                         tickers=list(positive_holdings.keys()),
                                         returns_df=df_rets,
@@ -2561,6 +2564,7 @@ def render_portafoglio_tab(ui):
                         with col_opt2:
                             if st.button("📉 Calcola portafoglio min varianza", key="opt_min_vol"):
                                 try:
+                                    from portfolio_optimizer import get_portfolio_weights_markowitz
                                     weights_opt = get_portfolio_weights_markowitz(
                                         tickers=list(positive_holdings.keys()),
                                         returns_df=df_rets,
@@ -2580,6 +2584,7 @@ def render_portafoglio_tab(ui):
                                 "Peso % (attuale)": [weights_pct.get(t, 0.0) for t in opt_weights.keys()]
                             })
                             st.dataframe(opt_df, width='stretch')
+                            from portfolio_optimizer import plot_efficient_frontier
                             fig_ef = plot_efficient_frontier(
                                 tickers=list(positive_holdings.keys()),
                                 returns_df=df_rets,
@@ -2590,7 +2595,7 @@ def render_portafoglio_tab(ui):
                     else:
                         st.info("Dati insufficienti per l'ottimizzazione (servono almeno 2 titoli con storico sufficiente).")
                     
-                    # Matrice di Correlazione e Rete (NUOVA FUNZIONALITÀ)
+                    # Matrice di Correlazione e Rete
                     with st.expander("📊 Matrice di Correlazione e Rete"):
                         if 'df_rets' in locals() and df_rets is not None and not df_rets.empty:
                             render_correlation_tab(list(positive_holdings.keys()), df_rets)
@@ -2641,9 +2646,6 @@ def render_portafoglio_tab(ui):
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
-# ==========================================================================
-# 8. FUNZIONI DI RENDERING DEI NUOVI TAB
-# ==========================================================================
 def render_stock_screener_tab():
     st.info("🔍 **Stock Screener** – Filtra i titoli S&P 500 in base a metriche fondamentali.")
     col1, col2, col3 = st.columns(3)
@@ -2660,14 +2662,7 @@ def render_stock_screener_tab():
         min_mcap = st.number_input("Market Cap minima (mld $)", min_value=0.0, max_value=2000.0, value=10.0, step=5.0)
     with col6:
         st.write("")
-    
-    filters = {
-        'min_roic': min_roic if min_roic > 0 else None,
-        'max_peg': max_peg if max_peg > 0 else None,
-        'min_fcf_yield': min_fcf_yield if min_fcf_yield > 0 else None,
-        'max_pe': max_pe if max_pe > 0 else None,
-        'min_mcap': min_mcap if min_mcap > 0 else None,
-    }
+    filters = {'min_roic': min_roic if min_roic > 0 else None, 'max_peg': max_peg if max_peg > 0 else None, 'min_fcf_yield': min_fcf_yield if min_fcf_yield > 0 else None, 'max_pe': max_pe if max_pe > 0 else None, 'min_mcap': min_mcap if min_mcap > 0 else None}
     if st.button("🔎 Cerca titoli", use_container_width=True):
         with st.spinner("Analisi in corso..."):
             df = get_screened_tickers(filters)
@@ -2718,7 +2713,6 @@ def render_options_tab(ticker):
         puts = chain.puts
         puts['Type'] = 'Put'
         st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest']], use_container_width=True)
-    
     if st.button("Calcola Delta (approssimato)"):
         price = get_latest_price(ticker)
         if price is None:
