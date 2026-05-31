@@ -1,7 +1,8 @@
 """
 # Copyright (c) 2026 InnovativeProgram
 # Tutti i diritti riservati.
-# V-Quant Pro – versione completa con tutte le funzionalità integrate.
+# V-Quant Pro – versione completa e autonoma.
+# Contiene TUTTE le funzioni originali + le nuove integrazioni.
 """
 
 import streamlit as st
@@ -1369,9 +1370,9 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
                 pass
     score = int(np.clip(score, 0, 100))
     return score, reasons
-
+    
 # ==========================================================================
-# 5. METRICHE QUANTITATIVE AVANZATE (versione integrale)
+# 5. METRICHE QUANTITATIVE AVANZATE
 # ==========================================================================
 def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
@@ -1975,7 +1976,7 @@ def compute_rebalancing_actions(df_alloc: pd.DataFrame, target_weights: Dict[str
     return merged.sort_values("Azione €", ascending=False).reset_index(drop=True)
 
 # ==========================================================================
-# 6. UI: SIDEBAR - FUNZIONI DI RENDERING (APK, CHI SIAMO, PRIVACY, SOSTIENI, CONTATTI)
+# 6. UI: SIDEBAR E FUNZIONI DI RENDERING DEI TAB
 # ==========================================================================
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
@@ -2036,9 +2037,6 @@ def render_contatti() -> None:
         st.link_button("📧 Scrivimi via mail", "mailto:innovativeprogram@proton.me?subject=Richiesta%20da%20V-QuantPro", width='stretch')
         st.caption("Risposta normalmente entro 24/48 ore.")
 
-# ==========================================================================
-# 7. SETUP SIDEBAR E FUNZIONI DI RESOLVE
-# ==========================================================================
 def setup_sidebar() -> Dict[str, Any]:
     render_auth_sidebar()
     st.sidebar.markdown("## 📑 Navigazione")
@@ -2131,9 +2129,9 @@ def _init_session_state() -> None:
 
 def _portfolio_export_csv(df_weights: pd.DataFrame) -> bytes:
     return df_weights.to_csv(index=False).encode("utf-8")
-    
+
 # ==========================================================================
-# 8. FUNZIONI DI RENDERING DEI TAB (ORIGINALI + NUOVI)
+# 7. FUNZIONI DI RENDERING DEI TAB (TUTTE)
 # ==========================================================================
 def render_fondamentali_tab(row, batch_results, analysis_source, ticker):
     if batch_results is not None and not batch_results.empty:
@@ -2220,21 +2218,24 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
         st.caption(f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}")
         
-        # Machine Learning Prediction
+        # Machine Learning Prediction (richiede ml_predictor.py opzionale)
         with st.expander("🤖 Previsione Trend ML (5 giorni)"):
             if st.button("🔮 Prevedi trend", key=f"ml_pred_{ticker}"):
-                with st.spinner("Caricamento modello e predizione..."):
+                try:
                     from ml_predictor import load_or_train_model, predict_trend
-                    model = load_or_train_model(df_tech)
-                    if model is None:
-                        st.error("Impossibile addestrare il modello (dati insufficienti)")
-                    else:
-                        pred = predict_trend(ticker, df_tech)
-                        if pred:
-                            st.metric("Probabilità di rialzo", f"{pred['probability_up']*100:.1f}%")
-                            st.success(f"Segnale: {pred['signal']}")
+                    with st.spinner("Caricamento modello e predizione..."):
+                        model = load_or_train_model(df_tech)
+                        if model is None:
+                            st.error("Impossibile addestrare il modello (dati insufficienti)")
                         else:
-                            st.warning("Predizione non disponibile")
+                            pred = predict_trend(ticker, df_tech)
+                            if pred:
+                                st.metric("Probabilità di rialzo", f"{pred['probability_up']*100:.1f}%")
+                                st.success(f"Segnale: {pred['signal']}")
+                            else:
+                                st.warning("Predizione non disponibile")
+                except ImportError:
+                    st.info("Modulo ML non disponibile. Per attivare la previsione, aggiungi ml_predictor.py nella cartella.")
         
         with st.expander("📉 Distribuzione rendimenti & rischio"):
             st.write(f"Skewness: {risk['Skew']:.2f} | Kurtosis: {risk['Kurt']:.2f}")
@@ -2293,15 +2294,18 @@ def render_verdetto_tab(row, ticker, standalone_raw_data):
     col3.metric("Timing", f"{verdict['TMS']:.0f}/100")
     col4.metric("Rischio", f"{verdict['QRS']:.0f}/100")
     
-    # Sentiment Analysis
-    with st.spinner("Analisi del sentiment in corso..."):
+    # Sentiment Analysis (richiede sentiment_analyzer.py opzionale)
+    try:
         from sentiment_analyzer import get_overall_sentiment
-        sentiment = get_overall_sentiment(ticker)
-    st.markdown(f"### 📢 Sentiment di mercato: {sentiment['label']}  (punteggio: {sentiment['score']:.2f})")
-    with st.expander("Dettaglio sentiment"):
-        st.write(f"**News (FinBERT):** {sentiment['news_score']:.2f}")
-        st.write(f"**Social Reddit (VADER):** {sentiment['reddit_score']:.2f}")
-        st.caption("Le notizie hanno peso maggiore. Punteggio > 0.2 positivo, < -0.2 negativo.")
+        with st.spinner("Analisi del sentiment in corso..."):
+            sentiment = get_overall_sentiment(ticker)
+        st.markdown(f"### 📢 Sentiment di mercato: {sentiment['label']}  (punteggio: {sentiment['score']:.2f})")
+        with st.expander("Dettaglio sentiment"):
+            st.write(f"**News (FinBERT):** {sentiment['news_score']:.2f}")
+            st.write(f"**Social Reddit (VADER):** {sentiment['reddit_score']:.2f}")
+            st.caption("Le notizie hanno peso maggiore. Punteggio > 0.2 positivo, < -0.2 negativo.")
+    except ImportError:
+        st.info("Modulo sentiment non disponibile. Per attivare l'analisi, aggiungi sentiment_analyzer.py nella cartella.")
     
     with st.expander("🔍 Criteri analizzati (con nuove metriche)"):
         for d in verdict["Details"]: st.write(d)
@@ -2349,13 +2353,11 @@ def render_backtest_tab(row, ticker):
     if df_tech is None:
         st.warning(f"Dati tecnici non disponibili per {ticker}")
         return
-    
     col1, col2 = st.columns([1, 1])
     with col1:
         strategy = st.selectbox("Strategia", ["sma_crossover", "rsi_mean_reversion"], index=0)
     with col2:
         cash = st.number_input("Capitale iniziale ($)", value=10000.0, step=1000.0)
-    
     if st.button("▶️ Esegui Backtest", key=f"backtest_{ticker}"):
         with st.spinner("Simulazione in corso..."):
             result = run_backtest(df_tech, strategy, cash=cash)
@@ -2372,7 +2374,7 @@ def render_backtest_tab(row, ticker):
             col_m5.metric("Numero trade", f"{result['metrics']['Total Trades']}")
             col_m6.metric("Equity finale", f"${result['metrics']['Equity Final [$]']:,.2f}")
             with st.expander("📈 Grafico del backtest"):
-                st.write("(Grafico non disponibile nella versione integrata – usa la libreria backtesting.py per un grafico completo)")
+                st.write("(Grafico non disponibile nella versione integrata – installa backtesting.py per il grafico interattivo)")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
 def render_portafoglio_tab(ui):
@@ -2543,55 +2545,56 @@ def render_portafoglio_tab(ui):
                             fig_reb.update_layout(barmode="group", template="plotly_dark", height=420, xaxis_title=label_col, yaxis_title="Peso %")
                             st.plotly_chart(fig_reb, width='stretch')
                     
-                    # Ottimizzazione Markowitz
+                    # Ottimizzazione Markowitz (richiede portfolio_optimizer.py opzionale)
                     st.markdown("#### Ottimizzazione Portafoglio (Markowitz)")
                     if 'df_rets' in locals() and not df_rets.empty:
-                        col_opt1, col_opt2 = st.columns(2)
-                        with col_opt1:
-                            if st.button("🎯 Calcola portafoglio ottimo (Max Sharpe)", key="opt_max_sharpe"):
-                                try:
-                                    from portfolio_optimizer import get_portfolio_weights_markowitz
-                                    weights_opt = get_portfolio_weights_markowitz(
-                                        tickers=list(positive_holdings.keys()),
-                                        returns_df=df_rets,
-                                        method="max_sharpe",
-                                        risk_free_rate=get_active_risk_free_rate()
-                                    )
-                                    st.session_state['markowitz_weights'] = weights_opt
-                                    st.success("Pesi calcolati! Visualizzati sotto.")
-                                except Exception as e:
-                                    st.error(f"Errore nell'ottimizzazione: {e}")
-                        with col_opt2:
-                            if st.button("📉 Calcola portafoglio min varianza", key="opt_min_vol"):
-                                try:
-                                    from portfolio_optimizer import get_portfolio_weights_markowitz
-                                    weights_opt = get_portfolio_weights_markowitz(
-                                        tickers=list(positive_holdings.keys()),
-                                        returns_df=df_rets,
-                                        method="min_volatility",
-                                        risk_free_rate=get_active_risk_free_rate()
-                                    )
-                                    st.session_state['markowitz_weights'] = weights_opt
-                                    st.success("Pesi calcolati! Visualizzati sotto.")
-                                except Exception as e:
-                                    st.error(f"Errore nell'ottimizzazione: {e}")
-                        if 'markowitz_weights' in st.session_state and st.session_state['markowitz_weights']:
-                            opt_weights = st.session_state['markowitz_weights']
-                            st.markdown("##### Pesi ottimali suggeriti")
-                            opt_df = pd.DataFrame({
-                                "Ticker": list(opt_weights.keys()),
-                                "Peso % (ottimale)": list(opt_weights.values()),
-                                "Peso % (attuale)": [weights_pct.get(t, 0.0) for t in opt_weights.keys()]
-                            })
-                            st.dataframe(opt_df, width='stretch')
-                            from portfolio_optimizer import plot_efficient_frontier
-                            fig_ef = plot_efficient_frontier(
-                                tickers=list(positive_holdings.keys()),
-                                returns_df=df_rets,
-                                current_weights=weights_pct,
-                                optimal_weights_max_sharpe=opt_weights
-                            )
-                            st.plotly_chart(fig_ef, use_container_width=True)
+                        try:
+                            from portfolio_optimizer import get_portfolio_weights_markowitz, plot_efficient_frontier
+                            col_opt1, col_opt2 = st.columns(2)
+                            with col_opt1:
+                                if st.button("🎯 Calcola portafoglio ottimo (Max Sharpe)", key="opt_max_sharpe"):
+                                    try:
+                                        weights_opt = get_portfolio_weights_markowitz(
+                                            tickers=list(positive_holdings.keys()),
+                                            returns_df=df_rets,
+                                            method="max_sharpe",
+                                            risk_free_rate=get_active_risk_free_rate()
+                                        )
+                                        st.session_state['markowitz_weights'] = weights_opt
+                                        st.success("Pesi calcolati! Visualizzati sotto.")
+                                    except Exception as e:
+                                        st.error(f"Errore nell'ottimizzazione: {e}")
+                            with col_opt2:
+                                if st.button("📉 Calcola portafoglio min varianza", key="opt_min_vol"):
+                                    try:
+                                        weights_opt = get_portfolio_weights_markowitz(
+                                            tickers=list(positive_holdings.keys()),
+                                            returns_df=df_rets,
+                                            method="min_volatility",
+                                            risk_free_rate=get_active_risk_free_rate()
+                                        )
+                                        st.session_state['markowitz_weights'] = weights_opt
+                                        st.success("Pesi calcolati! Visualizzati sotto.")
+                                    except Exception as e:
+                                        st.error(f"Errore nell'ottimizzazione: {e}")
+                            if 'markowitz_weights' in st.session_state and st.session_state['markowitz_weights']:
+                                opt_weights = st.session_state['markowitz_weights']
+                                st.markdown("##### Pesi ottimali suggeriti")
+                                opt_df = pd.DataFrame({
+                                    "Ticker": list(opt_weights.keys()),
+                                    "Peso % (ottimale)": list(opt_weights.values()),
+                                    "Peso % (attuale)": [weights_pct.get(t, 0.0) for t in opt_weights.keys()]
+                                })
+                                st.dataframe(opt_df, width='stretch')
+                                fig_ef = plot_efficient_frontier(
+                                    tickers=list(positive_holdings.keys()),
+                                    returns_df=df_rets,
+                                    current_weights=weights_pct,
+                                    optimal_weights_max_sharpe=opt_weights
+                                )
+                                st.plotly_chart(fig_ef, use_container_width=True)
+                        except ImportError:
+                            st.info("Modulo ottimizzazione non disponibile. Per attivare Markowitz, aggiungi portfolio_optimizer.py nella cartella.")
                     else:
                         st.info("Dati insufficienti per l'ottimizzazione (servono almeno 2 titoli con storico sufficiente).")
                     
@@ -2646,6 +2649,9 @@ def render_portafoglio_tab(ui):
     st.markdown("---")
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
+# ==========================================================================
+# 8. FUNZIONI DI RENDERING DEI NUOVI TAB
+# ==========================================================================
 def render_stock_screener_tab():
     st.info("🔍 **Stock Screener** – Filtra i titoli S&P 500 in base a metriche fondamentali.")
     col1, col2, col3 = st.columns(3)
@@ -2743,18 +2749,14 @@ def main():
     st.title("💲 V-Quant Pro")
     st.caption(f"Ultimo aggiornamento dati: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} (cache 15 min)")
     inject_pwa_support()
-    
     cache = get_cache_manager()
     cache.clear_expired()
-    
     ui = setup_sidebar()
     if is_authenticated() and not st.session_state.get('portfolio_loaded_from_db', False):
         load_user_portfolio()
         st.session_state.portfolio_loaded_from_db = True
     if not is_authenticated():
         st.info("Modalità ospite attiva: puoi usare l'app senza registrazione. Per salvare il portafoglio in modo permanente, effettua il login.")
-    
-    # Gestione analisi batch/manuale
     if ui["btn"]:
         targets = [ui["manual"]] if ui["mode"] == "Manuale" else []
         if ui["mode"] == "Batch CSV" and ui["file"]:
@@ -2797,11 +2799,9 @@ def main():
                 st.session_state.selected_ticker = results[0]["Ticker"]
             else:
                 st.session_state.selected_ticker = None
-    
     if st.session_state.get('analysis_errors'):
         with st.expander('⚠️ Diagnostica analisi', expanded=False):
             for err in st.session_state.analysis_errors: st.write(f'- {err}')
-    
     with st.expander("🎯 Analisi rapida senza ricerca", expanded=(st.session_state.batch_results is None or st.session_state.batch_results.empty)):
         csel1, csel2, csel3 = st.columns([1.2, 1.2, 1])
         batch_options = []
@@ -2827,12 +2827,9 @@ def main():
         if manual_quick:
             st.session_state.selected_ticker = None
             st.session_state.standalone_ticker_input = manual_quick
-    
     ticker, row, standalone_raw_data, analysis_source = resolve_active_analysis_target()
     if not ticker and ui["tab_selection"] not in ["🔍 Stock Screener", "🌍 Macro e Regime"]:
         st.info('Seleziona un ticker dal box "Analisi rapida" oppure carica un batch e scegli un ticker.')
-    
-    # Selezione tab
     if ui["tab_selection"] == "📊 Fondamentali":
         render_fondamentali_tab(row, st.session_state.batch_results, analysis_source, ticker)
     elif ui["tab_selection"] == "📉 Tecnico":
