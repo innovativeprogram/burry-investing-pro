@@ -33,8 +33,16 @@ from supabase import create_client, Client
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import feedparser
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+
+# Transformers opzionale
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    AutoTokenizer = None
+    AutoModelForSequenceClassification = None
 
 # Backtesting (opzionale)
 try:
@@ -686,7 +694,6 @@ def safe_float(value: Any, default: float = np.nan) -> float:
     except (TypeError, ValueError): return default
 
 def safe_div(a: float, b: float, default: float = 0.0) -> float:
-    # FIX BUG 11: gestisce anche b=NaN che sfuggiva al controllo precedente
     try:
         if b is None or b == 0:
             return default
@@ -902,15 +909,12 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
             if debt0 < debt1: fscore += 1
         if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index and bs.shape[1] >= 2:
             ca0 = safe_float(bs.loc['Current Assets'].iloc[0], 0.0)
-            # FIX BUG 5: era iloc[1] per cl0 (bug: usava anno precedente per anno corrente)
             cl0 = safe_float(bs.loc['Current Liabilities'].iloc[0], 1.0)
             ca1 = safe_float(bs.loc['Current Assets'].iloc[1], 0.0)
             cl1 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
             cr0 = safe_div(ca0, cl0)
             cr1 = safe_div(ca1, cl1)
             if cr0 > cr1: fscore += 1
-        # FIX BUG 4: rev0/rev1 inizializzate prima dei blocchi per evitare UnboundLocalError
-        # nel calcolo dell'Asset Turnover che segue il blocco Total Revenue
         rev0 = 0.0
         rev1 = 0.0
         if 'Total Revenue' in fin.index and fin.shape[1] >= 2:
@@ -1000,16 +1004,12 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
 def estimate_wacc(info: Dict[str, Any], market_cap: float, total_debt: float, tax_rate: float, risk_free_rate: float = DEFAULT_RISK_FREE_RATE) -> Optional[float]:
     try:
         beta = safe_float(info.get('beta', 1.0), 1.0)
-        # Clamp beta in un range ragionevole (evita beta negativi o estremi)
         beta = float(np.clip(beta, 0.1, 4.0))
         equity_risk_premium = 0.055
         cost_equity = risk_free_rate + beta * equity_risk_premium
         interest_expense = safe_float(info.get('interestExpense', 0.0), 0.0)
-        # FIX BUG 7: interestExpense in yfinance è spesso negativo (è un costo).
-        # Usiamo abs() per estrarre il costo reale del debito indipendentemente dal segno.
         if total_debt > 0 and interest_expense != 0.0:
             cost_debt = abs(interest_expense) / total_debt
-            # Clamp: il costo del debito deve essere ragionevole (0.5% – 30%)
             cost_debt = float(np.clip(cost_debt, 0.005, 0.30))
         else:
             cost_debt = risk_free_rate + 0.02
@@ -1334,20 +1334,16 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         for i in range(period, len(data)):
             sub_high = high.iloc[i-period:i+1]
             sub_low = low.iloc[i-period:i+1]
-            # FIX BUG 3: idxmax/idxmin restituisce un Timestamp su DatetimeIndex,
-            # non un intero. Usiamo argmax/argmin (posizione intera) per i calcoli.
-            high_pos = int(sub_high.values.argmax())  # posizione relativa nel subarray
+            high_pos = int(sub_high.values.argmax())
             low_pos = int(sub_low.values.argmin())
-            # CORREZIONE AROON (formula giusta: più recente = punteggio più alto)
+            # CORREZIONE AROON (formula giusta)
             aroon_up.iloc[i] = ((period - high_pos) / period) * 100
             aroon_down.iloc[i] = ((period - low_pos) / period) * 100
         data['Aroon_Up'] = aroon_up
         data['Aroon_Down'] = aroon_down
-    # FIX BUG 19: OBV vettorizzato (O(n) numpy invece di O(n) Python loop → 50-100x più veloce)
     close_diff = close.diff().fillna(0)
     direction = np.sign(close_diff)
     obv = (direction * volume.fillna(0)).cumsum()
-    # Il primo valore è il volume del primo giorno (convenzione standard)
     if not volume.empty:
         obv.iloc[0] = volume.iloc[0]
     data['OBV'] = obv
@@ -1437,7 +1433,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
                     reasons.append("✅ OBV conferma trend rialzista")
                 elif obv_slope < 0 and price_slope > 0:
                     score -= 10
-                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende")
+                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende)")
             except Exception:
                 pass
     score = int(np.clip(score, 0, 100))
@@ -1459,8 +1455,6 @@ def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
 def omega_ratio(returns: pd.Series, rf_annual: float = 0.04, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
         return np.nan
-    # FIX BUG 10: rf_annual era accettato ma mai usato. Ora convertito in soglia giornaliera
-    # e usato al posto del threshold=0 fisso, rendendo il ratio finanziariamente corretto.
     daily_threshold = rf_annual / TRADING_DAYS_YEAR if threshold == 0.0 else threshold
     above = returns[returns > daily_threshold]
     below = returns[returns <= daily_threshold]
@@ -1901,7 +1895,6 @@ def calculate_portfolio_beta(port_ret: pd.Series, benchmark_symbol: str = DEFAUL
         beta = safe_div(cov, var_b, np.nan) if var_b > 0 else np.nan
         rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
         alpha_daily = (joined['port'].mean() - rf_daily) - beta * (joined['bench'].mean() - rf_daily)
-        # FIX BUG 8: annualizzazione geometrica (composta), non aritmetica
         alpha_ann = float((1 + alpha_daily) ** TRADING_DAYS_YEAR - 1)
         corr = joined['port'].corr(joined['bench'])
         return {"Beta": float(beta) if not np.isnan(beta) else np.nan, "Alpha (ann.)": float(alpha_ann) if not np.isnan(alpha_ann) else np.nan, "Corr": float(corr) if not np.isnan(corr) else np.nan}
@@ -1951,7 +1944,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1999,10 +1992,6 @@ def infer_asset_class(ticker: str, company_name: str = "", raw_info: Optional[Di
 def infer_geography(ticker: str, company_name: str = "") -> str:
     t = str(ticker).upper()
     name = str(company_name).lower()
-    # FIX BUG 6: il dict aveva ".BR" duplicato (".BR":"Belgio" poi ".BR":"Brasile").
-    # In Python un dict literal mantiene l'ultimo valore → tutti i ticker .BR finivano in "Brasile".
-    # Fix: Belgio usa la convenzione yfinance corretta (.BB per Euronext Bruxelles),
-    # Brasile (B3 São Paulo) usa .SA, non .BR.
     suffix_map = {
         ".MI": "Italia", ".DE": "Germania", ".PA": "Francia", ".L": "Regno Unito",
         ".AS": "Olanda", ".BB": "Belgio", ".LS": "Portogallo", ".MC": "Spagna",
@@ -2100,9 +2089,11 @@ def compute_iq_score(row: pd.Series, timing_score: int, qm: Dict[str, Any], risk
         "emoji": verdict['Emoji']
     }
 
-# 6.2 Sentiment reale con FinBERT e feed RSS Yahoo Finance
+# 6.2 Sentiment reale con FinBERT (opzionale)
 @st.cache_resource
 def load_finbert():
+    if not TRANSFORMERS_AVAILABLE:
+        return None, None
     try:
         tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
         model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
@@ -2122,10 +2113,10 @@ def analyze_sentiment_finbert(text: str, tokenizer, model) -> Tuple[str, float]:
     pred_label = label_map[np.argmax(scores)]
     return pred_label, float(max(scores))
 
-# FIX BUG 12: aggiunto @st.cache_data per evitare chiamate HTTP + inferenza FinBERT
-# ad ogni rendering del tab Verdetto (operazione lenta: ~2-5 sec per ticker)
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_combined_sentiment(ticker: str) -> float:
+    if not TRANSFORMERS_AVAILABLE:
+        return 0.5
     try:
         rss_url = f"http://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
         feed = feedparser.parse(rss_url)
@@ -2176,9 +2167,6 @@ class RsiMeanReversionStrategy(Strategy):
     def init(self):
         close = self.data.Close
         rsi_period = self.rsi_period
-        # FIX BUG 9: self.I() si aspetta una funzione che restituisce l'INTERA SERIE,
-        # non solo l'ultimo valore. L'implementazione originale con .iloc[-1] produceva
-        # uno scalare, causando errori interni in backtesting.py.
         if ta is not None:
             def _rsi_series(x):
                 s = pd.Series(x)
@@ -2221,22 +2209,19 @@ def run_backtest(ticker: str, strategy_name: str, cash: float = 10000) -> Dict[s
     else:
         return {"error": "Strategia sconosciuta"}
     results = bt.run()
+    # CORREZIONE: uso .get() per evitare KeyError
     return {
-        "equity_final": results['Equity Final [$]'],
-        "return_pct": results['Return [%]'],
-        "sharpe": results['Sharpe Ratio'],
-        "max_dd_pct": results['Max Drawdown [%]'],
-        "win_rate": results['Win Rate [%]'],
-        "total_trades": results['# Trades'],
+        "equity_final": results.get('Equity Final [$]', 0.0),
+        "return_pct": results.get('Return [%]', 0.0),
+        "sharpe": results.get('Sharpe Ratio', 0.0),
+        "max_dd_pct": results.get('Max Drawdown [%]', 0.0),
+        "win_rate": results.get('Win Rate [%]', 0.0),
+        "total_trades": results.get('# Trades', 0),
         "strategy": strategy_name
     }
 
-# ── FIX BUG 1: max_sharpe_weights e compute_cadr non erano definite nel file ──
-# Queste funzioni venivano chiamate nella sezione Ottimizzatore portafoglio
-# causando NameError immediato al click del bottone.
-
+# Ottimizzazione portafoglio (Markowitz)
 def max_sharpe_weights(mean_ret: np.ndarray, cov: np.ndarray, risk_free_rate: float = 0.04) -> np.ndarray:
-    """Calcola i pesi del portafoglio a massimo Sharpe Ratio via SciPy minimize."""
     n = len(mean_ret)
     def neg_sharpe(w: np.ndarray) -> float:
         port_ret = float(np.dot(w, mean_ret)) * TRADING_DAYS_YEAR
@@ -2258,7 +2243,6 @@ def max_sharpe_weights(mean_ret: np.ndarray, cov: np.ndarray, risk_free_rate: fl
     return x0
 
 def compute_cadr(df_rets: pd.DataFrame, weights: np.ndarray) -> Dict[str, float]:
-    """Contributo al Rischio (Component ADR) di ciascun asset nel portafoglio."""
     cov = df_rets.cov().values * TRADING_DAYS_YEAR
     port_vol = float(np.sqrt(weights @ cov @ weights))
     if port_vol <= 0:
@@ -2266,8 +2250,6 @@ def compute_cadr(df_rets: pd.DataFrame, weights: np.ndarray) -> Dict[str, float]
     marginal = cov @ weights
     cadr = {col: float(w * m / port_vol) for col, w, m in zip(df_rets.columns, weights, marginal)}
     return cadr
-
-# ── Fine fix BUG 1 ──
 
 # 6.4 Stock Screener S&P 500
 @st.cache_data(ttl=86400)
@@ -2284,7 +2266,6 @@ def screen_stocks(filters: Dict[str, Any]) -> pd.DataFrame:
     for t in tickers:
         try:
             info = yf.Ticker(t).info
-            # FIX BUG 13: rate limiting per evitare blocchi da yfinance (429 Too Many Requests)
             time.sleep(0.25)
             market_cap = info.get('marketCap', 0)
             if filters.get('min_mcap') and market_cap < filters['min_mcap'] * 1e9:
@@ -2310,7 +2291,6 @@ def screen_stocks(filters: Dict[str, Any]) -> pd.DataFrame:
                 'PEG': peg,
                 'FCF Yield %': round(fcf_yield * 100, 2) if fcf_yield else None
             })
-        # FIX BUG 14: bare except → except Exception (non intrappola KeyboardInterrupt/SystemExit)
         except Exception as e:
             logger.debug(f"Screen_stocks: ticker {t} saltato — {e}")
             continue
@@ -2329,12 +2309,6 @@ def get_option_chain(ticker: str):
         return None
 
 def calculate_option_greeks(chain_df: pd.DataFrame, underlying_price: float, option_type: str = 'call') -> pd.DataFrame:
-    """
-    Calcola il Delta semplificato per call o put.
-    FIX BUG 15: la versione precedente usava row.get('type') che non esiste nei
-    DataFrame di yfinance (calls e puts sono già DataFrames separati).
-    Ora si passa option_type='call' o 'put' come parametro.
-    """
     chain_df = chain_df.copy()
     chain_df['Delta'] = np.nan
     if underlying_price <= 0:
@@ -2346,10 +2320,8 @@ def calculate_option_greeks(chain_df: pd.DataFrame, underlying_price: float, opt
             continue
         moneyness = (underlying_price - strike) / underlying_price
         if is_call:
-            # Delta call: da 0 (OTM profondo) a 1 (ITM profondo), centrato a 0.5 ATM
             chain_df.at[i, 'Delta'] = float(np.clip(0.5 + moneyness, 0.0, 1.0))
         else:
-            # Delta put: da -1 (ITM profondo) a 0 (OTM profondo), centrato a -0.5 ATM
             chain_df.at[i, 'Delta'] = float(np.clip(-0.5 + moneyness, -1.0, 0.0))
     return chain_df
 
@@ -2454,14 +2426,13 @@ def render_quant_tab(row, ticker, standalone_raw_data):
         smart = compute_smart_quant_score(row, score_q, qm, risk, weights=smart_w)
         st.metric("Smart Quant Score", f"{smart['SmartScore']:.1f}/100")
         st.caption(f"Pesi attivi: F={smart_w['F']:.2f} | T={smart_w['T']:.2f} | Q={smart_w['Q']:.2f}")
-        # ML Prediction (opzionale) - CORRETTO: passa df_tech
+        # ML Prediction (opzionale) - CORRETTO
         with st.expander("🤖 Previsione Trend ML (5 giorni)"):
             if st.button("🔮 Prevedi trend", key=f"ml_pred_{ticker}"):
                 if ML_PREDICTOR_AVAILABLE and predict_trend is not None:
                     try:
                         if df_tech is not None and not df_tech.empty:
                             pred = predict_trend(df_tech)
-                            # Visualizza il risultato in modo leggibile
                             if isinstance(pred, dict):
                                 prob = pred.get('probability_up', 0.5) * 100
                                 signal = pred.get('signal', 'N/D')
@@ -2852,14 +2823,13 @@ def render_portafoglio_tab(ui):
                     if st.button("📄 Genera report AI", key="generate_ai_report_btn"):
                         with st.spinner("Generazione report in corso..."):
                             macro = get_macro_indicators()
-                            # CORREZIONE BUG 2: creazione corretta di _row_data usando attributi esistenti di FundamentalMetrics
                             iq_scores: Dict[str, float] = {}
                             for _t in weights_pct.keys():
                                 try:
                                     _raw = get_fundamental_data(_t)
                                     _met = calculate_fundamental_metrics(_raw) if _raw else None
                                     if _met is not None:
-                                        # Usiamo solo attributi definiti nella classe FundamentalMetrics
+                                        # CORREZIONE: usa solo attributi esistenti
                                         _row_data = {
                                             'Ticker': _t,
                                             'ROIC': _met.roic,
@@ -2944,13 +2914,11 @@ def render_options_tab(ticker):
     st.subheader("Call Options")
     calls = chain.calls
     if price:
-        # FIX BUG 15 (call site): passato option_type='call' esplicitamente
         calls = calculate_option_greeks(calls, price, option_type='call')
     st.dataframe(calls[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'Delta']], width='stretch')
     st.subheader("Put Options")
     puts = chain.puts
     if price:
-        # FIX BUG 15 (call site): passato option_type='put' esplicitamente
         puts = calculate_option_greeks(puts, price, option_type='put')
     st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'Delta']], width='stretch')
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
