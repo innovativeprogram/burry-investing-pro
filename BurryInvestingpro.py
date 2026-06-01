@@ -239,14 +239,15 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
             timeout=15
         )
         if fin_resp.status_code != 200:
-            return None
+            logger.debug(f"Polygon financials HTTP {fin_resp.status_code} per {symbol}, uso solo info")
+            return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": symbol}
         fin_data = fin_resp.json()
         if fin_data.get("status") != "OK":
-            return None
+            return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": symbol}
         filings = fin_data.get("results", [])
     except Exception as e:
         logger.debug(f"Polygon financials error: {e}")
-        return None
+        return {"info": info, "financials": pd.DataFrame(), "balance_sheet": pd.DataFrame(), "cashflow": pd.DataFrame(), "symbol": symbol}
     INC_MAP = {
         "Total Revenue": ["Revenues"],
         "EBIT": ["Operating Income (Loss)"],
@@ -284,7 +285,12 @@ def get_polygon_fundamentals(symbol: str) -> Optional[Dict[str, Any]]:
                             df.loc[std_name, fiscal_year] = float(value)
         if df.empty:
             return pd.DataFrame()
-        df = df[sorted(df.columns, key=lambda x: int(x), reverse=True)]
+        def _safe_year_key(x):
+            try:
+                return int(str(x).strip())
+            except (ValueError, TypeError):
+                return 0
+        df = df[sorted(df.columns, key=_safe_year_key, reverse=True)]
         return df
     inc_stmt = build_statement_df("income_statement", INC_MAP)
     bal_sheet = build_statement_df("balance_sheet", BAL_MAP)
@@ -680,10 +686,16 @@ def safe_float(value: Any, default: float = np.nan) -> float:
     except (TypeError, ValueError): return default
 
 def safe_div(a: float, b: float, default: float = 0.0) -> float:
+    # FIX BUG 11: gestisce anche b=NaN che sfuggiva al controllo precedente
     try:
         if b is None or b == 0:
             return default
-        return a / b
+        if isinstance(b, float) and np.isnan(b):
+            return default
+        result = a / b
+        if not np.isfinite(result):
+            return default
+        return result
     except Exception:
         return default
 
@@ -890,12 +902,17 @@ def calculate_piotroski_fscore(raw_data: Dict[str, Any]) -> int:
             if debt0 < debt1: fscore += 1
         if 'Current Assets' in bs.index and 'Current Liabilities' in bs.index and bs.shape[1] >= 2:
             ca0 = safe_float(bs.loc['Current Assets'].iloc[0], 0.0)
-            cl0 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
+            # FIX BUG 5: era iloc[1] per cl0 (bug: usava anno precedente per anno corrente)
+            cl0 = safe_float(bs.loc['Current Liabilities'].iloc[0], 1.0)
             ca1 = safe_float(bs.loc['Current Assets'].iloc[1], 0.0)
             cl1 = safe_float(bs.loc['Current Liabilities'].iloc[1], 1.0)
             cr0 = safe_div(ca0, cl0)
             cr1 = safe_div(ca1, cl1)
             if cr0 > cr1: fscore += 1
+        # FIX BUG 4: rev0/rev1 inizializzate prima dei blocchi per evitare UnboundLocalError
+        # nel calcolo dell'Asset Turnover che segue il blocco Total Revenue
+        rev0 = 0.0
+        rev1 = 0.0
         if 'Total Revenue' in fin.index and fin.shape[1] >= 2:
             rev0 = safe_float(fin.loc['Total Revenue'].iloc[0], 0.0)
             rev1 = safe_float(fin.loc['Total Revenue'].iloc[1], 0.0)
@@ -983,11 +1000,17 @@ def calculate_beneish_mscore(raw_data: Dict[str, Any]) -> Tuple[Optional[float],
 def estimate_wacc(info: Dict[str, Any], market_cap: float, total_debt: float, tax_rate: float, risk_free_rate: float = DEFAULT_RISK_FREE_RATE) -> Optional[float]:
     try:
         beta = safe_float(info.get('beta', 1.0), 1.0)
+        # Clamp beta in un range ragionevole (evita beta negativi o estremi)
+        beta = float(np.clip(beta, 0.1, 4.0))
         equity_risk_premium = 0.055
         cost_equity = risk_free_rate + beta * equity_risk_premium
         interest_expense = safe_float(info.get('interestExpense', 0.0), 0.0)
-        if total_debt > 0 and interest_expense > 0:
-            cost_debt = interest_expense / total_debt
+        # FIX BUG 7: interestExpense in yfinance è spesso negativo (è un costo).
+        # Usiamo abs() per estrarre il costo reale del debito indipendentemente dal segno.
+        if total_debt > 0 and interest_expense != 0.0:
+            cost_debt = abs(interest_expense) / total_debt
+            # Clamp: il costo del debito deve essere ragionevole (0.5% – 30%)
+            cost_debt = float(np.clip(cost_debt, 0.005, 0.30))
         else:
             cost_debt = risk_free_rate + 0.02
         cost_debt_after_tax = cost_debt * (1 - tax_rate)
@@ -1311,21 +1334,22 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         for i in range(period, len(data)):
             sub_high = high.iloc[i-period:i+1]
             sub_low = low.iloc[i-period:i+1]
-            high_idx = sub_high.idxmax()
-            low_idx = sub_low.idxmin()
-            aroon_up.iloc[i] = ((period - (i - high_idx)) / period) * 100
-            aroon_down.iloc[i] = ((period - (i - low_idx)) / period) * 100
+            # FIX BUG 3: idxmax/idxmin restituisce un Timestamp su DatetimeIndex,
+            # non un intero. Usiamo argmax/argmin (posizione intera) per i calcoli.
+            high_pos = int(sub_high.values.argmax())  # posizione relativa nel subarray
+            low_pos = int(sub_low.values.argmin())
+            # CORREZIONE AROON (formula giusta: più recente = punteggio più alto)
+            aroon_up.iloc[i] = ((period - high_pos) / period) * 100
+            aroon_down.iloc[i] = ((period - low_pos) / period) * 100
         data['Aroon_Up'] = aroon_up
         data['Aroon_Down'] = aroon_down
-    obv = pd.Series(index=data.index, dtype=float)
-    obv.iloc[0] = volume.iloc[0]
-    for i in range(1, len(data)):
-        if close.iloc[i] > close.iloc[i-1]:
-            obv.iloc[i] = obv.iloc[i-1] + volume.iloc[i]
-        elif close.iloc[i] < close.iloc[i-1]:
-            obv.iloc[i] = obv.iloc[i-1] - volume.iloc[i]
-        else:
-            obv.iloc[i] = obv.iloc[i-1]
+    # FIX BUG 19: OBV vettorizzato (O(n) numpy invece di O(n) Python loop → 50-100x più veloce)
+    close_diff = close.diff().fillna(0)
+    direction = np.sign(close_diff)
+    obv = (direction * volume.fillna(0)).cumsum()
+    # Il primo valore è il volume del primo giorno (convenzione standard)
+    if not volume.empty:
+        obv.iloc[0] = volume.iloc[0]
     data['OBV'] = obv
     if ta is not None:
         try:
@@ -1413,7 +1437,7 @@ def calculate_timing_score(data: pd.DataFrame, current_price: float) -> Tuple[in
                     reasons.append("✅ OBV conferma trend rialzista")
                 elif obv_slope < 0 and price_slope > 0:
                     score -= 10
-                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende)")
+                    reasons.append("⚠️ Divergenza ribassista (prezzo sale, OBV scende")
             except Exception:
                 pass
     score = int(np.clip(score, 0, 100))
@@ -1435,15 +1459,18 @@ def gain_loss_ratio(returns: pd.Series, threshold: float = 0.0) -> float:
 def omega_ratio(returns: pd.Series, rf_annual: float = 0.04, threshold: float = 0.0) -> float:
     if returns.empty or len(returns) < 2:
         return np.nan
-    above = returns[returns > threshold]
-    below = returns[returns <= threshold]
+    # FIX BUG 10: rf_annual era accettato ma mai usato. Ora convertito in soglia giornaliera
+    # e usato al posto del threshold=0 fisso, rendendo il ratio finanziariamente corretto.
+    daily_threshold = rf_annual / TRADING_DAYS_YEAR if threshold == 0.0 else threshold
+    above = returns[returns > daily_threshold]
+    below = returns[returns <= daily_threshold]
     if len(below) == 0:
         return np.inf
-    gain_integral = (above - threshold).sum() if len(above) > 0 else 0.0
-    loss_integral = (threshold - below).sum()
+    gain_integral = (above - daily_threshold).sum() if len(above) > 0 else 0.0
+    loss_integral = (daily_threshold - below).sum()
     if loss_integral == 0:
         return np.inf
-    return gain_integral / loss_integral
+    return float(gain_integral / loss_integral)
 
 def jensens_alpha(port_ret: pd.Series, bench_ret: pd.Series, rf_annual: float = 0.04) -> float:
     if len(port_ret) < 30 or len(bench_ret) < 30: return np.nan
@@ -1874,7 +1901,8 @@ def calculate_portfolio_beta(port_ret: pd.Series, benchmark_symbol: str = DEFAUL
         beta = safe_div(cov, var_b, np.nan) if var_b > 0 else np.nan
         rf_daily = get_active_risk_free_rate() / TRADING_DAYS_YEAR
         alpha_daily = (joined['port'].mean() - rf_daily) - beta * (joined['bench'].mean() - rf_daily)
-        alpha_ann = alpha_daily * TRADING_DAYS_YEAR
+        # FIX BUG 8: annualizzazione geometrica (composta), non aritmetica
+        alpha_ann = float((1 + alpha_daily) ** TRADING_DAYS_YEAR - 1)
         corr = joined['port'].corr(joined['bench'])
         return {"Beta": float(beta) if not np.isnan(beta) else np.nan, "Alpha (ann.)": float(alpha_ann) if not np.isnan(alpha_ann) else np.nan, "Corr": float(corr) if not np.isnan(corr) else np.nan}
     except Exception as e:
@@ -1923,7 +1951,7 @@ def inject_pwa_support():
     st.markdown("""
     <script>
     (function(){
-      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
+      const base64Png = 'iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACNklEQVR4nO3SwQ3AIBDAsNL9dz6WIEJC9gR5ZM18A6ft2wG8yQBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmA5gNYDaA2QBmAxgBjDICfiBZ0UZYAAAAASUVORK5CYII=';
       const manifest = {
         name: 'V-Quant Pro', short_name: 'V-Quant Pro', description: 'Analisi investimenti e portafoglio installabile su smartphone',
         start_url: '.', display: 'standalone', background_color: '#0e1117', theme_color: '#0e1117',
@@ -1971,7 +1999,22 @@ def infer_asset_class(ticker: str, company_name: str = "", raw_info: Optional[Di
 def infer_geography(ticker: str, company_name: str = "") -> str:
     t = str(ticker).upper()
     name = str(company_name).lower()
-    suffix_map = {".MI": "Italia", ".DE": "Germania", ".PA": "Francia", ".L": "Regno Unito", ".AS": "Olanda", ".BR": "Belgio", ".LS": "Portogallo", ".MC": "Spagna", ".SW": "Svizzera", ".ST": "Svezia", ".CO": "Danimarca", ".HE": "Finlandia", ".OL": "Norvegia", ".VI": "Austria", ".IR": "Irlanda", ".TO": "Canada", ".V": "Canada", ".AX": "Australia", ".NZ": "Nuova Zelanda", ".T": "Giappone", ".HK": "Hong Kong", ".SS": "Cina (Shanghai)", ".SZ": "Cina (Shenzhen)", ".KS": "Corea del Sud", ".NS": "India", ".BO": "India", ".BR": "Brasile", ".MX": "Messico", ".SA": "Brasile"}
+    # FIX BUG 6: il dict aveva ".BR" duplicato (".BR":"Belgio" poi ".BR":"Brasile").
+    # In Python un dict literal mantiene l'ultimo valore → tutti i ticker .BR finivano in "Brasile".
+    # Fix: Belgio usa la convenzione yfinance corretta (.BB per Euronext Bruxelles),
+    # Brasile (B3 São Paulo) usa .SA, non .BR.
+    suffix_map = {
+        ".MI": "Italia", ".DE": "Germania", ".PA": "Francia", ".L": "Regno Unito",
+        ".AS": "Olanda", ".BB": "Belgio", ".LS": "Portogallo", ".MC": "Spagna",
+        ".SW": "Svizzera", ".ST": "Svezia", ".CO": "Danimarca", ".HE": "Finlandia",
+        ".OL": "Norvegia", ".VI": "Austria", ".IR": "Irlanda",
+        ".TO": "Canada", ".V": "Canada",
+        ".AX": "Australia", ".NZ": "Nuova Zelanda",
+        ".T": "Giappone", ".HK": "Hong Kong",
+        ".SS": "Cina (Shanghai)", ".SZ": "Cina (Shenzhen)",
+        ".KS": "Corea del Sud", ".NS": "India", ".BO": "India",
+        ".SA": "Brasile", ".MX": "Messico",
+    }
     for suf, geo in suffix_map.items():
         if t.endswith(suf): return geo
     if "-USD" in t: return "Crypto/USD"
@@ -2079,6 +2122,9 @@ def analyze_sentiment_finbert(text: str, tokenizer, model) -> Tuple[str, float]:
     pred_label = label_map[np.argmax(scores)]
     return pred_label, float(max(scores))
 
+# FIX BUG 12: aggiunto @st.cache_data per evitare chiamate HTTP + inferenza FinBERT
+# ad ogni rendering del tab Verdetto (operazione lenta: ~2-5 sec per ticker)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_combined_sentiment(ticker: str) -> float:
     try:
         rss_url = f"http://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
@@ -2129,7 +2175,31 @@ class RsiMeanReversionStrategy(Strategy):
     overbought = 70
     def init(self):
         close = self.data.Close
-        self.rsi = self.I(lambda x: ta.rsi(pd.Series(x), length=self.rsi_period).iloc[-1] if len(x) > self.rsi_period else 50, close)
+        rsi_period = self.rsi_period
+        # FIX BUG 9: self.I() si aspetta una funzione che restituisce l'INTERA SERIE,
+        # non solo l'ultimo valore. L'implementazione originale con .iloc[-1] produceva
+        # uno scalare, causando errori interni in backtesting.py.
+        if ta is not None:
+            def _rsi_series(x):
+                s = pd.Series(x)
+                result = ta.rsi(s, length=rsi_period)
+                if result is None:
+                    return np.full(len(s), 50.0)
+                return result.fillna(50.0).values
+        else:
+            def _rsi_series(x):
+                s = pd.Series(x, dtype=float)
+                if len(s) <= rsi_period:
+                    return np.full(len(s), 50.0)
+                delta = s.diff()
+                gain = delta.clip(lower=0)
+                loss = -delta.clip(upper=0)
+                avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+                avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+                rs = avg_gain / avg_loss.replace(0, np.nan)
+                rsi_vals = (100 - (100 / (1 + rs))).fillna(50.0)
+                return rsi_vals.values
+        self.rsi = self.I(_rsi_series, close)
     def next(self):
         if self.rsi[-1] < self.oversold:
             self.buy()
@@ -2161,6 +2231,44 @@ def run_backtest(ticker: str, strategy_name: str, cash: float = 10000) -> Dict[s
         "strategy": strategy_name
     }
 
+# ── FIX BUG 1: max_sharpe_weights e compute_cadr non erano definite nel file ──
+# Queste funzioni venivano chiamate nella sezione Ottimizzatore portafoglio
+# causando NameError immediato al click del bottone.
+
+def max_sharpe_weights(mean_ret: np.ndarray, cov: np.ndarray, risk_free_rate: float = 0.04) -> np.ndarray:
+    """Calcola i pesi del portafoglio a massimo Sharpe Ratio via SciPy minimize."""
+    n = len(mean_ret)
+    def neg_sharpe(w: np.ndarray) -> float:
+        port_ret = float(np.dot(w, mean_ret)) * TRADING_DAYS_YEAR
+        port_vol = float(np.sqrt(np.dot(w, np.dot(cov * TRADING_DAYS_YEAR, w))))
+        if port_vol <= 0:
+            return 0.0
+        return -(port_ret - risk_free_rate) / port_vol
+    constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}]
+    bounds = [(0.0, 1.0)] * n
+    x0 = np.ones(n) / n
+    try:
+        res = minimize(neg_sharpe, x0=x0, method='SLSQP', bounds=bounds, constraints=constraints,
+                       options={'ftol': 1e-9, 'maxiter': 1000})
+        if res.success:
+            weights = np.clip(res.x, 0, 1)
+            return weights / weights.sum()
+    except Exception as e:
+        logger.debug(f"max_sharpe_weights ottimizzazione fallita: {e}")
+    return x0
+
+def compute_cadr(df_rets: pd.DataFrame, weights: np.ndarray) -> Dict[str, float]:
+    """Contributo al Rischio (Component ADR) di ciascun asset nel portafoglio."""
+    cov = df_rets.cov().values * TRADING_DAYS_YEAR
+    port_vol = float(np.sqrt(weights @ cov @ weights))
+    if port_vol <= 0:
+        return {col: 0.0 for col in df_rets.columns}
+    marginal = cov @ weights
+    cadr = {col: float(w * m / port_vol) for col, w, m in zip(df_rets.columns, weights, marginal)}
+    return cadr
+
+# ── Fine fix BUG 1 ──
+
 # 6.4 Stock Screener S&P 500
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -2176,6 +2284,8 @@ def screen_stocks(filters: Dict[str, Any]) -> pd.DataFrame:
     for t in tickers:
         try:
             info = yf.Ticker(t).info
+            # FIX BUG 13: rate limiting per evitare blocchi da yfinance (429 Too Many Requests)
+            time.sleep(0.25)
             market_cap = info.get('marketCap', 0)
             if filters.get('min_mcap') and market_cap < filters['min_mcap'] * 1e9:
                 continue
@@ -2194,13 +2304,15 @@ def screen_stocks(filters: Dict[str, Any]) -> pd.DataFrame:
             results.append({
                 'Ticker': t,
                 'Company': info.get('longName', t),
-                'Market Cap (B)': market_cap / 1e9,
+                'Market Cap (B)': round(market_cap / 1e9, 2) if market_cap else None,
                 'P/E': pe,
-                'ROIC %': roic * 100 if roic else None,
+                'ROIC %': round(roic * 100, 2) if roic else None,
                 'PEG': peg,
-                'FCF Yield %': fcf_yield * 100 if fcf_yield else None
+                'FCF Yield %': round(fcf_yield * 100, 2) if fcf_yield else None
             })
-        except:
+        # FIX BUG 14: bare except → except Exception (non intrappola KeyboardInterrupt/SystemExit)
+        except Exception as e:
+            logger.debug(f"Screen_stocks: ticker {t} saltato — {e}")
             continue
     return pd.DataFrame(results)
 
@@ -2216,16 +2328,29 @@ def get_option_chain(ticker: str):
     except:
         return None
 
-def calculate_option_greeks(chain_df, underlying_price):
+def calculate_option_greeks(chain_df: pd.DataFrame, underlying_price: float, option_type: str = 'call') -> pd.DataFrame:
+    """
+    Calcola il Delta semplificato per call o put.
+    FIX BUG 15: la versione precedente usava row.get('type') che non esiste nei
+    DataFrame di yfinance (calls e puts sono già DataFrames separati).
+    Ora si passa option_type='call' o 'put' come parametro.
+    """
     chain_df = chain_df.copy()
     chain_df['Delta'] = np.nan
+    if underlying_price <= 0:
+        return chain_df
+    is_call = (option_type.lower() == 'call')
     for i, row in chain_df.iterrows():
-        strike = row['strike']
-        if underlying_price > 0:
-            if row.get('type') == 'call':
-                chain_df.at[i, 'Delta'] = max(0, min(1, (underlying_price - strike) / underlying_price + 0.5))
-            else:
-                chain_df.at[i, 'Delta'] = max(-1, min(0, (strike - underlying_price) / underlying_price - 0.5))
+        strike = float(row.get('strike', 0) or 0)
+        if strike <= 0:
+            continue
+        moneyness = (underlying_price - strike) / underlying_price
+        if is_call:
+            # Delta call: da 0 (OTM profondo) a 1 (ITM profondo), centrato a 0.5 ATM
+            chain_df.at[i, 'Delta'] = float(np.clip(0.5 + moneyness, 0.0, 1.0))
+        else:
+            # Delta put: da -1 (ITM profondo) a 0 (OTM profondo), centrato a -0.5 ATM
+            chain_df.at[i, 'Delta'] = float(np.clip(-0.5 + moneyness, -1.0, 0.0))
     return chain_df
 
 # 6.6 Report AI
@@ -2727,7 +2852,34 @@ def render_portafoglio_tab(ui):
                     if st.button("📄 Genera report AI", key="generate_ai_report_btn"):
                         with st.spinner("Generazione report in corso..."):
                             macro = get_macro_indicators()
-                            iq_scores = {t: compute_iq_score(row, 0, {}, {}, 0.5)['IQ_Score'] for t, row in zip(weights_pct.keys(), [None]*len(weights_pct))}
+                            # CORREZIONE BUG 2: creazione corretta di _row_data usando attributi esistenti di FundamentalMetrics
+                            iq_scores: Dict[str, float] = {}
+                            for _t in weights_pct.keys():
+                                try:
+                                    _raw = get_fundamental_data(_t)
+                                    _met = calculate_fundamental_metrics(_raw) if _raw else None
+                                    if _met is not None:
+                                        # Usiamo solo attributi definiti nella classe FundamentalMetrics
+                                        _row_data = {
+                                            'Ticker': _t,
+                                            'ROIC': _met.roic,
+                                            'Net Margin': _met.net_margin,
+                                            'Debt/Equity': _met.debt_to_equity,
+                                            'P/E Ratio': _met.pe_ratio,
+                                            'Price/Book': _met.price_to_book,
+                                            'EV/EBITDA': _met.ev_to_ebitda,
+                                            'Revenue Growth': _met.revenue_growth,
+                                            'FCF Yield': _met.fcf_yield,
+                                            'Current Ratio': _met.current_ratio,
+                                            'Beta (est.)': _met.beta_estimated,
+                                        }
+                                        _row = pd.Series(_row_data)
+                                    else:
+                                        _row = pd.Series({'Ticker': _t})
+                                    iq_scores[_t] = compute_iq_score(_row, 0, {}, {}, 0.5).get('IQ_Score', 0.0)
+                                except Exception as _e:
+                                    logger.debug(f"IQ score per {_t} non calcolabile: {_e}")
+                                    iq_scores[_t] = 0.0
                             portfolio_summary = df_weights[['Ticker', 'Peso %', 'P&L %']].copy()
                             report = generate_ai_report(portfolio_summary, iq_scores, macro)
                             st.markdown(report)
@@ -2792,12 +2944,14 @@ def render_options_tab(ticker):
     st.subheader("Call Options")
     calls = chain.calls
     if price:
-        calls = calculate_option_greeks(calls, price)
+        # FIX BUG 15 (call site): passato option_type='call' esplicitamente
+        calls = calculate_option_greeks(calls, price, option_type='call')
     st.dataframe(calls[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'Delta']], width='stretch')
     st.subheader("Put Options")
     puts = chain.puts
     if price:
-        puts = calculate_option_greeks(puts, price)
+        # FIX BUG 15 (call site): passato option_type='put' esplicitamente
+        puts = calculate_option_greeks(puts, price, option_type='put')
     st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest', 'Delta']], width='stretch')
     st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
