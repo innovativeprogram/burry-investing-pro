@@ -4,7 +4,7 @@ on:
   schedule:
     # Ogni 9 ore: 00:00, 09:00, 18:00 UTC
     - cron: '0 */9 * * *'
-  workflow_dispatch: # Permette di eseguirlo manualmente
+  workflow_dispatch:  # Permette esecuzione manuale
 
 jobs:
   keep_alive:
@@ -12,10 +12,10 @@ jobs:
     
     steps:
     - name: 📥 Checkout del repository
-      uses: actions/checkout@v4
-    
+      uses: actions/checkout@v5   # ✅ Versione compatibile con Node.js 24
+
     - name: 🐍 Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6   # ✅ Versione compatibile con Node.js 24
       with:
         python-version: '3.11'
     
