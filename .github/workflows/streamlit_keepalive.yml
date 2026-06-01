@@ -1,0 +1,29 @@
+name: Streamlit Keep-Alive con Playwright
+
+on:
+  schedule:
+    # Ogni 9 ore: 00:00, 09:00, 18:00 UTC
+    - cron: '0 */9 * * *'
+  workflow_dispatch: # Permette di eseguirlo manualmente
+
+jobs:
+  keep_alive:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout del repository
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: 📦 Installazione dipendenze
+      run: |
+        pip install playwright
+        playwright install chromium
+        playwright install-deps
+    
+    - name: 🚀 Esecuzione script keep_alive
+      run: python scripts/keep_alive.py
