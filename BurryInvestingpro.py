@@ -2960,7 +2960,7 @@ def get_multi_asset_data() -> Dict[str, Dict[str, Any]]:
 def render_apk_download_box() -> None:
     with st.sidebar.expander("📲 Download App Android (APK)", expanded=False):
         st.write("Scarica l'APK ufficiale di V-Quant Pro per installare l'app su Android.")
-        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/Vquantpro.apk", width='stretch')
+        st.link_button("📲 Scarica V-Quant Pro.apk", "https://github.com/innovativeprogram/V-QuantPro-relaases/releases/download/v1.0.0/VQuantPro_v1.0.0.APK", width='stretch')
         st.caption("Se Android blocca l'installazione, abilita temporaneamente le origini sconosciute.")
 
 def render_chi_siamo() -> None:
