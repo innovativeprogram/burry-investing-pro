@@ -1,3 +1,28 @@
-Copyright (c) 2026 Canio Tedesco.
-​All rights reserved.
-​Questo codice sorgente e i relativi asset sono di proprietà esclusiva dell'autore. È severamente vietata la riproduzione, distribuzione, modifica o vendita, parziale o totale, senza il consenso scritto del proprietario. Ogni utilizzo non autorizzato sarà perseguito a norma di legge.
+Copyright (c) 2026 [CANIO TEDESCO]
+
+Questa licenza definisce i termini per l'uso, la modifica e la distribuzione di questo software.
+
+1. **Visualizzazione e Fork**  
+   È permesso visualizzare, fare fork e clonare il repository per esaminare il codice.
+
+2. **Modifiche e Pull Request**  
+   È permesso modificare il codice esclusivamente allo scopo di proporre modifiche al progetto originale tramite Pull Request.  
+   Ogni modifica rimane di proprietà dell'autore originale, ma viene offerta al proprietario del progetto per un eventuale merge.
+
+3. **Uso personale e non commerciale**  
+   È consentito eseguire, testare e utilizzare il software per scopi personali e non commerciali.
+
+4. **Uso commerciale**  
+   Qualsiasi uso del software (in tutto o in parte) per attività che generano ricavi, direttamente o indirettamente, è severamente vietato senza un preventivo consenso scritto del licenziante.  
+   L'uso commerciale include, a titolo esemplificativo: hosting di servizi a pagamento, integrazione in prodotti venduti, utilizzo interno in aziende a fini professionali.  
+   Per ottenere una licenza commerciale, contatta [innovativeprogram@proton.me].
+
+5. **Distribuzione**  
+   Non è permesso distribuire copie del software, modificate o meno, a terzi se non tramite meccanismi ufficiali di GitHub (fork, PR).  
+   La pubblicazione di versioni modificate in altri repository o siti è vietata senza autorizzazione.
+
+6. **Esclusione di garanzia**  
+   Il software è fornito "cos com'è", senza alcuna garanzia.
+
+7. **Violazioni**  
+   La violazione di questi termini comporta la revoca immediata di qualsiasi permesso concesso.
